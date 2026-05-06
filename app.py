@@ -30,6 +30,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
 AUTH_USERNAME = os.environ.get("DASHBOARD_USERNAME", "admin")
 AUTH_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+SHORTCUT_API_KEY = os.environ.get("SHORTCUT_API_KEY", "")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = SECRET_KEY
@@ -119,7 +120,7 @@ if DATABASE_URL:
 def require_login() -> Optional[Any]:
     if request.path.startswith("/static/"):
         return None
-    if request.endpoint in ("login", "logout"):
+    if request.endpoint in ("login", "logout", "shortcut_add_task"):
         return None
     if not session.get("logged_in"):
         return redirect(url_for("login"))
@@ -1069,6 +1070,50 @@ def api_import_notes():
             results.append({"filename": fname, "ok": False, "error": str(e)})
     ok_count = sum(1 for r in results if r.get("ok"))
     return jsonify({"ok": True, "processed": ok_count, "total": len(results), "results": results})
+
+
+# --------------------------------------------------
+# SHORTCUT ENDPOINT (API key auth, no session required)
+# --------------------------------------------------
+
+@app.route("/api/shortcut/add-task", methods=["POST"])
+def shortcut_add_task():
+    if not SHORTCUT_API_KEY:
+        return jsonify({"ok": False, "error": "Shortcut API not configured"}), 503
+    if request.headers.get("X-API-Key", "") != SHORTCUT_API_KEY:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("text") or "").strip()
+    group = (data.get("group") or "").strip() or None
+    deadline_in = (data.get("deadline") or "").strip() or None
+    if not text:
+        return jsonify({"ok": False, "error": "text required"}), 400
+
+    tags = []
+    if group:
+        tags.append(f"@group:{group}")
+    if deadline_in:
+        tags.append(f"due {deadline_in}")
+    full_text = text + ((" " + " ".join(tags)) if tags else "")
+
+    deadline, deadline_raw = extract_deadline(full_text, context_year=datetime.now().year)
+    tid = _task_id("tasks.md", "free", full_text)
+
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO tasks
+                        (id, text, type, done, backburner, source_filename, section,
+                         group_name, source_date, deadline, deadline_raw)
+                    VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
+                            %s, %s, %s, %s)
+                    ON CONFLICT (id) DO NOTHING
+                """, (tid, full_text, group, date_cls.today(), deadline, deadline_raw))
+        return jsonify({"ok": True, "text": full_text})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # --------------------------------------------------
