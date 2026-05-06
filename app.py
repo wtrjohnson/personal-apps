@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date as date_cls, datetime, timedelta
@@ -938,7 +939,7 @@ def api_add_task():
     full_text = text + ((" " + " ".join(tags)) if tags else "")
 
     deadline, deadline_raw = extract_deadline(full_text, context_year=datetime.now().year)
-    tid = _task_id("tasks.md", "free", full_text)
+    tid = str(uuid.uuid4())
 
     try:
         with get_db() as conn:
@@ -949,7 +950,6 @@ def api_add_task():
                          group_name, source_date, deadline, deadline_raw)
                     VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
                             %s, %s, %s, %s)
-                    ON CONFLICT (id) DO NOTHING
                 """, (tid, full_text, group, date_cls.today(), deadline, deadline_raw))
         return jsonify({"ok": True, "text": full_text})
     except Exception as e:
@@ -1098,7 +1098,7 @@ def shortcut_add_task():
     full_text = text + ((" " + " ".join(tags)) if tags else "")
 
     deadline, deadline_raw = extract_deadline(full_text, context_year=datetime.now().year)
-    tid = _task_id("tasks.md", "free", full_text)
+    tid = str(uuid.uuid4())
 
     try:
         with get_db() as conn:
@@ -1109,7 +1109,6 @@ def shortcut_add_task():
                          group_name, source_date, deadline, deadline_raw)
                     VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
                             %s, %s, %s, %s)
-                    ON CONFLICT (id) DO NOTHING
                 """, (tid, full_text, group, date_cls.today(), deadline, deadline_raw))
         return jsonify({"ok": True, "text": full_text})
     except Exception as e:
