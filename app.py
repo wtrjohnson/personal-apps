@@ -1,66 +1,159 @@
 #!/usr/bin/env python3
-"""Notes Dashboard — Phases 1 & 2.
-
-Phase 1: browse/search meetings from ../meetings/, rendered markdown detail view.
-Phase 2: unified task view across all meetings + a tasks.md for free-form tasks,
-         with write-back (toggling a task checks it off in the source .md file).
-
-Source of truth remains the .md files. YAML front matter is re-derived from the
-body on every write so the two stay consistent.
-"""
+"""Notes Dashboard — Vercel + PostgreSQL edition."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
-import sys
-import threading
-from dataclasses import dataclass, field
-from datetime import date as date_cls, datetime
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import date as date_cls, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import frontmatter
 import markdown as md_lib
-import yaml
-from flask import Flask, jsonify, render_template, request, abort
+import psycopg2
+import psycopg2.extras
+from flask import (
+    Flask, abort, jsonify, redirect, render_template,
+    request, session, url_for,
+)
 
 # --------------------------------------------------
 # CONFIG
 # --------------------------------------------------
 
-DASHBOARD_DIR = Path(__file__).resolve().parent
-NOTES_ROOT = DASHBOARD_DIR.parent
-MEETINGS_DIR = NOTES_ROOT / "meetings"
-TASKS_FILE = NOTES_ROOT / "tasks.md"
-ALIASES_FILE = DASHBOARD_DIR / "groups.yaml"
-BACKBURNER_FILE = DASHBOARD_DIR / "backburner.yaml"
-COMPLETIONS_FILE = DASHBOARD_DIR / "completions.jsonl"
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
+AUTH_USERNAME = os.environ.get("DASHBOARD_USERNAME", "admin")
+AUTH_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 
-PORT = int(os.environ.get("DASHBOARD_PORT", "5050"))
-HOST = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+app = Flask(__name__, template_folder="templates", static_folder="static")
+app.secret_key = SECRET_KEY
 
-# Reuse the upstream parser so YAML regeneration stays in sync
-sys.path.insert(0, str(NOTES_ROOT))
-try:
-    from process_meeting_notes import extract_fields_and_tasks, process_file as _pm_process_file  # type: ignore
-except Exception as e:
-    print(f"[warn] Could not import process_meeting_notes: {e}")
-    extract_fields_and_tasks = None  # we'll fall back to our own parser below
-    _pm_process_file = None
+
+# --------------------------------------------------
+# DATABASE
+# --------------------------------------------------
+
+@contextmanager
+def get_db() -> Generator:
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_db() -> None:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS meetings (
+                    id TEXT PRIMARY KEY,
+                    filename TEXT NOT NULL,
+                    file_date DATE,
+                    raw_group TEXT DEFAULT '',
+                    canonical_group TEXT DEFAULT '',
+                    topic TEXT DEFAULT '',
+                    purpose JSONB DEFAULT '[]',
+                    outcome TEXT DEFAULT '',
+                    deadline TEXT DEFAULT '',
+                    attendees TEXT DEFAULT '',
+                    body TEXT DEFAULT '',
+                    body_html TEXT DEFAULT '',
+                    mtime DOUBLE PRECISION,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    text TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    done BOOLEAN DEFAULT FALSE,
+                    backburner BOOLEAN DEFAULT FALSE,
+                    meeting_id TEXT REFERENCES meetings(id) ON DELETE CASCADE,
+                    source_filename TEXT NOT NULL DEFAULT '',
+                    section TEXT NOT NULL DEFAULT '',
+                    group_name TEXT,
+                    source_date DATE,
+                    deadline TEXT,
+                    deadline_raw TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS groups_map (
+                    raw_name TEXT PRIMARY KEY,
+                    canonical_name TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS completions (
+                    id SERIAL PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    task_text TEXT,
+                    section TEXT,
+                    source_filename TEXT,
+                    done BOOLEAN DEFAULT TRUE,
+                    completed_date DATE DEFAULT CURRENT_DATE,
+                    completed_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+
+
+if DATABASE_URL:
+    try:
+        init_db()
+    except Exception as _e:
+        print(f"[db] init warning: {_e}")
+
+
+# --------------------------------------------------
+# AUTH
+# --------------------------------------------------
+
+@app.before_request
+def require_login() -> Optional[Any]:
+    if request.path.startswith("/static/"):
+        return None
+    if request.endpoint in ("login", "logout"):
+        return None
+    if not session.get("logged_in"):
+        return redirect(url_for("login"))
+    return None
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        if username == AUTH_USERNAME and password == AUTH_PASSWORD and AUTH_PASSWORD:
+            session["logged_in"] = True
+            session.permanent = True
+            return redirect(url_for("home"))
+        error = "Invalid credentials."
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 # --------------------------------------------------
 # DATA MODEL
 # --------------------------------------------------
 
-
 @dataclass
 class Meeting:
     id: str
     filename: str
-    path: str
     date: Optional[str]
     raw_group: str
     canonical_group: str
@@ -75,7 +168,7 @@ class Meeting:
     reminders_done: List[str]
     body: str
     body_html: str
-    mtime: float
+    mtime: Optional[float]
 
     def summary(self) -> Dict[str, Any]:
         return {
@@ -109,16 +202,16 @@ class Meeting:
 class Task:
     id: str
     text: str
-    type: str                 # "action" | "reminder" | "free"
+    type: str                   # "action" | "reminder" | "free"
     done: bool
     backburner: bool
-    source_filename: str      # e.g. "2026-04-13 - Rebekah One on One.md" or "tasks.md"
-    section: str              # "action_items" | "reminders" | "free"
-    meeting_id: Optional[str] # if from a meeting
-    group: Optional[str]      # canonical group (notes-derived) or free-form tag
+    source_filename: str
+    section: str
+    meeting_id: Optional[str]
+    group: Optional[str]
     source_date: Optional[str]
-    deadline: Optional[str]   # parsed YYYY-MM-DD if any
-    deadline_raw: Optional[str]  # the raw text that was parsed out
+    deadline: Optional[str]
+    deadline_raw: Optional[str]
     overdue: bool
 
     def as_dict(self) -> Dict[str, Any]:
@@ -140,124 +233,25 @@ class Task:
 
 
 # --------------------------------------------------
-# BACKBURNER STORE (task IDs hidden from main view)
-# --------------------------------------------------
-
-
-def load_backburner() -> set:
-    if not BACKBURNER_FILE.exists():
-        return set()
-    try:
-        data = yaml.safe_load(BACKBURNER_FILE.read_text(encoding="utf-8")) or {}
-        items = data.get("backburner", []) or []
-        return {str(x) for x in items}
-    except Exception as e:
-        print(f"[backburner] load error: {e}")
-        return set()
-
-
-def save_backburner(ids: set) -> None:
-    data = {"backburner": sorted(ids)}
-    BACKBURNER_FILE.write_text(
-        "# Task IDs on backburner. Managed by the dashboard — no need to edit by hand.\n"
-        "# Remove a line (or clear via the UI) to bring a task back to the main view.\n\n"
-        + yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
-    )
-
-
-def toggle_backburner(task_id: str, on: bool) -> bool:
-    ids = load_backburner()
-    if on:
-        if task_id in ids:
-            return True
-        ids.add(task_id)
-    else:
-        if task_id not in ids:
-            return True
-        ids.discard(task_id)
-    save_backburner(ids)
-    return True
-
-
-# --------------------------------------------------
-# COMPLETION LOG (timestamped task completion events)
-# --------------------------------------------------
-
-import json
-from datetime import timedelta
-
-
-def log_completion(task_id: str, text: str, section: str, filename: str, done: bool) -> None:
-    """Append a timestamped completion event. done=True when a task was marked done;
-    done=False when un-marked (so the chart can subtract)."""
-    try:
-        entry = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "date": date_cls.today().isoformat(),
-            "id": task_id,
-            "text": text[:200],
-            "section": section,
-            "filename": filename,
-            "done": bool(done),
-        }
-        with COMPLETIONS_FILE.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[completions] log error: {e}")
-
-
-def load_completions() -> List[Dict[str, Any]]:
-    if not COMPLETIONS_FILE.exists():
-        return []
-    out = []
-    try:
-        for line in COMPLETIONS_FILE.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except Exception:
-                continue
-    except Exception as e:
-        print(f"[completions] load error: {e}")
-    return out
-
-
-def completions_per_day(days: int = 30) -> List[Dict[str, Any]]:
-    """Return a list of {date, count} for the last `days` days (oldest → newest).
-    Net count per day: +1 for done events, -1 for un-done events. Never negative."""
-    today = date_cls.today()
-    window = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
-    buckets: Dict[str, int] = {d.isoformat(): 0 for d in window}
-    for entry in load_completions():
-        d = entry.get("date")
-        if not d or d not in buckets:
-            continue
-        buckets[d] += 1 if entry.get("done") else -1
-    return [{"date": d, "count": max(0, n)} for d, n in buckets.items()]
-
-
-# --------------------------------------------------
 # DEADLINE PARSING
 # --------------------------------------------------
 
 _DATE_WORD = r"(?:deadline|due|by)"
 
 DEADLINE_PATTERNS = [
-    # "deadline 2/03/2026", "due: 2026-03-15", "by 3/15/26"
-    re.compile(rf"{_DATE_WORD}\s*:?\s*(\d{{4}}-\d{{1,2}}-\d{{1,2}}|\d{{1,2}}[/-]\d{{1,2}}(?:[/-]\d{{2,4}})?)",
-               re.IGNORECASE),
-    # "(deadline 1/31)" — parenthetical with no year
-    re.compile(rf"\(\s*{_DATE_WORD}\s+(\d{{1,2}}[/-]\d{{1,2}}(?:[/-]\d{{2,4}})?)\s*\)", re.IGNORECASE),
+    re.compile(
+        rf"{_DATE_WORD}\s*:?\s*(\d{{4}}-\d{{1,2}}-\d{{1,2}}|\d{{1,2}}[/-]\d{{1,2}}(?:[/-]\d{{2,4}})?)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\(\s*{_DATE_WORD}\s+(\d{{1,2}}[/-]\d{{1,2}}(?:[/-]\d{{2,4}})?)\s*\)",
+        re.IGNORECASE,
+    ),
 ]
 
 
 def _normalize_date(raw: str, context_year: Optional[int] = None) -> Optional[str]:
-    """Normalize a parsed date fragment to YYYY-MM-DD. Returns None if unparseable."""
     raw = raw.strip().rstrip(").,;:")
-    # YYYY-MM-DD or YYYY/MM/DD
     m = re.fullmatch(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", raw)
     if m:
         y, mo, d = (int(x) for x in m.groups())
@@ -267,20 +261,18 @@ def _normalize_date(raw: str, context_year: Optional[int] = None) -> Optional[st
             return None
         mo, d, y_raw = m.group(1), m.group(2), m.group(3)
         mo, d = int(mo), int(d)
-        if y_raw is None:
-            y = context_year or datetime.now().year
-        else:
-            y = int(y_raw)
-            if y < 100:
-                y += 2000
+        y = int(y_raw) if y_raw else (context_year or datetime.now().year)
+        if y < 100:
+            y += 2000
     try:
         return date_cls(y, mo, d).isoformat()
     except Exception:
         return None
 
 
-def extract_deadline(text: str, context_year: Optional[int] = None) -> Tuple[Optional[str], Optional[str]]:
-    """Return (YYYY-MM-DD, raw_fragment_text) or (None, None)."""
+def extract_deadline(
+    text: str, context_year: Optional[int] = None
+) -> Tuple[Optional[str], Optional[str]]:
     for pat in DEADLINE_PATTERNS:
         m = pat.search(text)
         if m:
@@ -291,212 +283,12 @@ def extract_deadline(text: str, context_year: Optional[int] = None) -> Tuple[Opt
 
 
 # --------------------------------------------------
-# INDEX
+# HELPERS
 # --------------------------------------------------
 
-
-class MeetingIndex:
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._meetings: Dict[str, Meeting] = {}
-        self._aliases: Dict[str, str] = {}
-        self.load_aliases()
-        self.rebuild()
-
-    # --- aliases --------------------------------------------------
-
-    def load_aliases(self) -> None:
-        if not ALIASES_FILE.exists():
-            self._aliases = {}
-            return
-        try:
-            data = yaml.safe_load(ALIASES_FILE.read_text(encoding="utf-8")) or {}
-            raw = data.get("aliases", {}) or {}
-            self._aliases = {
-                str(k).strip().lower(): str(v).strip()
-                for k, v in raw.items()
-                if v
-            }
-        except Exception as e:
-            print(f"[index] Failed to load aliases: {e}")
-            self._aliases = {}
-
-    def canonical(self, raw_group: str) -> str:
-        if not raw_group:
-            return "Unknown"
-        return self._aliases.get(raw_group.strip().lower(), raw_group.strip())
-
-    # --- rebuild --------------------------------------------------
-
-    def rebuild(self) -> None:
-        with self._lock:
-            self.load_aliases()
-            meetings: Dict[str, Meeting] = {}
-            if MEETINGS_DIR.exists():
-                for path in sorted(MEETINGS_DIR.glob("*.md")):
-                    try:
-                        m = self._parse(path)
-                        meetings[m.id] = m
-                    except Exception as e:
-                        print(f"[index] Skipping {path.name}: {e}")
-            self._meetings = meetings
-            print(f"[index] Loaded {len(meetings)} meetings")
-
-    def _parse(self, path: Path) -> Meeting:
-        raw = path.read_text(encoding="utf-8")
-        post = frontmatter.loads(raw)
-        meta = post.metadata or {}
-
-        def s(key: str, default: str = "") -> str:
-            val = meta.get(key, default)
-            if val is None:
-                return default
-            return str(val).strip()
-
-        def sl(key: str) -> List[str]:
-            val = meta.get(key, []) or []
-            if isinstance(val, str):
-                return [val.strip()] if val.strip() else []
-            return [str(x).strip() for x in val if str(x).strip()]
-
-        raw_group = s("group") or path.stem.split(" - ", 1)[-1]
-        date_str = s("date") or self._date_from_filename(path)
-        body_md = post.content or ""
-        body_html = md_lib.markdown(
-            body_md,
-            extensions=["fenced_code", "tables", "sane_lists", "nl2br"],
-        )
-        id_ = hashlib.sha1(path.name.encode("utf-8")).hexdigest()[:16]
-
-        return Meeting(
-            id=id_,
-            filename=path.name,
-            path=str(path),
-            date=date_str or None,
-            raw_group=raw_group,
-            canonical_group=self.canonical(raw_group),
-            topic=s("topic"),
-            purpose=sl("purpose"),
-            outcome=s("outcome"),
-            deadline=s("deadline"),
-            attendees=s("attendees"),
-            action_items_open=sl("action_items_open"),
-            action_items_done=sl("action_items_done"),
-            reminders_open=sl("reminders_open"),
-            reminders_done=sl("reminders_done"),
-            body=body_md,
-            body_html=body_html,
-            mtime=path.stat().st_mtime,
-        )
-
-    @staticmethod
-    def _date_from_filename(path: Path) -> str:
-        m = re.match(r"(\d{4}-\d{2}-\d{2})", path.stem)
-        return m.group(1) if m else ""
-
-    # --- query ----------------------------------------------------
-
-    def all(self) -> List[Meeting]:
-        with self._lock:
-            return list(self._meetings.values())
-
-    def get(self, id_: str) -> Optional[Meeting]:
-        with self._lock:
-            return self._meetings.get(id_)
-
-    def find_by_filename(self, filename: str) -> Optional[Meeting]:
-        with self._lock:
-            for m in self._meetings.values():
-                if m.filename == filename:
-                    return m
-        return None
-
-    def facets(self) -> Dict[str, List[str]]:
-        groups, purposes, attendees = set(), set(), set()
-        raw_groups_seen: Dict[str, str] = {}
-        for m in self.all():
-            groups.add(m.canonical_group)
-            raw_groups_seen.setdefault(m.raw_group, m.canonical_group)
-            for p in m.purpose:
-                purposes.add(p)
-            if m.attendees:
-                for a in re.split(r"[;,]", m.attendees):
-                    a = a.strip()
-                    if a:
-                        attendees.add(a)
-        unaliased = [
-            raw for raw, canon in raw_groups_seen.items()
-            if raw.strip().lower() not in self._aliases and raw == canon
-        ]
-        return {
-            "groups": sorted(groups, key=str.casefold),
-            "purposes": sorted(purposes, key=str.casefold),
-            "attendees": sorted(attendees, key=str.casefold),
-            "unaliased_raw_groups": sorted(unaliased, key=str.casefold),
-        }
-
-    def groups_summary(self) -> List[Dict[str, Any]]:
-        by_group: Dict[str, List[Meeting]] = {}
-        for m in self.all():
-            by_group.setdefault(m.canonical_group, []).append(m)
-        out = []
-        for group, meetings in by_group.items():
-            dates = [m.date for m in meetings if m.date]
-            last = max(dates) if dates else None
-            raw_variants = sorted(
-                {m.raw_group for m in meetings if m.raw_group != group},
-                key=str.casefold,
-            )
-            out.append({
-                "group": group,
-                "meeting_count": len(meetings),
-                "last_contact": last,
-                "open_action_items": sum(len(m.action_items_open) for m in meetings),
-                "open_reminders": sum(len(m.reminders_open) for m in meetings),
-                "raw_variants": raw_variants,
-            })
-        out.sort(key=lambda x: (x["last_contact"] or ""), reverse=True)
-        return out
-
-    # --- tasks ----------------------------------------------------
-
-    def all_tasks(self, include_done: bool = False) -> List[Task]:
-        tasks: List[Task] = []
-        today = date_cls.today().isoformat()
-        bb = load_backburner()
-        for m in self.all():
-            year = _year_from_date(m.date)
-            for t in m.action_items_open:
-                tasks.append(_build_task(
-                    text=t, done=False, type_="action", section="action_items",
-                    source_filename=m.filename, meeting=m,
-                    context_year=year, today=today, backburner_ids=bb,
-                ))
-            for t in m.reminders_open:
-                tasks.append(_build_task(
-                    text=t, done=False, type_="reminder", section="reminders",
-                    source_filename=m.filename, meeting=m,
-                    context_year=year, today=today, backburner_ids=bb,
-                ))
-            if include_done:
-                for t in m.action_items_done:
-                    tasks.append(_build_task(
-                        text=t, done=True, type_="action", section="action_items",
-                        source_filename=m.filename, meeting=m,
-                        context_year=year, today=today, backburner_ids=bb,
-                    ))
-                for t in m.reminders_done:
-                    tasks.append(_build_task(
-                        text=t, done=True, type_="reminder", section="reminders",
-                        source_filename=m.filename, meeting=m,
-                        context_year=year, today=today, backburner_ids=bb,
-                    ))
-        # free-form tasks
-        for t in parse_free_tasks(TASKS_FILE, today=today, backburner_ids=bb):
-            if t.done and not include_done:
-                continue
-            tasks.append(t)
-        return tasks
+def _task_id(*parts: str) -> str:
+    blob = "\x1f".join(parts).encode("utf-8")
+    return hashlib.sha1(blob).hexdigest()[:16]
 
 
 def _year_from_date(s: Optional[str]) -> Optional[int]:
@@ -506,404 +298,275 @@ def _year_from_date(s: Optional[str]) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def _task_id(*parts: str) -> str:
-    blob = "\x1f".join(parts).encode("utf-8")
-    return hashlib.sha1(blob).hexdigest()[:16]
-
-
-def _build_task(
-    *,
-    text: str,
-    done: bool,
-    type_: str,
-    section: str,
-    source_filename: str,
-    meeting: Meeting,
-    context_year: Optional[int],
-    today: str,
-    backburner_ids: set,
-) -> Task:
-    deadline, deadline_raw = extract_deadline(text, context_year=context_year)
-    tid = _task_id(source_filename, section, text)
-    return Task(
-        id=tid,
-        text=text,
-        type=type_,
-        done=done,
-        backburner=tid in backburner_ids,
-        source_filename=source_filename,
-        section=section,
-        meeting_id=meeting.id,
-        group=meeting.canonical_group,
-        source_date=meeting.date,
-        deadline=deadline,
-        deadline_raw=deadline_raw,
-        overdue=bool(deadline and not done and deadline < today),
-    )
+def canonical_group(raw_group: str) -> str:
+    if not raw_group:
+        return "Unknown"
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT canonical_name FROM groups_map WHERE raw_name = %s",
+                (raw_group.strip().lower(),),
+            )
+            row = cur.fetchone()
+            return row["canonical_name"] if row else raw_group.strip()
 
 
 # --------------------------------------------------
-# FREE-FORM TASKS (tasks.md)
+# MEETING / TASK DB HELPERS
 # --------------------------------------------------
-
-
-FREE_TASK_RE = re.compile(r"^(\s*)[-*+]\s*\[(?P<state>[ xX])\]\s*(?P<text>.+?)\s*$")
-FREE_GROUP_RE = re.compile(
-    r"@group:\s*(.+?)(?=\s+@\w+:|\s+(?:due|deadline|by)\b|\s*$)",
-    re.IGNORECASE,
-)
-
-
-def _ensure_tasks_file() -> None:
-    if not TASKS_FILE.exists():
-        TASKS_FILE.write_text(
-            "# Free-form tasks\n\n"
-            "Add tasks here or via the dashboard. Format: `- [ ] your task`.\n"
-            "Tip: include `@group:Name` and/or a date like `due 2026-05-01` and the dashboard picks them up.\n\n",
-            encoding="utf-8",
-        )
-
-
-def parse_free_tasks(path: Path, today: str, backburner_ids: set) -> List[Task]:
-    if not path.exists():
-        return []
-    tasks: List[Task] = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        m = FREE_TASK_RE.match(raw)
-        if not m:
-            continue
-        text = m.group("text").strip()
-        done = m.group("state").strip().lower() == "x"
-        deadline, deadline_raw = extract_deadline(text, context_year=datetime.now().year)
-        group = None
-        gm = FREE_GROUP_RE.search(text)
-        if gm:
-            group = gm.group(1).strip().rstrip(".,;")
-        tid = _task_id(path.name, "free", text)
-        tasks.append(Task(
-            id=tid,
-            text=text,
-            type="free",
-            done=done,
-            backburner=tid in backburner_ids,
-            source_filename=path.name,
-            section="free",
-            meeting_id=None,
-            group=group,
-            source_date=None,
-            deadline=deadline,
-            deadline_raw=deadline_raw,
-            overdue=bool(deadline and not done and deadline < today),
-        ))
-    return tasks
-
-
-# --------------------------------------------------
-# WRITE-BACK
-# --------------------------------------------------
-
 
 SECTION_HEADER_RE = {
     "reminders": re.compile(r"^\s*\*{0,2}Reminders/Important:\*{0,2}\s*$", re.IGNORECASE),
     "action_items": re.compile(r"^\s*\*{0,2}Action Items:\*{0,2}\s*$", re.IGNORECASE),
 }
 ANY_SECTION_RE = re.compile(r"^\s*\*{0,2}([A-Za-z0-9 /\.\-]+):\*{0,2}\s*$")
-TASK_LINE_RE = re.compile(r"^(?P<indent>\s*)(?P<bullet>[-*+])\s*\[(?P<state>[ xX])\](?P<rest>\s*.+?)\s*$")
+TASK_LINE_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<bullet>[-*+])\s*\[(?P<state>[ xX])\](?P<rest>\s*.+?)\s*$"
+)
+FREE_GROUP_RE = re.compile(
+    r"@group:\s*(.+?)(?=\s+@\w+:|\s+(?:due|deadline|by)\b|\s*$)",
+    re.IGNORECASE,
+)
 
 
-def _toggle_line_in_section(lines: List[str], section: str, text: str, target_done: bool) -> bool:
-    """Find the task line with matching text in the given section and flip its state.
-    Returns True if a line was changed.
-    """
-    in_section = False
-    for i, line in enumerate(lines):
-        # section entry/exit
-        sec_re = SECTION_HEADER_RE.get(section)
-        if sec_re and sec_re.match(line):
-            in_section = True
-            continue
-        if in_section and ANY_SECTION_RE.match(line):
-            # some other section header → stop
-            if not (sec_re and sec_re.match(line)):
-                in_section = False
-                continue
+def _extract_tasks_from_body(
+    body: str, filename: str, meeting_id: str, group: str, date_str: Optional[str]
+) -> List[dict]:
+    lines = body.splitlines()
+    tasks = []
+    in_reminders = in_actions = False
+    year = _year_from_date(date_str)
 
-        if not in_section:
-            continue
-
-        m = TASK_LINE_RE.match(line)
-        if not m:
-            continue
-        line_text = m.group("rest").strip()
-        if line_text != text:
-            continue
-        is_done = m.group("state").strip().lower() == "x"
-        if is_done == target_done:
-            return True  # already in desired state
-        new_state = "x" if target_done else " "
-        lines[i] = f"{m.group('indent')}{m.group('bullet')} [{new_state}]{m.group('rest')}"
-        return True
-    return False
-
-
-def _rebuild_yaml_for_meeting(path: Path) -> None:
-    """Re-extract task lists from the body and rewrite the YAML front matter."""
-    raw = path.read_text(encoding="utf-8")
-    post = frontmatter.loads(raw)
-    body_lines = (post.content or "").splitlines()
-
-    # Re-derive the task lists from the body
-    if extract_fields_and_tasks is not None:
-        _, _, r_open, r_done, a_open, a_done = extract_fields_and_tasks(body_lines)
-    else:
-        r_open, r_done, a_open, a_done = _fallback_extract(body_lines)
-
-    meta = dict(post.metadata or {})
-    # Preserve existing fields, update task-related ones
-    for key in ("reminders_open", "reminders_done", "action_items_open", "action_items_done"):
-        meta.pop(key, None)
-    if r_open: meta["reminders_open"] = r_open
-    if r_done: meta["reminders_done"] = r_done
-    if a_open: meta["action_items_open"] = a_open
-    if a_done: meta["action_items_done"] = a_done
-    meta["open_reminders_count"] = len(r_open)
-    meta["open_action_items_count"] = len(a_open)
-
-    # Reassemble: YAML front matter + body
-    yaml_block = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True).strip()
-    final = f"---\n{yaml_block}\n---\n\n" + (post.content or "")
-    if not final.endswith("\n"):
-        final += "\n"
-    path.write_text(final, encoding="utf-8")
-
-
-def _fallback_extract(lines: List[str]):
-    """Minimal re-implementation if the upstream parser can't be imported."""
-    r_open, r_done, a_open, a_done = [], [], [], []
-    in_r = in_a = False
     for line in lines:
         if SECTION_HEADER_RE["reminders"].match(line):
-            in_r, in_a = True, False; continue
-        if SECTION_HEADER_RE["action_items"].match(line):
-            in_a, in_r = True, False; continue
-        if (in_r or in_a) and ANY_SECTION_RE.match(line):
-            in_r = in_a = False
-        m = TASK_LINE_RE.match(line)
-        if not m:
+            in_reminders, in_actions = True, False
             continue
+        if SECTION_HEADER_RE["action_items"].match(line):
+            in_actions, in_reminders = True, False
+            continue
+        if (in_reminders or in_actions) and ANY_SECTION_RE.match(line):
+            in_reminders = in_actions = False
+
+        m = TASK_LINE_RE.match(line)
+        if not m or (not in_reminders and not in_actions):
+            continue
+
         text = m.group("rest").strip()
         done = m.group("state").strip().lower() == "x"
-        if in_r:
-            (r_done if done else r_open).append(text)
-        elif in_a:
-            (a_done if done else a_open).append(text)
-    return r_open, r_done, a_open, a_done
+        type_ = "reminder" if in_reminders else "action"
+        section = "reminders" if in_reminders else "action_items"
+        deadline, deadline_raw = extract_deadline(text, context_year=year)
+        tid = _task_id(filename, section, text)
+
+        tasks.append({
+            "id": tid, "text": text, "type": type_, "done": done,
+            "meeting_id": meeting_id, "source_filename": filename,
+            "section": section, "group_name": group,
+            "source_date": date_str, "deadline": deadline, "deadline_raw": deadline_raw,
+        })
+    return tasks
 
 
-def toggle_meeting_task(filename: str, section: str, text: str, target_done: bool) -> bool:
-    if section not in ("reminders", "action_items"):
-        return False
-    path = MEETINGS_DIR / filename
-    if not path.is_file():
-        return False
-    raw = path.read_text(encoding="utf-8")
-    lines = raw.splitlines()
-    if not _toggle_line_in_section(lines, section, text, target_done):
-        return False
-    path.write_text("\n".join(lines) + ("\n" if raw.endswith("\n") else ""), encoding="utf-8")
-    _rebuild_yaml_for_meeting(path)
-    return True
+def _date_from_filename(filename: str) -> Optional[str]:
+    m = re.match(r"(\d{4}-\d{2}-\d{2})", filename)
+    return m.group(1) if m else None
 
 
-def toggle_free_task(text: str, target_done: bool) -> bool:
-    _ensure_tasks_file()
-    raw = TASKS_FILE.read_text(encoding="utf-8")
-    lines = raw.splitlines()
-    changed = False
-    for i, line in enumerate(lines):
-        m = TASK_LINE_RE.match(line)
-        if not m:
-            continue
-        if m.group("rest").strip() != text:
-            continue
-        is_done = m.group("state").strip().lower() == "x"
-        if is_done == target_done:
-            return True
-        new_state = "x" if target_done else " "
-        lines[i] = f"{m.group('indent')}{m.group('bullet')} [{new_state}]{m.group('rest')}"
-        changed = True
-        break
-    if not changed:
-        return False
-    TASKS_FILE.write_text("\n".join(lines) + ("\n" if raw.endswith("\n") else ""), encoding="utf-8")
-    return True
+def _row_to_meeting(row: dict, task_rows: List[dict]) -> Meeting:
+    date_val = row["file_date"]
+    date_str = date_val.isoformat() if date_val else None
+    purpose = row["purpose"] if isinstance(row["purpose"], list) else (row["purpose"] or [])
+    return Meeting(
+        id=row["id"],
+        filename=row["filename"],
+        date=date_str,
+        raw_group=row["raw_group"] or "",
+        canonical_group=row["canonical_group"] or "",
+        topic=row["topic"] or "",
+        purpose=purpose,
+        outcome=row["outcome"] or "",
+        deadline=row["deadline"] or "",
+        attendees=row["attendees"] or "",
+        action_items_open=[t["text"] for t in task_rows if t["type"] == "action" and not t["done"]],
+        action_items_done=[t["text"] for t in task_rows if t["type"] == "action" and t["done"]],
+        reminders_open=[t["text"] for t in task_rows if t["type"] == "reminder" and not t["done"]],
+        reminders_done=[t["text"] for t in task_rows if t["type"] == "reminder" and t["done"]],
+        body=row["body"] or "",
+        body_html=row["body_html"] or "",
+        mtime=row["mtime"],
+    )
 
 
-def delete_free_task(text: str) -> bool:
-    _ensure_tasks_file()
-    raw = TASKS_FILE.read_text(encoding="utf-8")
-    lines = raw.splitlines()
-    new_lines = []
-    found = False
-    for line in lines:
-        m = TASK_LINE_RE.match(line)
-        if not found and m and m.group("rest").strip() == text:
-            found = True
-            continue
-        new_lines.append(line)
-    if not found:
-        return False
-    TASKS_FILE.write_text("\n".join(new_lines) + ("\n" if raw.endswith("\n") else ""), encoding="utf-8")
-    return True
+def _task_row_to_task(row: dict, today: str) -> Task:
+    source_date = row["source_date"]
+    source_date_str = source_date.isoformat() if source_date else None
+    done = row["done"]
+    deadline = row["deadline"]
+    return Task(
+        id=row["id"],
+        text=row["text"],
+        type=row["type"],
+        done=done,
+        backburner=row["backburner"],
+        source_filename=row["source_filename"] or "",
+        section=row["section"] or "",
+        meeting_id=row["meeting_id"],
+        group=row["group_name"],
+        source_date=source_date_str,
+        deadline=deadline,
+        deadline_raw=row["deadline_raw"],
+        overdue=bool(deadline and not done and deadline < today),
+    )
 
 
-def delete_meeting_task(filename: str, section: str, text: str) -> bool:
-    if section not in ("reminders", "action_items"):
-        return False
-    path = MEETINGS_DIR / filename
-    if not path.is_file():
-        return False
-    raw = path.read_text(encoding="utf-8")
-    lines = raw.splitlines()
-    sec_re = SECTION_HEADER_RE.get(section)
-    in_section = False
-    found = False
-    new_lines = []
-    for line in lines:
-        if sec_re and sec_re.match(line):
-            in_section = True
-            new_lines.append(line)
-            continue
-        if in_section and ANY_SECTION_RE.match(line) and not (sec_re and sec_re.match(line)):
-            in_section = False
-        if in_section and not found:
-            m = TASK_LINE_RE.match(line)
-            if m and m.group("rest").strip() == text:
-                found = True
-                continue
-        new_lines.append(line)
-    if not found:
-        return False
-    path.write_text("\n".join(new_lines) + ("\n" if raw.endswith("\n") else ""), encoding="utf-8")
-    _rebuild_yaml_for_meeting(path)
-    return True
+def db_get_all_meetings() -> List[Meeting]:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM meetings ORDER BY file_date DESC NULLS LAST")
+            meeting_rows = cur.fetchall()
+            if not meeting_rows:
+                return []
+            meeting_ids = [r["id"] for r in meeting_rows]
+            cur.execute(
+                "SELECT * FROM tasks WHERE meeting_id = ANY(%s)",
+                (meeting_ids,),
+            )
+            task_rows = cur.fetchall()
+    tasks_by_meeting: Dict[str, List[dict]] = {}
+    for t in task_rows:
+        tasks_by_meeting.setdefault(t["meeting_id"], []).append(dict(t))
+    return [_row_to_meeting(dict(r), tasks_by_meeting.get(r["id"], [])) for r in meeting_rows]
 
 
-def edit_free_task(old_text: str, new_text: str) -> bool:
-    _ensure_tasks_file()
-    raw = TASKS_FILE.read_text(encoding="utf-8")
-    lines = raw.splitlines()
-    changed = False
-    for i, line in enumerate(lines):
-        m = TASK_LINE_RE.match(line)
-        if not m or m.group("rest").strip() != old_text:
-            continue
-        lines[i] = f"{m.group('indent')}{m.group('bullet')} [{m.group('state')}] {new_text}"
-        changed = True
-        break
-    if not changed:
-        return False
-    TASKS_FILE.write_text("\n".join(lines) + ("\n" if raw.endswith("\n") else ""), encoding="utf-8")
-    return True
+def db_get_meeting(mid: str) -> Optional[Meeting]:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM meetings WHERE id = %s", (mid,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            cur.execute("SELECT * FROM tasks WHERE meeting_id = %s", (mid,))
+            task_rows = cur.fetchall()
+    return _row_to_meeting(dict(row), [dict(t) for t in task_rows])
 
 
-def edit_meeting_task(filename: str, section: str, old_text: str, new_text: str) -> bool:
-    if section not in ("reminders", "action_items"):
-        return False
-    path = MEETINGS_DIR / filename
-    if not path.is_file():
-        return False
-    raw = path.read_text(encoding="utf-8")
-    lines = raw.splitlines()
-    sec_re = SECTION_HEADER_RE.get(section)
-    in_section = False
-    changed = False
-    for i, line in enumerate(lines):
-        if sec_re and sec_re.match(line):
-            in_section = True
-            continue
-        if in_section and ANY_SECTION_RE.match(line) and not (sec_re and sec_re.match(line)):
-            in_section = False
-        if in_section and not changed:
-            m = TASK_LINE_RE.match(line)
-            if m and m.group("rest").strip() == old_text:
-                lines[i] = f"{m.group('indent')}{m.group('bullet')} [{m.group('state')}] {new_text}"
-                changed = True
-    if not changed:
-        return False
-    path.write_text("\n".join(lines) + ("\n" if raw.endswith("\n") else ""), encoding="utf-8")
-    _rebuild_yaml_for_meeting(path)
-    return True
-
-
-def add_free_task(text: str, group: Optional[str] = None, deadline: Optional[str] = None) -> str:
-    """Append a new free-form task to tasks.md. Returns the final line text."""
-    _ensure_tasks_file()
-    raw = TASKS_FILE.read_text(encoding="utf-8")
-    clean = (text or "").strip()
-    if not clean:
-        raise ValueError("Task text required")
-    tags = []
-    if group:
-        tags.append(f"@group:{group.strip()}")
-    if deadline:
-        tags.append(f"due {deadline.strip()}")
-    full = clean + ((" " + " ".join(tags)) if tags else "")
-    line = f"- [ ] {full}"
-    if not raw.endswith("\n"):
-        raw += "\n"
-    raw += line + "\n"
-    TASKS_FILE.write_text(raw, encoding="utf-8")
-    return full
+def db_get_all_tasks(include_done: bool = False) -> List[Task]:
+    today = date_cls.today().isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if include_done:
+                cur.execute("SELECT * FROM tasks ORDER BY created_at")
+            else:
+                cur.execute("SELECT * FROM tasks WHERE NOT done ORDER BY created_at")
+            rows = cur.fetchall()
+    return [_task_row_to_task(dict(r), today) for r in rows]
 
 
 # --------------------------------------------------
-# FLASK APP
+# IMPORT (parse markdown → DB)
 # --------------------------------------------------
 
-app = Flask(__name__, template_folder="templates", static_folder="static")
-index = MeetingIndex()
+def import_meeting_from_content(filename: str, content: str) -> dict:
+    """Parse and upsert a meeting from raw markdown content."""
+    post = frontmatter.loads(content)
+    meta = post.metadata or {}
 
+    def s(key: str, default: str = "") -> str:
+        val = meta.get(key, default)
+        return str(val).strip() if val is not None else default
 
-# File watcher for live reload
-def _start_watcher() -> None:
-    try:
-        from watchdog.events import FileSystemEventHandler
-        from watchdog.observers import Observer
-    except Exception:
-        return
+    def sl(key: str) -> List[str]:
+        val = meta.get(key, []) or []
+        if isinstance(val, str):
+            return [val.strip()] if val.strip() else []
+        return [str(x).strip() for x in val if str(x).strip()]
 
-    class Handler(FileSystemEventHandler):
-        def _maybe_rebuild(self, event):
-            try:
-                p = Path(event.src_path)
-                if p.suffix.lower() in (".md", ".yaml", ".yml"):
-                    index.rebuild()
-            except Exception as e:
-                print(f"[watcher] rebuild error: {e}")
+    raw_group = s("group") or filename.split(" - ", 1)[-1].replace(".md", "")
+    date_str = s("date") or _date_from_filename(filename)
+    canon = canonical_group(raw_group)
+    body_md = post.content or ""
+    body_html = md_lib.markdown(
+        body_md, extensions=["fenced_code", "tables", "sane_lists", "nl2br"]
+    )
+    mid = hashlib.sha1(filename.encode("utf-8")).hexdigest()[:16]
 
-        def on_modified(self, event): self._maybe_rebuild(event)
-        def on_created(self, event): self._maybe_rebuild(event)
-        def on_deleted(self, event): self._maybe_rebuild(event)
-        def on_moved(self, event): self._maybe_rebuild(event)
+    file_date = None
+    if date_str:
+        try:
+            file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except Exception:
+            pass
 
-    obs = Observer()
-    obs.schedule(Handler(), str(MEETINGS_DIR), recursive=False)
-    obs.schedule(Handler(), str(DASHBOARD_DIR), recursive=False)
-    obs.schedule(Handler(), str(NOTES_ROOT), recursive=False)  # tasks.md
-    obs.daemon = True
-    obs.start()
+    tasks = _extract_tasks_from_body(body_md, filename, mid, canon, date_str)
+    seen_texts = {t["text"] for t in tasks}
+    year = _year_from_date(date_str)
 
+    # Also ingest tasks stored directly in YAML front matter (legacy format)
+    for text, done_, type_, section_ in [
+        *[(t, False, "action", "action_items") for t in sl("action_items_open")],
+        *[(t, True,  "action", "action_items") for t in sl("action_items_done")],
+        *[(t, False, "reminder", "reminders")  for t in sl("reminders_open")],
+        *[(t, True,  "reminder", "reminders")  for t in sl("reminders_done")],
+    ]:
+        if text in seen_texts:
+            continue
+        deadline, deadline_raw = extract_deadline(text, context_year=year)
+        tasks.append({
+            "id": _task_id(filename, section_, text),
+            "text": text, "type": type_, "done": done_,
+            "meeting_id": mid, "source_filename": filename, "section": section_,
+            "group_name": canon, "source_date": date_str,
+            "deadline": deadline, "deadline_raw": deadline_raw,
+        })
 
-_start_watcher()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO meetings
+                    (id, filename, file_date, raw_group, canonical_group,
+                     topic, purpose, outcome, deadline, attendees, body, body_html, mtime)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (id) DO UPDATE SET
+                    filename=EXCLUDED.filename, file_date=EXCLUDED.file_date,
+                    raw_group=EXCLUDED.raw_group, canonical_group=EXCLUDED.canonical_group,
+                    topic=EXCLUDED.topic, purpose=EXCLUDED.purpose,
+                    outcome=EXCLUDED.outcome, deadline=EXCLUDED.deadline,
+                    attendees=EXCLUDED.attendees, body=EXCLUDED.body,
+                    body_html=EXCLUDED.body_html, mtime=EXCLUDED.mtime
+            """, (
+                mid, filename, file_date, raw_group, canon,
+                s("topic"), json.dumps(sl("purpose")), s("outcome"),
+                s("deadline"), s("attendees"), body_md, body_html, None,
+            ))
+            for t in tasks:
+                cur.execute("""
+                    INSERT INTO tasks
+                        (id, text, type, done, meeting_id, source_filename,
+                         section, group_name, source_date, deadline, deadline_raw)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        text=EXCLUDED.text, type=EXCLUDED.type,
+                        meeting_id=EXCLUDED.meeting_id,
+                        source_filename=EXCLUDED.source_filename,
+                        section=EXCLUDED.section, group_name=EXCLUDED.group_name,
+                        source_date=EXCLUDED.source_date,
+                        deadline=EXCLUDED.deadline, deadline_raw=EXCLUDED.deadline_raw
+                """, (
+                    t["id"], t["text"], t["type"], t["done"], t["meeting_id"],
+                    t["source_filename"], t["section"], t["group_name"],
+                    t["source_date"], t["deadline"], t["deadline_raw"],
+                ))
+
+    return {"id": mid, "filename": filename, "tasks": len(tasks)}
 
 
 # --------------------------------------------------
-# HELPERS FOR FILTERING MEETINGS
+# MEETING FILTERING
 # --------------------------------------------------
 
-
-def _date_in_range(d: Optional[str], start: Optional[str], end: Optional[str]) -> bool:
+def _date_in_range(
+    d: Optional[str], start: Optional[str], end: Optional[str]
+) -> bool:
     if not start and not end:
         return True
     if not d:
@@ -916,12 +579,14 @@ def _date_in_range(d: Optional[str], start: Optional[str], end: Optional[str]) -
         try:
             if dt < datetime.strptime(start, "%Y-%m-%d").date():
                 return False
-        except Exception: pass
+        except Exception:
+            pass
     if end:
         try:
             if dt > datetime.strptime(end, "%Y-%m-%d").date():
                 return False
-        except Exception: pass
+        except Exception:
+            pass
     return True
 
 
@@ -937,25 +602,78 @@ def _matches_query(m: Meeting, q: str) -> bool:
     ))
 
 
-def filter_meetings(meetings, *, q="", group="", purpose="", attendee="",
-                    date_from="", date_to="", has_open_tasks=False):
+def filter_meetings(
+    meetings: List[Meeting],
+    *,
+    q: str = "",
+    group: str = "",
+    purpose: str = "",
+    attendee: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    has_open_tasks: bool = False,
+) -> List[Meeting]:
     out = []
     for m in meetings:
-        if group and m.canonical_group != group: continue
-        if purpose and purpose not in m.purpose: continue
-        if attendee and attendee.lower() not in (m.attendees or "").lower(): continue
-        if not _date_in_range(m.date, date_from or None, date_to or None): continue
-        if has_open_tasks and not (m.action_items_open or m.reminders_open): continue
-        if not _matches_query(m, q): continue
+        if group and m.canonical_group != group:
+            continue
+        if purpose and purpose not in m.purpose:
+            continue
+        if attendee and attendee.lower() not in (m.attendees or "").lower():
+            continue
+        if not _date_in_range(m.date, date_from or None, date_to or None):
+            continue
+        if has_open_tasks and not (m.action_items_open or m.reminders_open):
+            continue
+        if not _matches_query(m, q):
+            continue
         out.append(m)
     out.sort(key=lambda x: (x.date or ""), reverse=True)
     return out
 
 
 # --------------------------------------------------
-# ROUTES
+# COMPLETIONS LOG
 # --------------------------------------------------
 
+def log_completion(
+    task_id: str, text: str, section: str, filename: str, done: bool
+) -> None:
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO completions
+                        (task_id, task_text, section, source_filename, done, completed_date)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (task_id, text[:200], section, filename, done, date_cls.today()))
+    except Exception as e:
+        print(f"[completions] log error: {e}")
+
+
+def completions_per_day(days: int = 30) -> List[Dict[str, Any]]:
+    today = date_cls.today()
+    window = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
+    buckets: Dict[str, int] = {d.isoformat(): 0 for d in window}
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT completed_date, done FROM completions WHERE completed_date >= %s",
+                    (window[0],),
+                )
+                for row in cur.fetchall():
+                    d = row["completed_date"].isoformat()
+                    if d in buckets:
+                        buckets[d] += 1 if row["done"] else -1
+    except Exception as e:
+        print(f"[completions] load error: {e}")
+    return [{"date": d, "count": max(0, n)} for d, n in buckets.items()]
+
+
+# --------------------------------------------------
+# ROUTES
+# --------------------------------------------------
 
 @app.route("/")
 def home():
@@ -966,7 +684,7 @@ def home():
 def api_meetings():
     a = request.args
     results = filter_meetings(
-        index.all(),
+        db_get_all_meetings(),
         q=a.get("q", ""), group=a.get("group", ""), purpose=a.get("purpose", ""),
         attendee=a.get("attendee", ""), date_from=a.get("date_from", ""),
         date_to=a.get("date_to", ""),
@@ -977,25 +695,78 @@ def api_meetings():
 
 @app.route("/api/meetings/<mid>")
 def api_meeting(mid: str):
-    m = index.get(mid)
-    if not m: abort(404)
+    m = db_get_meeting(mid)
+    if not m:
+        abort(404)
     return jsonify(m.full())
 
 
 @app.route("/api/groups")
 def api_groups():
-    return jsonify(index.groups_summary())
+    by_group: Dict[str, List[Meeting]] = {}
+    for m in db_get_all_meetings():
+        by_group.setdefault(m.canonical_group, []).append(m)
+    out = []
+    for group, grp_meetings in by_group.items():
+        dates = [m.date for m in grp_meetings if m.date]
+        out.append({
+            "group": group,
+            "meeting_count": len(grp_meetings),
+            "last_contact": max(dates) if dates else None,
+            "open_action_items": sum(len(m.action_items_open) for m in grp_meetings),
+            "open_reminders": sum(len(m.reminders_open) for m in grp_meetings),
+            "raw_variants": sorted(
+                {m.raw_group for m in grp_meetings if m.raw_group != group},
+                key=str.casefold,
+            ),
+        })
+    out.sort(key=lambda x: (x["last_contact"] or ""), reverse=True)
+    return jsonify(out)
 
 
 @app.route("/api/facets")
 def api_facets():
-    return jsonify(index.facets())
+    meetings = db_get_all_meetings()
+    groups: set = set()
+    purposes: set = set()
+    attendees: set = set()
+    raw_groups_seen: Dict[str, str] = {}
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT raw_name FROM groups_map")
+            aliased_raws = {r["raw_name"] for r in cur.fetchall()}
+
+    for m in meetings:
+        groups.add(m.canonical_group)
+        raw_groups_seen.setdefault(m.raw_group, m.canonical_group)
+        for p in m.purpose:
+            purposes.add(p)
+        if m.attendees:
+            for a in re.split(r"[;,]", m.attendees):
+                a = a.strip()
+                if a:
+                    attendees.add(a)
+
+    unaliased = [
+        raw for raw, canon in raw_groups_seen.items()
+        if raw.strip().lower() not in aliased_raws and raw == canon
+    ]
+    return jsonify({
+        "groups": sorted(groups, key=str.casefold),
+        "purposes": sorted(purposes, key=str.casefold),
+        "attendees": sorted(attendees, key=str.casefold),
+        "unaliased_raw_groups": sorted(unaliased, key=str.casefold),
+    })
 
 
 @app.route("/api/reload", methods=["POST"])
 def api_reload():
-    index.rebuild()
-    return jsonify({"ok": True, "count": len(index.all())})
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS c FROM meetings")
+            count = cur.fetchone()["c"]
+    return jsonify({"ok": True, "count": count})
 
 
 # ---- Tasks ----
@@ -1003,23 +774,20 @@ def api_reload():
 @app.route("/api/tasks")
 def api_tasks():
     a = request.args
-    # Status: open = open & not backburner; done = done & not backburner;
-    # backburner = on backburner (any done state); all = everything.
     status = a.get("status", "open")
     type_filter = a.get("type", "")
     group_filter = a.get("group", "")
     overdue_only = a.get("overdue", "").lower() in ("1", "true", "yes")
     q = a.get("q", "").lower()
 
-    tasks = index.all_tasks(include_done=True)
+    tasks = db_get_all_tasks(include_done=True)
 
     def passes_status(t: Task) -> bool:
-        if status == "open": return not t.done and not t.backburner
-        if status == "done": return t.done and not t.backburner
+        if status == "open":       return not t.done and not t.backburner
+        if status == "done":       return t.done and not t.backburner
         if status == "backburner": return t.backburner
-        return True  # all
+        return True
 
-    # Apply all filters EXCEPT group, to compute the group facet
     pre_group = []
     for t in tasks:
         if not passes_status(t): continue
@@ -1028,24 +796,20 @@ def api_tasks():
         if q and q not in t.text.lower() and q not in (t.group or "").lower(): continue
         pre_group.append(t)
 
-    # Group facet: distinct groups among status-filtered tasks (skip empty groups)
-    groups_in_scope = sorted(
-        {t.group for t in pre_group if t.group},
-        key=str.casefold,
-    )
+    groups_in_scope = sorted({t.group for t in pre_group if t.group}, key=str.casefold)
 
-    # Now apply group filter
     out = []
     for t in pre_group:
         if group_filter and (t.group or "") != group_filter: continue
         out.append(t.as_dict())
 
-    def sort_key(t):
+    def sort_key(t: dict):
         return (
             0 if t["overdue"] else 1,
             t["deadline"] or "9999-99-99",
             -(int((t["source_date"] or "0000-00-00").replace("-", "")) if t["source_date"] else 0),
         )
+
     out.sort(key=sort_key)
     return jsonify({"count": len(out), "tasks": out, "groups_in_scope": groups_in_scope})
 
@@ -1057,84 +821,176 @@ def api_backburner_task():
     on = bool(data.get("backburner", True))
     if not task_id:
         return jsonify({"ok": False, "error": "id required"}), 400
-    toggle_backburner(task_id, on)
-    return jsonify({"ok": True})
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE tasks SET backburner = %s WHERE id = %s", (on, task_id))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/tasks/toggle", methods=["POST"])
 def api_toggle_task():
     data = request.get_json(force=True, silent=True) or {}
+    task_id = (data.get("id") or "").strip()
+    text = (data.get("text") or "").strip()
     section = data.get("section", "")
     filename = data.get("source_filename", "")
-    text = data.get("text", "")
     done = bool(data.get("done", True))
-    if not text or not filename:
-        return jsonify({"ok": False, "error": "source_filename and text required"}), 400
 
-    if section == "free":
-        ok = toggle_free_task(text, target_done=done)
-    elif section in ("reminders", "action_items"):
-        ok = toggle_meeting_task(filename, section, text, target_done=done)
-    else:
-        return jsonify({"ok": False, "error": "invalid section"}), 400
+    # Derive task ID from fields when not provided directly (backward compat)
+    if not task_id:
+        if not text or not filename:
+            return jsonify({"ok": False, "error": "id or (source_filename + text) required"}), 400
+        task_id = _task_id(filename, section, text)
 
-    if not ok:
-        return jsonify({"ok": False, "error": "task not found"}), 404
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tasks SET done = %s WHERE id = %s RETURNING id",
+                    (done, task_id),
+                )
+                if cur.fetchone() is None:
+                    return jsonify({"ok": False, "error": "task not found"}), 404
+        log_completion(task_id, text, section, filename, done)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-    # Log the completion event (for the dashboard sparkline)
-    log_completion(
-        task_id=_task_id(filename, section, text),
-        text=text, section=section, filename=filename, done=done,
-    )
 
-    index.rebuild()
-    return jsonify({"ok": True})
+@app.route("/api/tasks/delete", methods=["POST"])
+def api_delete_task():
+    data = request.get_json(force=True, silent=True) or {}
+    task_id = (data.get("id") or "").strip()
+    text = (data.get("text") or "").strip()
+    section = data.get("section", "")
+    filename = data.get("source_filename", "")
+
+    if not task_id:
+        if not text or not filename:
+            return jsonify({"ok": False, "error": "id or (source_filename + text) required"}), 400
+        task_id = _task_id(filename, section, text)
+
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM tasks WHERE id = %s RETURNING id", (task_id,))
+                if cur.fetchone() is None:
+                    return jsonify({"ok": False, "error": "task not found"}), 404
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tasks/edit", methods=["POST"])
+def api_edit_task():
+    data = request.get_json(force=True, silent=True) or {}
+    task_id = (data.get("id") or "").strip()
+    old_text = (data.get("old_text") or "").strip()
+    new_text = (data.get("new_text") or "").strip()
+    section = data.get("section", "")
+    filename = data.get("source_filename", "")
+
+    if not new_text:
+        return jsonify({"ok": False, "error": "new_text required"}), 400
+    if not task_id:
+        if not old_text or not filename:
+            return jsonify({"ok": False, "error": "id or (source_filename + old_text) required"}), 400
+        task_id = _task_id(filename, section, old_text)
+
+    new_deadline, new_deadline_raw = extract_deadline(new_text)
+    # Text change means the deterministic ID changes too
+    new_id = _task_id(filename, section, new_text) if filename and section else task_id
+
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE tasks
+                    SET id = %s, text = %s, deadline = %s, deadline_raw = %s
+                    WHERE id = %s
+                    RETURNING id
+                """, (new_id, new_text, new_deadline, new_deadline_raw, task_id))
+                if cur.fetchone() is None:
+                    return jsonify({"ok": False, "error": "task not found"}), 404
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tasks/add", methods=["POST"])
+def api_add_task():
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("text") or "").strip()
+    group = (data.get("group") or "").strip() or None
+    deadline_in = (data.get("deadline") or "").strip() or None
+    if not text:
+        return jsonify({"ok": False, "error": "text required"}), 400
+
+    tags = []
+    if group:
+        tags.append(f"@group:{group}")
+    if deadline_in:
+        tags.append(f"due {deadline_in}")
+    full_text = text + ((" " + " ".join(tags)) if tags else "")
+
+    deadline, deadline_raw = extract_deadline(full_text, context_year=datetime.now().year)
+    tid = _task_id("tasks.md", "free", full_text)
+
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO tasks
+                        (id, text, type, done, backburner, source_filename, section,
+                         group_name, source_date, deadline, deadline_raw)
+                    VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
+                            %s, %s, %s, %s)
+                    ON CONFLICT (id) DO NOTHING
+                """, (tid, full_text, group, date_cls.today(), deadline, deadline_raw))
+        return jsonify({"ok": True, "text": full_text})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/stats")
 def api_stats():
-    """Aggregated stats for the Home dashboard."""
     today = date_cls.today()
     today_iso = today.isoformat()
-    horizon_days = 7  # upcoming deadlines window
+    horizon_days = 7
 
-    all_tasks = index.all_tasks(include_done=True)
+    all_tasks = db_get_all_tasks(include_done=True)
     open_tasks = [t for t in all_tasks if not t.done and not t.backburner]
     done_tasks = [t for t in all_tasks if t.done and not t.backburner]
 
     overdue_open = [t for t in open_tasks if t.overdue]
     due_today = [t for t in open_tasks if t.deadline == today_iso]
 
-    # Upcoming deadlines — next `horizon_days` days including today
     window_dates = [today + timedelta(days=i) for i in range(horizon_days)]
     deadlines_by_day = []
     for d in window_dates:
         iso = d.isoformat()
-        count = sum(1 for t in open_tasks if t.deadline == iso)
         deadlines_by_day.append({
             "date": iso,
             "day": d.day,
             "dow": d.strftime("%a").upper(),
             "is_today": iso == today_iso,
-            "count": count,
+            "count": sum(1 for t in open_tasks if t.deadline == iso),
         })
 
-    # Most overdue (by days overdue, descending)
-    def days_overdue(t):
+    def days_overdue(t: Task) -> int:
         try:
             return (today - datetime.strptime(t.deadline, "%Y-%m-%d").date()).days
         except Exception:
             return 0
-    overdue_sorted = sorted(overdue_open, key=days_overdue, reverse=True)[:5]
-    overdue_top = [{
-        "id": t.id,
-        "text": t.text,
-        "group": t.group,
-        "deadline": t.deadline,
-        "days_overdue": days_overdue(t),
-    } for t in overdue_sorted]
 
-    # By-group breakdown (open tasks only, excluding None group)
+    overdue_top = [{
+        "id": t.id, "text": t.text, "group": t.group,
+        "deadline": t.deadline, "days_overdue": days_overdue(t),
+    } for t in sorted(overdue_open, key=days_overdue, reverse=True)[:5]]
+
     group_counts: Dict[str, int] = {}
     for t in open_tasks:
         if t.group:
@@ -1144,26 +1000,36 @@ def api_stats():
         key=lambda x: x["count"], reverse=True,
     )[:8]
 
-    # Completion rate over last 30 days (done-and-not-backburner vs total)
     total_tasks = len(all_tasks) - sum(1 for t in all_tasks if t.backburner)
     pct_complete = round((len(done_tasks) / total_tasks) * 100) if total_tasks else 0
-
-    # Completions per day (from the jsonl log)
     per_day = completions_per_day(days=30)
-    total_completions = sum(x["count"] for x in per_day)
 
-    # Most recent meeting
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT m.id, m.canonical_group, m.topic, m.file_date,
+                    (SELECT COUNT(*) FROM tasks WHERE meeting_id = m.id
+                        AND type = 'action' AND NOT done) AS open_actions,
+                    (SELECT COUNT(*) FROM tasks WHERE meeting_id = m.id
+                        AND type = 'reminder' AND NOT done) AS open_reminders
+                FROM meetings m
+                WHERE m.file_date IS NOT NULL
+                ORDER BY m.file_date DESC
+                LIMIT 1
+            """)
+            recent_row = cur.fetchone()
+            cur.execute("SELECT COUNT(*) AS c FROM meetings")
+            total_meetings = cur.fetchone()["c"]
+
     recent = None
-    meetings_with_date = [m for m in index.all() if m.date]
-    if meetings_with_date:
-        m = sorted(meetings_with_date, key=lambda x: x.date, reverse=True)[0]
+    if recent_row:
         recent = {
-            "id": m.id,
-            "group": m.canonical_group,
-            "topic": m.topic,
-            "date": m.date,
-            "open_actions": len(m.action_items_open),
-            "open_reminders": len(m.reminders_open),
+            "id": recent_row["id"],
+            "group": recent_row["canonical_group"],
+            "topic": recent_row["topic"],
+            "date": recent_row["file_date"].isoformat() if recent_row["file_date"] else None,
+            "open_actions": recent_row["open_actions"],
+            "open_reminders": recent_row["open_reminders"],
         }
 
     return jsonify({
@@ -1178,107 +1044,38 @@ def api_stats():
         "overdue_top": overdue_top,
         "by_group": by_group,
         "completions_per_day": per_day,
-        "completions_30d": total_completions,
+        "completions_30d": sum(x["count"] for x in per_day),
         "recent_meeting": recent,
-        "meetings_total": len(index.all()),
+        "meetings_total": total_meetings,
     })
-
-
-@app.route("/api/tasks/delete", methods=["POST"])
-def api_delete_task():
-    data = request.get_json(force=True, silent=True) or {}
-    section = data.get("section", "")
-    filename = data.get("source_filename", "")
-    text = data.get("text", "")
-    if not text or not filename:
-        return jsonify({"ok": False, "error": "source_filename and text required"}), 400
-    if section == "free":
-        ok = delete_free_task(text)
-    elif section in ("reminders", "action_items"):
-        ok = delete_meeting_task(filename, section, text)
-    else:
-        return jsonify({"ok": False, "error": "invalid section"}), 400
-    if not ok:
-        return jsonify({"ok": False, "error": "task not found"}), 404
-    index.rebuild()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/tasks/edit", methods=["POST"])
-def api_edit_task():
-    data = request.get_json(force=True, silent=True) or {}
-    section = data.get("section", "")
-    filename = data.get("source_filename", "")
-    old_text = (data.get("old_text") or "").strip()
-    new_text = (data.get("new_text") or "").strip()
-    if not old_text or not new_text or not filename:
-        return jsonify({"ok": False, "error": "source_filename, old_text, and new_text required"}), 400
-    if section == "free":
-        ok = edit_free_task(old_text, new_text)
-    elif section in ("reminders", "action_items"):
-        ok = edit_meeting_task(filename, section, old_text, new_text)
-    else:
-        return jsonify({"ok": False, "error": "invalid section"}), 400
-    if not ok:
-        return jsonify({"ok": False, "error": "task not found"}), 404
-    index.rebuild()
-    return jsonify({"ok": True})
 
 
 @app.route("/api/import", methods=["POST"])
 def api_import_notes():
-    import io, contextlib
     uploaded = request.files.getlist("files")
     if not uploaded:
         return jsonify({"ok": False, "error": "No files uploaded"}), 400
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
     results = []
     for f in uploaded:
-        fname = Path(f.filename).name
+        fname = Path(f.filename).name if f.filename else ""
         if not fname.endswith(".md"):
             results.append({"filename": fname, "ok": False, "error": "Not a .md file"})
             continue
-        dest = INBOX_DIR / fname
-        f.save(str(dest))
-        if _pm_process_file is None:
-            results.append({"filename": fname, "ok": False, "error": "Processor not available"})
-            continue
         try:
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                _pm_process_file(dest, dry_run=False)
-            output = buf.getvalue()
-            warnings = [l.replace("⚠️  WARNING: ", "").strip()
-                        for l in output.splitlines() if "WARNING" in l]
-            results.append({"filename": fname, "ok": True, "warnings": warnings})
+            content = f.read().decode("utf-8")
+            summary = import_meeting_from_content(fname, content)
+            results.append({"filename": fname, "ok": True, "task_count": summary["tasks"]})
         except Exception as e:
             results.append({"filename": fname, "ok": False, "error": str(e)})
-    index.rebuild()
     ok_count = sum(1 for r in results if r.get("ok"))
     return jsonify({"ok": True, "processed": ok_count, "total": len(results), "results": results})
-
-
-@app.route("/api/tasks/add", methods=["POST"])
-def api_add_task():
-    data = request.get_json(force=True, silent=True) or {}
-    text = (data.get("text") or "").strip()
-    group = (data.get("group") or "").strip() or None
-    deadline = (data.get("deadline") or "").strip() or None
-    if not text:
-        return jsonify({"ok": False, "error": "text required"}), 400
-    full = add_free_task(text, group=group, deadline=deadline)
-    index.rebuild()
-    return jsonify({"ok": True, "text": full})
 
 
 # --------------------------------------------------
 # ENTRY
 # --------------------------------------------------
 
-
 if __name__ == "__main__":
-    _ensure_tasks_file()
-    print(f"Notes dashboard serving {len(index.all())} meetings from {MEETINGS_DIR}")
-    print(f"Free-form tasks file: {TASKS_FILE}")
-    print(f"Open http://{HOST}:{PORT}/ in your browser")
-    app.run(host=HOST, port=PORT, debug=False)
+    port = int(os.environ.get("DASHBOARD_PORT", "5050"))
+    host = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+    app.run(host=host, port=port, debug=False)
