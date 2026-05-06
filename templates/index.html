@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Notes</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app" id="app">
+
+    <!-- ========== MAIN ========== -->
+    <main class="main">
+
+      <!-- HOME / Dashboard -->
+      <section class="view" id="view-home">
+        <div class="card card-hero">
+          <div class="hero-top">
+            <div>
+              <div class="hero-eyebrow" id="hero-eyebrow">Today</div>
+              <h1 id="hero-greeting">Good morning, Will</h1>
+            </div>
+            <div style="text-align:right; color: var(--accent-ink); font-size: 12px; opacity: 0.8;">
+              <div style="font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;" id="hero-date"></div>
+            </div>
+          </div>
+          <div class="hero-stats">
+            <div>
+              <span class="stat-num" id="hero-open">–</span>
+              <span class="stat-label">Open tasks</span>
+            </div>
+            <div>
+              <span class="stat-num overdue" id="hero-overdue">–</span>
+              <span class="stat-label">Overdue</span>
+            </div>
+            <div>
+              <span class="stat-num" id="hero-due-today">–</span>
+              <span class="stat-label">Due today</span>
+            </div>
+          </div>
+          <div class="hero-cta-row">
+            <button class="cta-pill" id="hero-add-task">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+              New task
+            </button>
+            <button class="cta-pill ghost" id="hero-view-tasks">View all tasks →</button>
+          </div>
+        </div>
+
+        <div class="card card-deadlines elevated">
+          <div class="card-title">
+            <span>Upcoming<br>deadlines</span>
+          </div>
+          <div class="subtitle" id="deadlines-subtitle">—</div>
+          <div class="deadlines-strip" id="deadlines-strip"></div>
+        </div>
+
+        <div class="card card-ring elevated">
+          <div class="card-title">% Completed (30 d)</div>
+          <div class="ring-wrap">
+            <svg width="150" height="150" viewBox="0 0 150 150">
+              <circle cx="75" cy="75" r="62" stroke="#f0ebdc" stroke-width="14" fill="none"/>
+              <circle id="ring-progress" cx="75" cy="75" r="62" stroke="#C8911F" stroke-width="14" fill="none"
+                      stroke-linecap="round" stroke-dasharray="389.56" stroke-dashoffset="389.56"
+                      transform="rotate(-90 75 75)" style="transition: stroke-dashoffset 0.6s cubic-bezier(0.4,0,0.2,1);"/>
+            </svg>
+            <div class="ring-label">
+              <div class="ring-percent" id="ring-percent">–%</div>
+              <div class="ring-sub">Complete</div>
+            </div>
+          </div>
+          <div class="ring-caption" id="ring-caption">—</div>
+        </div>
+
+        <div class="card card-spark elevated">
+          <div class="card-title">Tasks completed</div>
+          <div class="spark-title">Last 30 days</div>
+          <div>
+            <div class="spark-total" id="spark-total">–</div>
+            <span class="spark-total-label">Completions</span>
+          </div>
+          <svg class="spark-svg" id="spark-svg" viewBox="0 0 300 100" preserveAspectRatio="none"></svg>
+        </div>
+
+        <div class="card card-overdue elevated">
+          <div class="overdue-header">
+            <h2>Most overdue</h2>
+            <span class="overdue-count" id="overdue-count-pill"></span>
+          </div>
+          <ul id="overdue-list"></ul>
+        </div>
+
+        <div class="card card-by-group elevated">
+          <h2>Open by group</h2>
+          <div class="group-bars" id="group-bars"></div>
+        </div>
+
+        <div class="card card-recent elevated" id="recent-meeting-card">
+          <div class="card-title">Most recent meeting</div>
+          <h2 id="recent-title">—</h2>
+          <div class="recent-meta" id="recent-meta">—</div>
+          <div class="recent-stats">
+            <div class="recent-stat"><strong id="recent-actions">0</strong>Open actions</div>
+            <div class="recent-stat"><strong id="recent-reminders">0</strong>Open reminders</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TASKS -->
+      <section class="view" id="view-tasks">
+        <div class="paper-stack" id="paper-stack">
+
+          <article class="paper" data-paper="active">
+            <div class="paper-header">
+              <div class="paper-title-block">
+                <div class="paper-eyebrow">Active</div>
+                <div id="tasks-summary-active" class="tasks-summary"></div>
+              </div>
+              <div class="paper-header-actions">
+                <button id="task-filter-toggle" class="icon-btn task-filter-toggle-btn" title="Filters" aria-expanded="false">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="12" y1="18" x2="20" y2="18"/></svg>
+                </button>
+                <button id="open-add-modal" class="primary-btn" title="Add a free-form task (a)">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                  New task
+                </button>
+              </div>
+            </div>
+            <div class="task-filter-bar" id="task-filter-bar" hidden>
+              <div class="task-filter-bar-inner">
+                <div class="task-filter-field">
+                  <label for="t-type">Type</label>
+                  <select id="t-type">
+                    <option value="">Any</option>
+                    <option value="action">Action items</option>
+                    <option value="reminder">Reminders</option>
+                    <option value="free">Free-form</option>
+                  </select>
+                </div>
+                <div class="task-filter-field">
+                  <label for="t-group">Group</label>
+                  <select id="t-group"><option value="">All groups</option></select>
+                </div>
+                <div class="task-filter-field task-filter-check">
+                  <label><input id="t-overdue" type="checkbox"> Only overdue</label>
+                </div>
+                <button id="t-clear" class="linkish">Clear filters</button>
+              </div>
+            </div>
+            <div class="tasks-wrap">
+              <ul class="tasks" data-paper-list="active"></ul>
+            </div>
+            <button class="peek-edge" data-peek="active" tabindex="-1" aria-hidden="true">
+              <span class="peek-label">Active</span>
+              <span class="peek-count" data-peek-count="active">0</span>
+            </button>
+          </article>
+
+          <article class="paper" data-paper="backburner">
+            <div class="paper-header">
+              <div class="paper-title-block">
+                <div class="paper-eyebrow bb">Backburner</div>
+                <div id="tasks-summary-backburner" class="tasks-summary"></div>
+              </div>
+            </div>
+            <div class="tasks-wrap">
+              <ul class="tasks" data-paper-list="backburner"></ul>
+            </div>
+            <button class="peek-edge" data-peek="backburner" tabindex="-1" aria-hidden="true">
+              <span class="peek-label">Backburner</span>
+              <span class="peek-count" data-peek-count="backburner">0</span>
+            </button>
+          </article>
+
+          <article class="paper" data-paper="done">
+            <div class="paper-header">
+              <div class="paper-title-block">
+                <div class="paper-eyebrow done">Done</div>
+                <div id="tasks-summary-done" class="tasks-summary"></div>
+              </div>
+            </div>
+            <div class="tasks-wrap">
+              <ul class="tasks" data-paper-list="done"></ul>
+            </div>
+            <button class="peek-edge" data-peek="done" tabindex="-1" aria-hidden="true">
+              <span class="peek-label">Done</span>
+              <span class="peek-count" data-peek-count="done">0</span>
+            </button>
+          </article>
+
+        </div>
+      </section>
+
+      <!-- MEETINGS -->
+      <section class="view" id="view-meetings">
+
+        <!-- Floating radial menu -->
+        <div class="radial-root" id="radial-root">
+
+          <!-- Trigger button -->
+          <button class="radial-trigger" id="radial-trigger" aria-label="Filters &amp; Import" title="Filters &amp; Import">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="10" y1="18" x2="14" y2="18"/>
+            </svg>
+          </button>
+
+          <!-- Clear-all badge: hidden until filters are active -->
+          <button class="radial-clear-btn" id="radial-clear-btn" hidden title="Clear all filters">×</button>
+
+          <!-- Main ring: 6 items (positions set by JS) -->
+          <button class="radial-item" data-radial="group" data-label="Group">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.2"/><path d="M2.8 19.5c.8-3.2 3.3-5 6.2-5s5.4 1.8 6.2 5"/><circle cx="17" cy="8" r="2.5"/><path d="M15 13.5c2.5 0 4.4 1.3 5.2 4"/></svg>
+          </button>
+          <button class="radial-item" data-radial="purpose" data-label="Purpose">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+          </button>
+          <button class="radial-item" data-radial="attendee" data-label="Attendees">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </button>
+          <button class="radial-item" data-radial="date" data-label="Date">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17"/><path d="M8 3v4M16 3v4"/></svg>
+          </button>
+          <button class="radial-item" data-radial="open-tasks" id="radial-open-tasks" data-label="Open tasks only">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="m8 12 3 3 5-6"/></svg>
+          </button>
+          <button class="radial-item" data-radial="import" data-label="Import notes">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </button>
+
+          <!-- Sub-rings (populated dynamically by JS) -->
+          <div class="radial-sub-ring" id="rsub-group"></div>
+          <div class="radial-sub-ring" id="rsub-purpose"></div>
+
+          <!-- Attendee popup -->
+          <div class="radial-popup" id="rpop-attendee">
+            <div class="rpop-label">Filter by attendee</div>
+            <input id="rpop-attendee-input" type="text" placeholder="Search by name…" autocomplete="off">
+          </div>
+
+          <!-- Date popup -->
+          <div class="radial-popup" id="rpop-date">
+            <div class="rpop-date-grid">
+              <label>From</label><input id="rpop-date-from" type="date">
+              <label>To</label><input id="rpop-date-to" type="date">
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Meeting list + detail (fills full height) -->
+        <div class="meetings-body">
+          <div class="list-card">
+            <ul id="meetings" class="meetings"></ul>
+          </div>
+          <aside id="detail">
+            <div class="detail-empty">Select a meeting to see the full note.</div>
+          </aside>
+        </div>
+
+      </section>
+
+      <!-- GROUPS -->
+      <section class="view" id="view-groups">
+        <div class="groups-wrap">
+          <table class="groups">
+            <thead>
+              <tr>
+                <th>Group</th>
+                <th class="num">Meetings</th>
+                <th>Last contact</th>
+                <th class="num">Open actions</th>
+                <th class="num">Open reminders</th>
+                <th>Variants</th>
+              </tr>
+            </thead>
+            <tbody id="groups-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Source-note drawer -->
+  <div id="drawer-backdrop" class="drawer-backdrop hidden">
+    <aside class="drawer" id="drawer" role="dialog" aria-modal="true">
+      <button class="drawer-close" id="drawer-close" aria-label="Close">&times;</button>
+      <div id="drawer-content" class="drawer-content">
+        <div class="detail-empty">Click a task to see its source note.</div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Context menu -->
+  <div id="ctx-menu" class="ctx-menu hidden" role="menu"></div>
+
+  <!-- Toast container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Add-task modal -->
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2 id="modal-title">New task</h2>
+        <button class="modal-close" id="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <label>Task</label>
+        <input id="m-text" placeholder="What needs to be done?" autocomplete="off">
+
+        <div class="modal-row">
+          <div>
+            <label>Group (optional)</label>
+            <input id="m-group" list="m-group-list" placeholder="Pick or type new" autocomplete="off">
+            <datalist id="m-group-list"></datalist>
+          </div>
+          <div>
+            <label>Deadline (optional)</label>
+            <div class="deadline-selects">
+              <select id="m-dl-month">
+                <option value="">Month</option>
+                <option value="01">Jan</option><option value="02">Feb</option>
+                <option value="03">Mar</option><option value="04">Apr</option>
+                <option value="05">May</option><option value="06">Jun</option>
+                <option value="07">Jul</option><option value="08">Aug</option>
+                <option value="09">Sep</option><option value="10">Oct</option>
+                <option value="11">Nov</option><option value="12">Dec</option>
+              </select>
+              <select id="m-dl-day">
+                <option value="">Day</option>
+                <option value="01">1</option><option value="02">2</option><option value="03">3</option>
+                <option value="04">4</option><option value="05">5</option><option value="06">6</option>
+                <option value="07">7</option><option value="08">8</option><option value="09">9</option>
+                <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+                <option value="13">13</option><option value="14">14</option><option value="15">15</option>
+                <option value="16">16</option><option value="17">17</option><option value="18">18</option>
+                <option value="19">19</option><option value="20">20</option><option value="21">21</option>
+                <option value="22">22</option><option value="23">23</option><option value="24">24</option>
+                <option value="25">25</option><option value="26">26</option><option value="27">27</option>
+                <option value="28">28</option><option value="29">29</option><option value="30">30</option>
+                <option value="31">31</option>
+              </select>
+              <select id="m-dl-year"></select>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary-btn" id="modal-cancel">Cancel</button>
+        <button class="primary-btn" id="modal-submit">Add task</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit-task modal -->
+  <div id="edit-modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2>Edit task</h2>
+        <button class="modal-close" id="edit-modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <label>Task text</label>
+        <input id="edit-m-text" placeholder="Task text" autocomplete="off">
+        <p class="modal-hint">Tip: include <code>@group:Name</code> or <code>due YYYY-MM-DD</code> in the text.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary-btn" id="edit-modal-cancel">Cancel</button>
+        <button class="primary-btn" id="edit-modal-submit">Save changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import modal -->
+  <div id="import-modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal modal-wide" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2>Import meeting notes</h2>
+        <button class="modal-close" id="import-modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">Upload <code>.md</code> files. They'll be processed and added to your meetings folder.</p>
+        <div class="import-drop-zone" id="import-drop-zone">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span class="drop-label">Drop .md files here or <span class="drop-link">browse</span></span>
+          <input type="file" id="import-file-input" multiple accept=".md" style="display:none">
+        </div>
+        <div id="import-file-list" class="import-file-list"></div>
+        <div id="import-results" class="import-results"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary-btn" id="import-modal-cancel">Close</button>
+        <button class="primary-btn" id="import-modal-submit" disabled>Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Search overlay -->
+  <div class="search-overlay" id="search-overlay" aria-hidden="true">
+    <div class="search-overlay-backdrop" id="search-overlay-backdrop"></div>
+    <div class="search-overlay-box">
+      <div class="search-overlay-inner">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted-2);flex-shrink:0"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="q" type="search" class="search-overlay-input" placeholder="Search…" autocomplete="off">
+        <kbd class="search-overlay-kbd">esc</kbd>
+      </div>
+    </div>
+  </div>
+
+  <!-- Nav dock -->
+  <nav class="nav-dock" id="nav-dock" aria-label="Primary navigation">
+    <button class="dock-btn" data-tab="home" title="Home (1)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V20a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9.5"/></svg>
+    </button>
+    <button class="dock-btn" data-tab="tasks" title="Tasks (2)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="m8 12 3 3 5-6"/></svg>
+      <span class="dock-badge" id="nav-tasks-count"></span>
+    </button>
+    <button class="dock-btn" data-tab="meetings" title="Meetings (3)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17"/><path d="M8 3v4M16 3v4"/></svg>
+      <span class="dock-badge" id="nav-meetings-count"></span>
+    </button>
+    <button class="dock-btn" data-tab="groups" title="Groups (4)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.2"/><path d="M2.8 19.5c.8-3.2 3.3-5 6.2-5s5.4 1.8 6.2 5"/><circle cx="17" cy="8" r="2.5"/><path d="M15 13.5c2.5 0 4.4 1.3 5.2 4"/></svg>
+    </button>
+    <div class="dock-divider"></div>
+    <button class="dock-btn dock-search-btn" id="dock-search-btn" title="Search (/)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    </button>
+    <div class="dock-divider"></div>
+    <div class="dock-avatar" title="Will — Notes">W</div>
+  </nav>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
