@@ -746,6 +746,9 @@ input, select, textarea { font-family: inherit; }
   border-color: #e5b8b8; font-weight: 600;
 }
 .tasks .chip.bb { background: var(--backburner-soft); color: var(--backburner); border-color: #d5ccdd; }
+.tasks .chip.priority-high { background: #FDE8E8; color: #991B1B; border-color: #F5C6C6; font-weight: 600; }
+.tasks .chip.priority-low  { background: var(--card-soft); color: var(--muted-2); border-color: var(--border); opacity: 0.75; }
+.tasks .chip.urgency-auto  { background: #FEF3E2; color: #B45309; border-color: #F5D9A0; font-style: italic; }
 
 .tasks .source {
   color: var(--muted); font-size: 11px;
@@ -1689,6 +1692,15 @@ table.groups tr:last-child td { border-bottom: none; }
 .modal-desc code {
   font-family: var(--mono); font-size: 12px;
   background: var(--card-soft); padding: 1px 5px; border-radius: 4px;
+}
+.modal-priority-row {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 4px;
+}
+.modal-priority-row label {
+  margin-bottom: 0; white-space: nowrap; min-width: 52px;
+}
+.modal-priority-row select {
+  width: auto; margin-bottom: 0; padding: 7px 10px; font-size: 13px;
 }
 .modal-row {
   display: grid; grid-template-columns: 1fr 180px; gap: 12px;

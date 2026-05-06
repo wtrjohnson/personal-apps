@@ -87,6 +87,7 @@ def init_db() -> None:
                     source_date DATE,
                     deadline TEXT,
                     deadline_raw TEXT,
+                    priority TEXT DEFAULT 'normal',
                     created_at TIMESTAMP DEFAULT NOW()
                 );
                 CREATE TABLE IF NOT EXISTS groups_map (
@@ -103,6 +104,17 @@ def init_db() -> None:
                     completed_date DATE DEFAULT CURRENT_DATE,
                     completed_at TIMESTAMP DEFAULT NOW()
                 );
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tasks' AND column_name='priority'
+                    ) THEN
+                        ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'normal'
+                            CHECK (priority IN ('high','normal','low'));
+                    END IF;
+                END $$;
             """)
 
 
@@ -207,6 +219,7 @@ class Task:
     type: str                   # "action" | "reminder" | "free"
     done: bool
     backburner: bool
+    priority: str              # "high" | "normal" | "low"
     source_filename: str
     section: str
     meeting_id: Optional[str]
@@ -223,6 +236,7 @@ class Task:
             "type": self.type,
             "done": self.done,
             "backburner": self.backburner,
+            "priority": self.priority,
             "source_filename": self.source_filename,
             "section": self.section,
             "meeting_id": self.meeting_id,
@@ -298,6 +312,50 @@ def _year_from_date(s: Optional[str]) -> Optional[int]:
         return None
     m = re.match(r"(\d{4})", s)
     return int(m.group(1)) if m else None
+
+
+_URGENCY_KW: list = [
+    (re.compile(r"\b(?:urgent|urgently)\b",            re.IGNORECASE), 100),
+    (re.compile(r"\basap\b|a\.s\.a\.p",                re.IGNORECASE), 100),
+    (re.compile(r"\b(?:critical|blocker|blocking)\b",  re.IGNORECASE), 80),
+    (re.compile(r"\bimmediately\b|\bright away\b",      re.IGNORECASE), 70),
+    (re.compile(r"\bp[01]\b",                          re.IGNORECASE), 80),
+    (re.compile(r"\b(?:high priority|top priority)\b", re.IGNORECASE), 80),
+    (re.compile(r"\b(?:must do|must complete)\b",      re.IGNORECASE), 50),
+    (re.compile(r"\b(?:mandatory|required)\b",         re.IGNORECASE), 40),
+    (re.compile(r"\beod\b|\bend of day\b",             re.IGNORECASE), 30),
+]
+
+
+def _urgency_score(task: dict) -> int:
+    today = date_cls.today()
+    score = 0
+    p = task.get("priority", "normal")
+    if p == "high":  score += 300
+    elif p == "low": score -= 100
+    if task.get("overdue"):
+        score += 200
+        try: score += (today - date_cls.fromisoformat(task["deadline"])).days * 5
+        except (ValueError, TypeError, KeyError): pass
+    elif task.get("deadline") and not task.get("done"):
+        try:
+            d = (date_cls.fromisoformat(task["deadline"]) - today).days
+            if   d <= 1:  score += 150
+            elif d <= 3:  score += 100
+            elif d <= 7:  score += 50
+            elif d <= 14: score += 20
+        except (ValueError, TypeError): pass
+    if task.get("source_date"):
+        try: score += min(40, (today - date_cls.fromisoformat(task["source_date"])).days // 7 * 5)
+        except (ValueError, TypeError): pass
+    t = task.get("type", "")
+    if t == "action":   score += 10
+    elif t == "reminder": score += 5
+    kw = 0
+    for pat, pts in _URGENCY_KW:
+        if pat.search(task.get("text", "")): kw += pts
+    score += min(150, kw)
+    return score
 
 
 def canonical_group(raw_group: str) -> str:
@@ -410,6 +468,7 @@ def _task_row_to_task(row: dict, today: str) -> Task:
         type=row["type"],
         done=done,
         backburner=row["backburner"],
+        priority=row.get("priority") or "normal",
         source_filename=row["source_filename"] or "",
         section=row["section"] or "",
         meeting_id=row["meeting_id"],
@@ -781,6 +840,7 @@ def api_tasks():
     group_filter = a.get("group", "")
     overdue_only = a.get("overdue", "").lower() in ("1", "true", "yes")
     q = a.get("q", "").lower()
+    priority_filter = a.get("priority", "")
 
     tasks = db_get_all_tasks(include_done=True)
 
@@ -796,6 +856,7 @@ def api_tasks():
         if type_filter and t.type != type_filter: continue
         if overdue_only and not t.overdue: continue
         if q and q not in t.text.lower() and q not in (t.group or "").lower(): continue
+        if priority_filter and t.priority != priority_filter: continue
         pre_group.append(t)
 
     groups_in_scope = sorted({t.group for t in pre_group if t.group}, key=str.casefold)
@@ -803,16 +864,11 @@ def api_tasks():
     out = []
     for t in pre_group:
         if group_filter and (t.group or "") != group_filter: continue
-        out.append(t.as_dict())
+        d = t.as_dict()
+        d["urgency_score"] = _urgency_score(d)
+        out.append(d)
 
-    def sort_key(t: dict):
-        return (
-            0 if t["overdue"] else 1,
-            t["deadline"] or "9999-99-99",
-            -(int((t["source_date"] or "0000-00-00").replace("-", "")) if t["source_date"] else 0),
-        )
-
-    out.sort(key=sort_key)
+    out.sort(key=lambda t: -t["urgency_score"])
     return jsonify({"count": len(out), "tasks": out, "groups_in_scope": groups_in_scope})
 
 
@@ -828,6 +884,29 @@ def api_backburner_task():
             with conn.cursor() as cur:
                 cur.execute("UPDATE tasks SET backburner = %s WHERE id = %s", (on, task_id))
         return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tasks/priority", methods=["POST"])
+def api_set_priority():
+    data = request.get_json(force=True, silent=True) or {}
+    task_id = (data.get("id") or "").strip()
+    priority = (data.get("priority") or "").strip().lower()
+    if not task_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+    if priority not in ("high", "normal", "low"):
+        return jsonify({"ok": False, "error": "priority must be high, normal, or low"}), 400
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tasks SET priority = %s WHERE id = %s RETURNING id",
+                    (priority, task_id),
+                )
+                if cur.fetchone() is None:
+                    return jsonify({"ok": False, "error": "task not found"}), 404
+        return jsonify({"ok": True, "priority": priority})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -902,6 +981,10 @@ def api_edit_task():
             return jsonify({"ok": False, "error": "id or (source_filename + old_text) required"}), 400
         task_id = _task_id(filename, section, old_text)
 
+    new_priority = (data.get("priority") or "").strip().lower()
+    if new_priority not in ("high", "normal", "low"):
+        new_priority = None
+
     new_deadline, new_deadline_raw = extract_deadline(new_text)
     # Text change means the deterministic ID changes too
     new_id = _task_id(filename, section, new_text) if filename and section else task_id
@@ -909,12 +992,20 @@ def api_edit_task():
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE tasks
-                    SET id = %s, text = %s, deadline = %s, deadline_raw = %s
-                    WHERE id = %s
-                    RETURNING id
-                """, (new_id, new_text, new_deadline, new_deadline_raw, task_id))
+                if new_priority:
+                    cur.execute("""
+                        UPDATE tasks
+                        SET id = %s, text = %s, deadline = %s, deadline_raw = %s, priority = %s
+                        WHERE id = %s
+                        RETURNING id
+                    """, (new_id, new_text, new_deadline, new_deadline_raw, new_priority, task_id))
+                else:
+                    cur.execute("""
+                        UPDATE tasks
+                        SET id = %s, text = %s, deadline = %s, deadline_raw = %s
+                        WHERE id = %s
+                        RETURNING id
+                    """, (new_id, new_text, new_deadline, new_deadline_raw, task_id))
                 if cur.fetchone() is None:
                     return jsonify({"ok": False, "error": "task not found"}), 404
         return jsonify({"ok": True})
@@ -928,6 +1019,9 @@ def api_add_task():
     text = (data.get("text") or "").strip()
     group = (data.get("group") or "").strip() or None
     deadline_in = (data.get("deadline") or "").strip() or None
+    add_priority = (data.get("priority") or "normal").strip().lower()
+    if add_priority not in ("high", "normal", "low"):
+        add_priority = "normal"
     if not text:
         return jsonify({"ok": False, "error": "text required"}), 400
 
@@ -947,10 +1041,10 @@ def api_add_task():
                 cur.execute("""
                     INSERT INTO tasks
                         (id, text, type, done, backburner, source_filename, section,
-                         group_name, source_date, deadline, deadline_raw)
+                         group_name, source_date, deadline, deadline_raw, priority)
                     VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
-                            %s, %s, %s, %s)
-                """, (tid, full_text, group, date_cls.today(), deadline, deadline_raw))
+                            %s, %s, %s, %s, %s)
+                """, (tid, full_text, group, date_cls.today(), deadline, deadline_raw, add_priority))
         return jsonify({"ok": True, "text": full_text})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

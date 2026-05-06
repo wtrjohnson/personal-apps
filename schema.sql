@@ -34,8 +34,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     source_date      DATE,
     deadline         TEXT,
     deadline_raw     TEXT,
+    priority         TEXT      DEFAULT 'normal' CHECK (priority IN ('high', 'normal', 'low')),
     created_at       TIMESTAMP DEFAULT NOW()
 );
+
+-- Migration: add priority column to existing databases
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'normal'
+    CHECK (priority IN ('high', 'normal', 'low'));
 
 -- Group alias map: raw group name → canonical display name.
 -- raw_name is stored lowercase-trimmed to match lookup behaviour.

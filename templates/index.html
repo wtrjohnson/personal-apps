@@ -141,6 +141,15 @@
                   <label for="t-group">Group</label>
                   <select id="t-group"><option value="">All groups</option></select>
                 </div>
+                <div class="task-filter-field">
+                  <label for="t-priority">Priority</label>
+                  <select id="t-priority">
+                    <option value="">Any</option>
+                    <option value="high">High</option>
+                    <option value="normal">Normal</option>
+                    <option value="low">Low</option>
+                  </select>
+                </div>
                 <div class="task-filter-field task-filter-check">
                   <label><input id="t-overdue" type="checkbox"> Only overdue</label>
                 </div>
@@ -308,6 +317,15 @@
         <label>Task</label>
         <input id="m-text" placeholder="What needs to be done?" autocomplete="off">
 
+        <div class="modal-priority-row">
+          <label for="m-priority">Priority</label>
+          <select id="m-priority">
+            <option value="normal" selected>Normal</option>
+            <option value="high">High</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
+
         <div class="modal-row">
           <div>
             <label>Group (optional)</label>
@@ -362,6 +380,14 @@
       <div class="modal-body">
         <label>Task text</label>
         <input id="edit-m-text" placeholder="Task text" autocomplete="off">
+        <div class="modal-priority-row">
+          <label for="edit-m-priority">Priority</label>
+          <select id="edit-m-priority">
+            <option value="normal">Normal</option>
+            <option value="high">High</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
         <p class="modal-hint">Tip: include <code>@group:Name</code> or <code>due YYYY-MM-DD</code> in the text.</p>
       </div>
       <div class="modal-footer">
