@@ -35,13 +35,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     deadline         TEXT,
     deadline_raw     TEXT,
     priority         TEXT      DEFAULT 'normal' CHECK (priority IN ('high', 'normal', 'low')),
+    contact          TEXT      DEFAULT NULL,
     created_at       TIMESTAMP DEFAULT NOW()
 );
 
--- Migration: add priority column to existing databases
+-- Migration: add columns to existing databases
 ALTER TABLE tasks
   ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'normal'
     CHECK (priority IN ('high', 'normal', 'low'));
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS contact TEXT DEFAULT NULL;
 
 -- Group alias map: raw group name → canonical display name.
 -- raw_name is stored lowercase-trimmed to match lookup behaviour.

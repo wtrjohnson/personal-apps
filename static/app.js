@@ -115,9 +115,11 @@ async function renderHome() {
     });
   }
   $("#ring-percent").textContent = `${pct}%`;
-  $("#ring-caption").textContent = s.total_tasks === 0
-    ? "No tasks yet."
-    : `${s.done_count} of ${s.total_tasks} tasks complete`;
+  const weekDone = s.completions_30d || 0;
+  const weekOpen = s.open_count || 0;
+  $("#ring-caption").textContent = weekDone + weekOpen === 0
+    ? "No tasks this week."
+    : `${weekDone} done of ${weekDone + weekOpen} this week`;
 
   drawSparkline(s.completions_per_day || []);
   $("#spark-total").textContent = s.completions_30d || 0;
@@ -225,9 +227,10 @@ function _taskRow(t, i, paper) {
   const chips = [];
   chips.push(`<span class="chip type-${t.type}">${escapeHtml(t.type)}</span>`);
   if (t.group) chips.push(`<span class="chip group">${escapeHtml(t.group)}</span>`);
+  if (t.contact) chips.push(`<span class="chip contact">${escapeHtml(t.contact)}</span>`);
   if (t.deadline) {
     const cls = t.overdue ? "chip deadline overdue" : "chip deadline";
-    chips.push(`<span class="${cls}">⏰ ${escapeHtml(t.deadline)}</span>`);
+    chips.push(`<span class="${cls}">${escapeHtml(t.deadline)}</span>`);
   }
   if (t.priority === "high") {
     chips.push(`<span class="chip priority-high">▲ high</span>`);
@@ -488,6 +491,36 @@ function openEditModal(task) {
   _editTask = task;
   $("#edit-m-text").value = task.text;
   if ($("#edit-m-priority")) $("#edit-m-priority").value = task.priority || "normal";
+
+  // Populate group datalist
+  const list = $("#edit-m-group-list");
+  if (list) {
+    list.innerHTML = state.tasksGroupsInScope.concat(state.facets.groups)
+      .filter((v, i, a) => a.indexOf(v) === i)
+      .map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
+  }
+  if ($("#edit-m-group")) $("#edit-m-group").value = task.group || "";
+  if ($("#edit-m-contact")) $("#edit-m-contact").value = task.contact || "";
+
+  // Populate year select and deadline
+  const yearSel = $("#edit-m-dl-year");
+  if (yearSel) {
+    const thisYear = new Date().getFullYear();
+    yearSel.innerHTML = `<option value="">Year</option>` +
+      [thisYear - 1, thisYear, thisYear + 1, thisYear + 2]
+        .map((y) => `<option value="${y}">${y}</option>`).join("");
+  }
+  if (task.deadline && task.deadline.match(/^\d{4}-\d{2}-\d{2}$/)) {
+    const [yy, mo, dd] = task.deadline.split("-");
+    if ($("#edit-m-dl-month")) $("#edit-m-dl-month").value = mo;
+    if ($("#edit-m-dl-day"))   $("#edit-m-dl-day").value = dd;
+    if ($("#edit-m-dl-year"))  $("#edit-m-dl-year").value = yy;
+  } else {
+    ["edit-m-dl-month", "edit-m-dl-day", "edit-m-dl-year"].forEach((id) => {
+      const el = $("#" + id); if (el) el.value = "";
+    });
+  }
+
   $("#edit-modal-backdrop").classList.remove("hidden");
   setTimeout(() => {
     const inp = $("#edit-m-text");
@@ -506,6 +539,9 @@ async function submitEditModal() {
   const newText = $("#edit-m-text").value.trim();
   if (!newText) { $("#edit-m-text").focus(); return; }
   const newPriority = $("#edit-m-priority")?.value || "normal";
+  const newGroup = $("#edit-m-group")?.value.trim() || null;
+  const newDeadline = getDeadlineValue("edit-m") || null;
+  const newContact = $("#edit-m-contact")?.value.trim() ?? null;
   await api("/api/tasks/edit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -515,6 +551,9 @@ async function submitEditModal() {
       old_text: _editTask.text,
       new_text: newText,
       priority: newPriority,
+      group: newGroup,
+      deadline_direct: newDeadline,
+      contact: newContact,
     }),
   });
   closeEditModal();
@@ -581,12 +620,43 @@ async function openDrawer(task) {
 }
 
 // ---------- Add-task modal ----------
-function getDeadlineValue() {
-  const mo = $("#m-dl-month").value;
-  const dd = $("#m-dl-day").value;
-  const yy = $("#m-dl-year").value;
+function getDeadlineValue(prefix = "m") {
+  const mo = $(`#${prefix}-dl-month`).value;
+  const dd = $(`#${prefix}-dl-day`).value;
+  const yy = $(`#${prefix}-dl-year`).value;
   if (!mo || !dd || !yy) return "";
   return `${yy}-${mo}-${dd}`;
+}
+
+function setDeadlineSelects(date, prefix = "m") {
+  const mo = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const yy = String(date.getFullYear());
+  $(`#${prefix}-dl-month`).value = mo;
+  $(`#${prefix}-dl-day`).value = dd;
+  $(`#${prefix}-dl-year`).value = yy;
+}
+
+function _nextWeekday(targetDay) {
+  const today = new Date();
+  const d = new Date(today);
+  const curDay = today.getDay(); // 0=Sun, 1=Mon, ..., 5=Fri, 6=Sat
+  let diff = targetDay - curDay;
+  if (diff <= 0) diff += 7;
+  d.setDate(today.getDate() + diff);
+  return d;
+}
+
+function _thisFriday() {
+  const today = new Date();
+  const curDay = today.getDay();
+  if (curDay === 6) { // Saturday → next Friday
+    const d = new Date(today); d.setDate(today.getDate() + 6); return d;
+  }
+  const diff = curDay === 0 ? 5 : 5 - curDay; // Sunday=5 ahead, else days to Fri
+  const d = new Date(today);
+  d.setDate(today.getDate() + (diff <= 0 ? 7 + diff : diff));
+  return d;
 }
 
 function openAddModal() {
@@ -606,6 +676,7 @@ function openAddModal() {
   $("#m-group").value = "";
   ["m-dl-month", "m-dl-day", "m-dl-year"].forEach((id) => ($("#" + id).value = ""));
   if ($("#m-priority")) $("#m-priority").value = "normal";
+  if ($("#m-contact")) $("#m-contact").value = "";
   $("#modal-backdrop").classList.remove("hidden");
   setTimeout(() => $("#m-text").focus(), 10);
 }
@@ -617,10 +688,11 @@ async function submitAddModal() {
   const group = $("#m-group").value.trim();
   const deadline = getDeadlineValue();
   const priority = $("#m-priority")?.value || "normal";
+  const contact = $("#m-contact")?.value.trim() || null;
   await api("/api/tasks/add", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, group, deadline, priority }),
+    body: JSON.stringify({ text, group, deadline, priority, contact }),
   });
   closeAddModal();
   if (state.tab === "tasks") await refreshTasks();
@@ -1109,6 +1181,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#drawer-close").addEventListener("click", closeDrawer);
   $("#drawer-backdrop").addEventListener("click", (e) => {
     if (e.target.id === "drawer-backdrop") closeDrawer();
+  });
+
+  // Quick deadline buttons (add modal)
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".dl-quick-btn");
+    if (!btn) return;
+    const prefix = btn.dataset.prefix || "m";
+    const which = btn.dataset.quick;
+    const today = new Date();
+    if (which === "today") {
+      setDeadlineSelects(today, prefix);
+    } else if (which === "this-week") {
+      setDeadlineSelects(_thisFriday(), prefix);
+    } else if (which === "next-week") {
+      const nextMon = _nextWeekday(1);
+      const nextFri = new Date(nextMon); nextFri.setDate(nextMon.getDate() + 4);
+      setDeadlineSelects(nextFri, prefix);
+    }
   });
 
   // Home cards

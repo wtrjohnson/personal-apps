@@ -88,6 +88,7 @@ def init_db() -> None:
                     deadline TEXT,
                     deadline_raw TEXT,
                     priority TEXT DEFAULT 'normal',
+                    contact TEXT DEFAULT NULL,
                     created_at TIMESTAMP DEFAULT NOW()
                 );
                 CREATE TABLE IF NOT EXISTS groups_map (
@@ -113,6 +114,12 @@ def init_db() -> None:
                     ) THEN
                         ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'normal'
                             CHECK (priority IN ('high','normal','low'));
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tasks' AND column_name='contact'
+                    ) THEN
+                        ALTER TABLE tasks ADD COLUMN contact TEXT DEFAULT NULL;
                     END IF;
                 END $$;
             """)
@@ -220,6 +227,7 @@ class Task:
     done: bool
     backburner: bool
     priority: str              # "high" | "normal" | "low"
+    contact: Optional[str]
     source_filename: str
     section: str
     meeting_id: Optional[str]
@@ -237,6 +245,7 @@ class Task:
             "done": self.done,
             "backburner": self.backburner,
             "priority": self.priority,
+            "contact": self.contact,
             "source_filename": self.source_filename,
             "section": self.section,
             "meeting_id": self.meeting_id,
@@ -469,6 +478,7 @@ def _task_row_to_task(row: dict, today: str) -> Task:
         done=done,
         backburner=row["backburner"],
         priority=row.get("priority") or "normal",
+        contact=row.get("contact") or None,
         source_filename=row["source_filename"] or "",
         section=row["section"] or "",
         meeting_id=row["meeting_id"],
@@ -984,28 +994,34 @@ def api_edit_task():
     new_priority = (data.get("priority") or "").strip().lower()
     if new_priority not in ("high", "normal", "low"):
         new_priority = None
+    new_group = (data.get("group") or "").strip() or None
+    new_contact = data.get("contact")  # None means "don't change"; "" means clear it
+    # deadline_direct from picker overrides text-extracted deadline
+    deadline_direct = (data.get("deadline_direct") or "").strip() or None
 
-    new_deadline, new_deadline_raw = extract_deadline(new_text)
+    if deadline_direct:
+        new_deadline, new_deadline_raw = deadline_direct, deadline_direct
+    else:
+        new_deadline, new_deadline_raw = extract_deadline(new_text)
     # Text change means the deterministic ID changes too
     new_id = _task_id(filename, section, new_text) if filename and section else task_id
 
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
+                sets = ["id = %s", "text = %s", "deadline = %s", "deadline_raw = %s"]
+                vals = [new_id, new_text, new_deadline, new_deadline_raw]
                 if new_priority:
-                    cur.execute("""
-                        UPDATE tasks
-                        SET id = %s, text = %s, deadline = %s, deadline_raw = %s, priority = %s
-                        WHERE id = %s
-                        RETURNING id
-                    """, (new_id, new_text, new_deadline, new_deadline_raw, new_priority, task_id))
-                else:
-                    cur.execute("""
-                        UPDATE tasks
-                        SET id = %s, text = %s, deadline = %s, deadline_raw = %s
-                        WHERE id = %s
-                        RETURNING id
-                    """, (new_id, new_text, new_deadline, new_deadline_raw, task_id))
+                    sets.append("priority = %s"); vals.append(new_priority)
+                if new_group is not None:
+                    sets.append("group_name = %s"); vals.append(new_group or None)
+                if new_contact is not None:
+                    sets.append("contact = %s"); vals.append((new_contact or "").strip() or None)
+                vals.append(task_id)
+                cur.execute(
+                    f"UPDATE tasks SET {', '.join(sets)} WHERE id = %s RETURNING id",
+                    vals,
+                )
                 if cur.fetchone() is None:
                     return jsonify({"ok": False, "error": "task not found"}), 404
         return jsonify({"ok": True})
@@ -1022,6 +1038,7 @@ def api_add_task():
     add_priority = (data.get("priority") or "normal").strip().lower()
     if add_priority not in ("high", "normal", "low"):
         add_priority = "normal"
+    add_contact = (data.get("contact") or "").strip() or None
     if not text:
         return jsonify({"ok": False, "error": "text required"}), 400
 
@@ -1041,10 +1058,10 @@ def api_add_task():
                 cur.execute("""
                     INSERT INTO tasks
                         (id, text, type, done, backburner, source_filename, section,
-                         group_name, source_date, deadline, deadline_raw, priority)
+                         group_name, source_date, deadline, deadline_raw, priority, contact)
                     VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
-                            %s, %s, %s, %s, %s)
-                """, (tid, full_text, group, date_cls.today(), deadline, deadline_raw, add_priority))
+                            %s, %s, %s, %s, %s, %s)
+                """, (tid, full_text, group, date_cls.today(), deadline, deadline_raw, add_priority, add_contact))
         return jsonify({"ok": True, "text": full_text})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -1054,7 +1071,6 @@ def api_add_task():
 def api_stats():
     today = date_cls.today()
     today_iso = today.isoformat()
-    horizon_days = 7
 
     all_tasks = db_get_all_tasks(include_done=True)
     open_tasks = [t for t in all_tasks if not t.done and not t.backburner]
@@ -1063,9 +1079,11 @@ def api_stats():
     overdue_open = [t for t in open_tasks if t.overdue]
     due_today = [t for t in open_tasks if t.deadline == today_iso]
 
-    window_dates = [today + timedelta(days=i) for i in range(horizon_days)]
+    # Deadlines strip: Mon–Fri of the current work week
+    monday = today - timedelta(days=today.weekday())
+    work_week = [monday + timedelta(days=i) for i in range(5)]  # Mon=0 … Fri=4
     deadlines_by_day = []
-    for d in window_dates:
+    for d in work_week:
         iso = d.isoformat()
         deadlines_by_day.append({
             "date": iso,
@@ -1095,9 +1113,17 @@ def api_stats():
         key=lambda x: x["count"], reverse=True,
     )[:8]
 
-    total_tasks = len(all_tasks) - sum(1 for t in all_tasks if t.backburner)
-    pct_complete = round((len(done_tasks) / total_tasks) * 100) if total_tasks else 0
-    per_day = completions_per_day(days=30)
+    # Weekly completion %: tasks completed this week / (completed this week + currently open)
+    week_start = monday.isoformat()
+    week_completions_this_week = sum(
+        1 for t in all_tasks
+        if t.done and not t.backburner
+        and (t.source_date or "") >= week_start  # proxy for "worked on this week"
+    )
+    per_day = completions_per_day(days=7)
+    week_done_count = sum(x["count"] for x in per_day)
+    week_total = week_done_count + len(open_tasks)
+    pct_complete = round((week_done_count / week_total) * 100) if week_total else 0
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -1139,7 +1165,7 @@ def api_stats():
         "overdue_top": overdue_top,
         "by_group": by_group,
         "completions_per_day": per_day,
-        "completions_30d": sum(x["count"] for x in per_day),
+        "completions_30d": week_done_count,
         "recent_meeting": recent,
         "meetings_total": total_meetings,
     })

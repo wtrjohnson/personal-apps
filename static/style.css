@@ -746,6 +746,7 @@ input, select, textarea { font-family: inherit; }
   border-color: #e5b8b8; font-weight: 600;
 }
 .tasks .chip.bb { background: var(--backburner-soft); color: var(--backburner); border-color: #d5ccdd; }
+.tasks .chip.contact { background: #EAF0FB; color: #1E40AF; border-color: #C3D3F0; }
 .tasks .chip.priority-high { background: #FDE8E8; color: #991B1B; border-color: #F5C6C6; font-weight: 600; }
 .tasks .chip.priority-low  { background: var(--card-soft); color: var(--muted-2); border-color: var(--border); opacity: 0.75; }
 .tasks .chip.urgency-auto  { background: #FEF3E2; color: #B45309; border-color: #F5D9A0; font-style: italic; }
@@ -1741,6 +1742,18 @@ table.groups tr:last-child td { border-bottom: none; }
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-softer);
+}
+.dl-quick-btns {
+  display: flex; gap: 6px; margin-top: 6px;
+}
+.dl-quick-btn {
+  padding: 4px 10px; font-size: 12px; border-radius: 20px;
+  border: 1px solid var(--border-strong); background: var(--card);
+  color: var(--ink); cursor: pointer; font: inherit;
+  transition: background 0.1s, border-color 0.1s;
+}
+.dl-quick-btn:hover {
+  background: var(--accent-softer); border-color: var(--accent);
 }
 
 /* =========================================================

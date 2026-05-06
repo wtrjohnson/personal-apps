@@ -56,7 +56,7 @@
         </div>
 
         <div class="card card-ring elevated">
-          <div class="card-title">% Completed (30 d)</div>
+          <div class="card-title">% Completed (this week)</div>
           <div class="ring-wrap">
             <svg width="150" height="150" viewBox="0 0 150 150">
               <circle cx="75" cy="75" r="62" stroke="#f0ebdc" stroke-width="14" fill="none"/>
@@ -74,7 +74,7 @@
 
         <div class="card card-spark elevated">
           <div class="card-title">Tasks completed</div>
-          <div class="spark-title">Last 30 days</div>
+          <div class="spark-title">This week</div>
           <div>
             <div class="spark-total" id="spark-total">–</div>
             <span class="spark-total-label">Completions</span>
@@ -360,7 +360,16 @@
               </select>
               <select id="m-dl-year"></select>
             </div>
+            <div class="dl-quick-btns">
+              <button type="button" class="dl-quick-btn" data-quick="today" data-prefix="m">Today</button>
+              <button type="button" class="dl-quick-btn" data-quick="this-week" data-prefix="m">This week</button>
+              <button type="button" class="dl-quick-btn" data-quick="next-week" data-prefix="m">Next week</button>
+            </div>
           </div>
+        </div>
+        <div class="modal-priority-row">
+          <label for="m-contact">Contact (optional)</label>
+          <input id="m-contact" placeholder="Name or contact" autocomplete="off" style="flex:1; margin-bottom:0;">
         </div>
       </div>
       <div class="modal-footer">
@@ -378,8 +387,9 @@
         <button class="modal-close" id="edit-modal-close" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body">
-        <label>Task text</label>
+        <label>Task</label>
         <input id="edit-m-text" placeholder="Task text" autocomplete="off">
+
         <div class="modal-priority-row">
           <label for="edit-m-priority">Priority</label>
           <select id="edit-m-priority">
@@ -388,7 +398,52 @@
             <option value="low">Low</option>
           </select>
         </div>
-        <p class="modal-hint">Tip: include <code>@group:Name</code> or <code>due YYYY-MM-DD</code> in the text.</p>
+
+        <div class="modal-row">
+          <div>
+            <label>Group (optional)</label>
+            <input id="edit-m-group" list="edit-m-group-list" placeholder="Pick or type new" autocomplete="off">
+            <datalist id="edit-m-group-list"></datalist>
+          </div>
+          <div>
+            <label>Deadline (optional)</label>
+            <div class="deadline-selects">
+              <select id="edit-m-dl-month">
+                <option value="">Month</option>
+                <option value="01">Jan</option><option value="02">Feb</option>
+                <option value="03">Mar</option><option value="04">Apr</option>
+                <option value="05">May</option><option value="06">Jun</option>
+                <option value="07">Jul</option><option value="08">Aug</option>
+                <option value="09">Sep</option><option value="10">Oct</option>
+                <option value="11">Nov</option><option value="12">Dec</option>
+              </select>
+              <select id="edit-m-dl-day">
+                <option value="">Day</option>
+                <option value="01">1</option><option value="02">2</option><option value="03">3</option>
+                <option value="04">4</option><option value="05">5</option><option value="06">6</option>
+                <option value="07">7</option><option value="08">8</option><option value="09">9</option>
+                <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+                <option value="13">13</option><option value="14">14</option><option value="15">15</option>
+                <option value="16">16</option><option value="17">17</option><option value="18">18</option>
+                <option value="19">19</option><option value="20">20</option><option value="21">21</option>
+                <option value="22">22</option><option value="23">23</option><option value="24">24</option>
+                <option value="25">25</option><option value="26">26</option><option value="27">27</option>
+                <option value="28">28</option><option value="29">29</option><option value="30">30</option>
+                <option value="31">31</option>
+              </select>
+              <select id="edit-m-dl-year"></select>
+            </div>
+            <div class="dl-quick-btns">
+              <button type="button" class="dl-quick-btn" data-quick="today" data-prefix="edit-m">Today</button>
+              <button type="button" class="dl-quick-btn" data-quick="this-week" data-prefix="edit-m">This week</button>
+              <button type="button" class="dl-quick-btn" data-quick="next-week" data-prefix="edit-m">Next week</button>
+            </div>
+          </div>
+        </div>
+        <div class="modal-priority-row">
+          <label for="edit-m-contact">Contact (optional)</label>
+          <input id="edit-m-contact" placeholder="Name or contact" autocomplete="off" style="flex:1; margin-bottom:0;">
+        </div>
       </div>
       <div class="modal-footer">
         <button class="secondary-btn" id="edit-modal-cancel">Cancel</button>
