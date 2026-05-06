@@ -275,8 +275,8 @@ input, select, textarea { font-family: inherit; }
 }
 .card-hero .hero-stats .stat-num {
   font-size: 40px;
-  font-weight: 700;
-  letter-spacing: -1px;
+  font-weight: 800;
+  letter-spacing: -2px;
   line-height: 1;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
@@ -389,8 +389,8 @@ input, select, textarea { font-family: inherit; }
 }
 .card-ring .ring-percent {
   font-size: 32px;
-  font-weight: 700;
-  letter-spacing: -1px;
+  font-weight: 800;
+  letter-spacing: -1.5px;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -416,8 +416,8 @@ input, select, textarea { font-family: inherit; }
 .card-spark .card-title { color: #b6b1a5; margin-bottom: 6px; }
 .card-spark .spark-title { font-size: 15px; font-weight: 500; color: var(--card); margin-bottom: 14px; }
 .card-spark .spark-total {
-  font-size: 28px; font-weight: 700; color: var(--accent);
-  letter-spacing: -0.5px; font-variant-numeric: tabular-nums;
+  font-size: 28px; font-weight: 800; color: var(--accent);
+  letter-spacing: -1px; font-variant-numeric: tabular-nums;
 }
 .card-spark .spark-total-label {
   font-size: 11px; color: #b6b1a5; display: block; margin-top: 3px;
@@ -526,17 +526,22 @@ input, select, textarea { font-family: inherit; }
 .paper.pos-0 {
   z-index: 3;
   transform: translate(0, 0);
-  box-shadow: var(--shadow-md);
+  box-shadow:
+    0 2px 4px rgba(40,28,10,0.04),
+    0 8px 24px rgba(40,28,10,0.10),
+    0 20px 48px rgba(40,28,10,0.10);
 }
 .paper.pos-1 {
   z-index: 2;
-  transform: translate(56px, 7px);
-  opacity: 0.95;
+  transform: translate(56px, 10px);
+  opacity: 0.88;
+  filter: brightness(0.97);
 }
 .paper.pos-2 {
   z-index: 1;
-  transform: translate(112px, 14px);
-  opacity: 0.88;
+  transform: translate(112px, 20px);
+  opacity: 0.72;
+  filter: brightness(0.94);
 }
 
 .paper-header {
@@ -685,10 +690,13 @@ input, select, textarea { font-family: inherit; }
   padding: 12px 24px;
   border-bottom: 1px solid var(--border);
   align-items: start;
-  transition: background 0.1s;
+  transition: background 0.1s, box-shadow 0.12s;
 }
 .tasks li:last-child { border-bottom: none; }
-.tasks li:hover { background: var(--card-soft); }
+.tasks li:hover {
+  background: var(--card-soft);
+  box-shadow: inset 3px 0 0 var(--accent-soft);
+}
 .tasks li.selected {
   background: var(--accent-softer);
   border-left: 3px solid var(--accent);
@@ -1634,8 +1642,9 @@ table.groups tr:last-child td { border-bottom: none; }
    ========================================================= */
 .modal-backdrop {
   position: fixed; inset: 0;
-  background: rgba(26, 24, 21, 0.45);
-  backdrop-filter: blur(2px);
+  background: rgba(26, 24, 21, 0.30);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   display: flex; align-items: center; justify-content: center;
   z-index: 100; padding: 20px;
 }
