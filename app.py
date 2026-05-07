@@ -1104,6 +1104,11 @@ def api_stats():
         "deadline": t.deadline, "days_overdue": days_overdue(t),
     } for t in sorted(overdue_open, key=days_overdue, reverse=True)[:5]]
 
+    due_today_top = [
+        {"id": t.id, "text": t.text, "group": t.group}
+        for t in due_today[:2]
+    ]
+
     group_counts: Dict[str, int] = {}
     for t in open_tasks:
         if t.group:
@@ -1158,6 +1163,7 @@ def api_stats():
         "open_count": len(open_tasks),
         "overdue_count": len(overdue_open),
         "due_today_count": len(due_today),
+        "due_today_top": due_today_top,
         "done_count": len(done_tasks),
         "total_tasks": len(all_tasks),
         "pct_complete": pct_complete,

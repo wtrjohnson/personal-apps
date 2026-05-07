@@ -318,6 +318,56 @@ input, select, textarea { font-family: inherit; }
 }
 .card-hero .cta-pill.ghost:hover { background: var(--card); }
 
+.card-hero .hero-focus {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 0;
+  padding: 8px 0;
+}
+.card-hero .focus-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--accent-ink);
+  opacity: 0.7;
+  margin-bottom: 6px;
+}
+.card-hero .focus-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.card-hero .focus-item {
+  font-size: 13px;
+  color: var(--ink);
+  line-height: 1.35;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.card-hero .focus-group {
+  font-size: 11px;
+  color: var(--accent-ink);
+  opacity: 0.75;
+  flex-shrink: 0;
+}
+.card-hero .focus-fallback {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  opacity: 0.8;
+  letter-spacing: -0.2px;
+}
+
 .card-deadlines { grid-column: span 3; padding: 22px 24px; }
 .card-deadlines .card-title { display: flex; justify-content: space-between; align-items: center; }
 .card-deadlines .subtitle { font-size: 12px; color: var(--muted); margin-bottom: 14px; }
