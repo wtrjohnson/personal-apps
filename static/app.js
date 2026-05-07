@@ -81,6 +81,26 @@ async function renderHome() {
   $("#hero-overdue").textContent = s.overdue_count;
   $("#hero-due-today").textContent = s.due_today_count;
 
+  const focusEl = $("#hero-focus");
+  if (focusEl) {
+    const items = s.due_today_top || [];
+    if (items.length > 0) {
+      focusEl.innerHTML =
+        `<div class="focus-label">Due today</div>` +
+        `<ul class="focus-list">` +
+        items.map((t) => {
+          const group = t.group
+            ? `<span class="focus-group">${escapeHtml(t.group)}</span>`
+            : "";
+          return `<li class="focus-item">${escapeHtml(t.text)}${group}</li>`;
+        }).join("") +
+        `</ul>`;
+    } else {
+      const pct = s.pct_complete || 0;
+      focusEl.innerHTML = `<div class="focus-fallback">${pct}% done this week</div>`;
+    }
+  }
+
   const nt = $("#nav-tasks-count");
   if (nt) nt.textContent = s.open_count > 0 ? String(s.open_count) : "";
   const nm = $("#nav-meetings-count");
@@ -124,13 +144,13 @@ async function renderHome() {
   drawSparkline(s.completions_per_day || []);
   $("#spark-total").textContent = s.completions_30d || 0;
 
+  const odCard = $("#card-overdue");
   const odList = $("#overdue-list");
   const odPill = $("#overdue-count-pill");
   if (!s.overdue_top || s.overdue_top.length === 0) {
-    odList.innerHTML = `<li class="empty-state" style="display:block; cursor:default;">Nothing overdue. 🎉</li>`;
-    odPill.textContent = "";
-    odPill.style.display = "none";
+    if (odCard) odCard.style.display = "none";
   } else {
+    if (odCard) odCard.style.display = "";
     odPill.style.display = "";
     odPill.textContent = `${s.overdue_count} total`;
     odList.innerHTML = s.overdue_top.map((t) => {
