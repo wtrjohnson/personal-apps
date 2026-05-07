@@ -101,6 +101,38 @@ input, select, textarea { font-family: inherit; }
   color: var(--card); display: inline-flex; align-items: center; justify-content: center;
   font-weight: 700; font-size: 13px; margin-top: 2px;
 }
+.dock-btn-wrap {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  width: 100%;
+}
+.dock-submenu {
+  display: none;
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: #000;
+  border-radius: var(--r-md);
+  padding: 6px;
+  z-index: 100;
+  box-shadow: var(--shadow-pop);
+  white-space: nowrap;
+}
+.dock-btn-wrap:hover .dock-submenu { display: block; }
+.dock-sub-item {
+  display: block;
+  width: 100%;
+  padding: 7px 12px;
+  background: transparent;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  text-align: left;
+}
+.dock-sub-item:hover { background: rgba(255,255,255,0.12); }
 
 /* =========================================================
    Search overlay
