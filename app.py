@@ -1159,7 +1159,7 @@ def api_stats():
         "overdue_count": len(overdue_open),
         "due_today_count": len(due_today),
         "done_count": len(done_tasks),
-        "total_tasks": total_tasks,
+        "total_tasks": len(all_tasks),
         "pct_complete": pct_complete,
         "deadlines": deadlines_by_day,
         "overdue_top": overdue_top,
