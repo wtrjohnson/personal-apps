@@ -365,6 +365,7 @@ async function toggleTaskDone(task) {
     }),
   });
   closeDrawer();
+  if (newDone) await new Promise((r) => setTimeout(r, 260));
   await refreshTasks();
   if (newDone) showUndoToast(task);
   if (state.meetings.length) refreshMeetings();
@@ -1173,6 +1174,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const task = state.tasksByStatus[paper]?.[idx];
     if (!task) return;
     if (e.target.closest(".action-toggle")) {
+      if (!task.done) li.classList.add("task-completing");
       await toggleTaskDone(task); return;
     }
     if (e.target.closest(".action-bb")) {
