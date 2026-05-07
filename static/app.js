@@ -402,11 +402,7 @@ async function deleteTask(task) {
   await api("/api/tasks/delete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      source_filename: task.source_filename,
-      section: task.section,
-      text: task.text,
-    }),
+    body: JSON.stringify({ id: task.id }),
   });
   await refreshTasks();
   if (state.meetings.length) refreshMeetings();
@@ -469,7 +465,15 @@ function openContextMenu(e, task) {
     <div class="ctx-divider"></div>
     ${hasNote ? `<div class="ctx-item" data-action="view-note">↗ View meeting note</div>` : ""}
     <div class="ctx-item" data-action="backburner">${isBb ? "☀ Move to active" : "💤 Send to backburner"}</div>
-    <div class="ctx-item" data-action="cycle-priority">⬆ Priority: ${escapeHtml(task.priority ?? "normal")} →</div>
+    <div class="ctx-item ctx-has-sub">
+      <span>⬆ Priority</span>
+      <span class="ctx-arrow">›</span>
+      <div class="ctx-submenu">
+        <div class="ctx-item${task.priority === "high" ? " ctx-active" : ""}" data-action="set-priority" data-priority="high">▲ High</div>
+        <div class="ctx-item${(!task.priority || task.priority === "normal") ? " ctx-active" : ""}" data-action="set-priority" data-priority="normal">— Normal</div>
+        <div class="ctx-item${task.priority === "low" ? " ctx-active" : ""}" data-action="set-priority" data-priority="low">▽ Low</div>
+      </div>
+    </div>
     <div class="ctx-divider"></div>
     <div class="ctx-item ctx-danger" data-action="delete">Delete task</div>
   `;
@@ -1166,8 +1170,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (action === "edit")         { openEditModal(task); }
     if (action === "delete")       { await deleteTask(task); }
     if (action === "view-note")    { openDrawer(task); }
-    if (action === "backburner")     { await toggleTaskBackburner(task); }
-    if (action === "cycle-priority") { await cyclePriority(task); }
+    if (action === "backburner")   { await toggleTaskBackburner(task); }
+    if (action === "set-priority") { await setPriority(task, item.dataset.priority); }
   });
 
   // Edit modal

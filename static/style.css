@@ -878,6 +878,36 @@ input, select, textarea { font-family: inherit; }
   background: var(--border);
   margin: 4px 0;
 }
+.ctx-has-sub {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.ctx-arrow {
+  font-size: 14px;
+  opacity: 0.45;
+  line-height: 1;
+  pointer-events: none;
+}
+.ctx-submenu {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: -6px;
+  background: var(--card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop);
+  min-width: 130px;
+  padding: 6px;
+  z-index: 201;
+}
+.ctx-has-sub:hover > .ctx-submenu { display: block; }
+.ctx-item.ctx-active {
+  font-weight: 600;
+  color: var(--accent, #C8911F);
+}
 
 /* =========================================================
    Toast / Undo
