@@ -342,9 +342,7 @@ async function toggleTaskDone(task) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      source_filename: task.source_filename,
-      section: task.section,
-      text: task.text,
+      id: task.id,
       done: newDone,
     }),
   });
@@ -417,9 +415,7 @@ function showUndoToast(task) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        source_filename: task.source_filename,
-        section: task.section,
-        text: task.text,
+        id: task.id,
         done: false,
       }),
     });
