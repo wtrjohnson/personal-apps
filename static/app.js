@@ -103,8 +103,6 @@ async function renderHome() {
 
   const nt = $("#nav-tasks-count");
   if (nt) nt.textContent = s.open_count > 0 ? String(s.open_count) : "";
-  const nm = $("#nav-meetings-count");
-  if (nm) nm.textContent = s.meetings_total > 0 ? String(s.meetings_total) : "";
 
   const strip = $("#deadlines-strip");
   const maxCount = Math.max(0, ...s.deadlines.map((d) => d.count));
