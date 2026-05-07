@@ -107,19 +107,28 @@ input, select, textarea { font-family: inherit; }
   width: 100%;
 }
 .dock-submenu {
-  display: none;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
   position: absolute;
   left: calc(100% + 8px);
   top: 50%;
-  transform: translateY(-50%);
+  transform: translateY(-50%) translateX(-6px);
   background: #000;
   border-radius: var(--r-md);
   padding: 6px;
   z-index: 100;
   box-shadow: var(--shadow-pop);
   white-space: nowrap;
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0s linear 0.15s;
 }
-.dock-btn-wrap:hover .dock-submenu { display: block; }
+.dock-submenu.open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(-50%) translateX(0);
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0s linear 0s;
+}
 .dock-sub-item {
   display: block;
   width: 100%;
