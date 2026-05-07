@@ -1091,6 +1091,42 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Dock nav
   $$(".dock-btn[data-tab]").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
+  // Safe-triangle dock submenu
+  (function () {
+    const wrap = document.querySelector(".dock-btn-wrap");
+    if (!wrap) return;
+    const btn = wrap.querySelector(".dock-btn");
+    const sub = wrap.querySelector(".dock-submenu");
+    let closeTimer = null;
+    let exitPt = null;
+
+    function open() { clearTimeout(closeTimer); sub.classList.add("open"); }
+    function close() { sub.classList.remove("open"); exitPt = null; }
+    function scheduleClose() { clearTimeout(closeTimer); closeTimer = setTimeout(close, 80); }
+
+    function inTriangle(px, py, ax, ay, bx, by, cx, cy) {
+      const s = (x1, y1, x2, y2, x3, y3) => (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3);
+      const d1 = s(px,py,ax,ay,bx,by), d2 = s(px,py,bx,by,cx,cy), d3 = s(px,py,cx,cy,ax,ay);
+      return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
+    }
+
+    btn.addEventListener("mouseenter", open);
+    btn.addEventListener("mouseleave", (e) => { exitPt = { x: e.clientX, y: e.clientY }; scheduleClose(); });
+    sub.addEventListener("mouseenter", () => clearTimeout(closeTimer));
+    sub.addEventListener("mouseleave", scheduleClose);
+
+    document.addEventListener("mousemove", (e) => {
+      if (!sub.classList.contains("open") || !exitPt) return;
+      if (e.target.closest(".dock-btn-wrap")) { clearTimeout(closeTimer); return; }
+      const r = sub.getBoundingClientRect();
+      if (inTriangle(e.clientX, e.clientY, exitPt.x, exitPt.y, r.left, r.top - 4, r.left, r.bottom + 4)) {
+        clearTimeout(closeTimer);
+      } else {
+        close();
+      }
+    });
+  })();
+
   // Search overlay
   $("#dock-search-btn").addEventListener("click", openSearchOverlay);
   $("#search-overlay-backdrop").addEventListener("click", closeSearchOverlay);
