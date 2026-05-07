@@ -365,7 +365,7 @@ async function toggleTaskDone(task) {
     }),
   });
   closeDrawer();
-  if (newDone) await new Promise((r) => setTimeout(r, 260));
+  if (newDone) await new Promise((r) => setTimeout(r, 500));
   await refreshTasks();
   if (newDone) showUndoToast(task);
   if (state.meetings.length) refreshMeetings();
@@ -1174,7 +1174,22 @@ document.addEventListener("DOMContentLoaded", async () => {
     const task = state.tasksByStatus[paper]?.[idx];
     if (!task) return;
     if (e.target.closest(".action-toggle")) {
-      if (!task.done) li.classList.add("task-completing");
+      if (!task.done) {
+        li.classList.add("task-completing");
+        const cb = li.querySelector(".checkbox");
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("class", "check-draw");
+        svg.setAttribute("viewBox", "0 0 13 11");
+        svg.setAttribute("fill", "none");
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", "M1.5 5.5 5 9 11.5 1.5");
+        path.setAttribute("stroke", "white");
+        path.setAttribute("stroke-width", "2");
+        path.setAttribute("stroke-linecap", "round");
+        path.setAttribute("stroke-linejoin", "round");
+        svg.appendChild(path);
+        cb.appendChild(svg);
+      }
       await toggleTaskDone(task); return;
     }
     if (e.target.closest(".action-bb")) {

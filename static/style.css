@@ -823,20 +823,31 @@ input, select, textarea { font-family: inherit; }
 
 @keyframes checkbox-pop {
   0%   { transform: scale(1); }
-  35%  { transform: scale(1.35); background: var(--ok); border-color: var(--ok); color: var(--card); }
-  65%  { transform: scale(0.88); }
+  35%  { transform: scale(1.32); background: var(--ok); border-color: var(--ok); color: var(--card); }
+  65%  { transform: scale(0.9); }
   100% { transform: scale(1); background: var(--accent); border-color: var(--accent); color: var(--card); }
 }
 @keyframes row-flash {
   0%   { background: transparent; }
-  25%  { background: var(--ok-soft); }
+  20%  { background: var(--ok-soft); }
   100% { background: transparent; }
 }
+@keyframes draw-check {
+  to { stroke-dashoffset: 0; }
+}
 .tasks li.task-completing .checkbox {
-  animation: checkbox-pop 0.32s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  animation: checkbox-pop 0.38s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 .tasks li.task-completing {
-  animation: row-flash 0.45s ease forwards;
+  animation: row-flash 0.95s ease forwards;
+}
+.check-draw {
+  width: 13px; height: 11px;
+}
+.check-draw path {
+  stroke-dasharray: 20;
+  stroke-dashoffset: 20;
+  animation: draw-check 0.26s ease-out 0.06s forwards;
 }
 
 .tasks .text { line-height: 1.45; word-break: break-word; font-size: 13.5px; }
