@@ -821,6 +821,24 @@ input, select, textarea { font-family: inherit; }
 }
 .tasks li.done .checkbox::before { content: "✓"; font-size: 13px; font-weight: 700; }
 
+@keyframes checkbox-pop {
+  0%   { transform: scale(1); }
+  35%  { transform: scale(1.35); background: var(--ok); border-color: var(--ok); color: var(--card); }
+  65%  { transform: scale(0.88); }
+  100% { transform: scale(1); background: var(--accent); border-color: var(--accent); color: var(--card); }
+}
+@keyframes row-flash {
+  0%   { background: transparent; }
+  25%  { background: var(--ok-soft); }
+  100% { background: transparent; }
+}
+.tasks li.task-completing .checkbox {
+  animation: checkbox-pop 0.32s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+.tasks li.task-completing {
+  animation: row-flash 0.45s ease forwards;
+}
+
 .tasks .text { line-height: 1.45; word-break: break-word; font-size: 13.5px; }
 .tasks .meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
 
