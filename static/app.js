@@ -813,7 +813,7 @@ function _clientExtractDeadline(text) {
 }
 
 function parseNLTask(text) {
-  const result = { text, priority: "normal", contact: null, phone: null, deadline: null, group: null, estimate_minutes: null };
+  const result = { text, priority: "normal", contact: null, phone: null, email: null, deadline: null, group: null, estimate_minutes: null };
 
   if (/\b(urgent|urgently|asap|a\.s\.a\.p\.?|critical|immediately|must do|p[01])\b/i.test(text)) {
     result.priority = "high";
@@ -824,6 +824,9 @@ function parseNLTask(text) {
 
   const phoneM = text.match(/\b(\d{3}[-.\s]?\d{3}[-.\s]?\d{4})\b/);
   if (phoneM) result.phone = phoneM[1];
+
+  const emailM = text.match(/\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/);
+  if (emailM) result.email = emailM[0];
 
   const estM = text.match(/\b(\d+(?:\.\d+)?)\s*(min(?:utes?)?|h(?:ours?)?)\b/i);
   if (estM) {
@@ -847,12 +850,12 @@ function parseNLTask(text) {
 
 function _populateNLStep2(parsed) {
   const fields = [];
-  fields.push({ id: "nl-f-text", label: "Task", type: "textarea", value: parsed.text });
   fields.push({ id: "nl-f-priority", label: "Priority", type: "select", value: parsed.priority, options: [["normal","Normal"],["high","High"],["low","Low"]] });
   fields.push({ id: "nl-f-deadline", label: "Deadline", type: "date", value: parsed.deadline || "" });
   fields.push({ id: "nl-f-group", label: "Group", type: "text", value: parsed.group || "", uncertain: parsed.groupUncertain });
-  if (parsed.contact || parsed.phone) {
-    fields.push({ id: "nl-f-contact", label: "Contact / phone", type: "text", value: [parsed.contact, parsed.phone].filter(Boolean).join("  ") });
+  const contactVal = [parsed.email, parsed.phone, parsed.contact].filter(Boolean).join("  ");
+  if (contactVal) {
+    fields.push({ id: "nl-f-contact", label: "Contact method", type: "text", value: contactVal });
   }
   if (parsed.estimate_minutes) {
     fields.push({ id: "nl-f-estimate", label: "Estimate (min)", type: "number", value: parsed.estimate_minutes });
@@ -862,24 +865,22 @@ function _populateNLStep2(parsed) {
   container.innerHTML = fields.map((f, i) => {
     const uncertain = f.uncertain ? " nl-field-uncertain" : "";
     let input;
-    if (f.type === "textarea") {
-      input = `<textarea id="${f.id}" class="nl-textarea" rows="2">${escapeHtml(f.value)}</textarea>`;
-    } else if (f.type === "select") {
+    if (f.type === "select") {
       input = `<select id="${f.id}">${f.options.map(([v, l]) => `<option value="${v}"${v === f.value ? " selected" : ""}>${l}</option>`).join("")}</select>`;
     } else {
-      input = `<input id="${f.id}" type="${f.type}" value="${escapeHtml(String(f.value))}" autocomplete="off">`;
+      input = `<input id="${f.id}" type="${f.type}" value="${escapeHtml(String(f.value || ""))}" autocomplete="off">`;
     }
-    return `<div class="nl-field${uncertain}" style="transition-delay:${i * 50}ms;opacity:0;transform:translateY(6px);">
+    return `<div class="nl-field nl-field-blur${uncertain}" style="transition-delay:${i * 55}ms">
       <label>${f.label}${f.uncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
       ${input}
     </div>`;
   }).join("");
 
+  // Expand container, then unblur fields staggered
   requestAnimationFrame(() => {
-    container.querySelectorAll(".nl-field").forEach((el) => {
-      el.style.opacity = "1";
-      el.style.transform = "translateY(0)";
-      el.style.transition = "opacity 0.25s ease, transform 0.25s ease";
+    container.classList.add("nl-fields-visible");
+    requestAnimationFrame(() => {
+      container.querySelectorAll(".nl-field-blur").forEach((el) => el.classList.remove("nl-field-blur"));
     });
   });
 }
@@ -888,47 +889,62 @@ let _nlParsed = null;
 
 function openNLModal() {
   _nlParsed = null;
-  $("#nl-text").value = "";
+  const ta = $("#nl-text");
+  ta.value = "";
+  ta.readOnly = false;
+  ta.classList.remove("nl-text-blurred");
   $("#nl-hint").textContent = "";
-  $("#nl-step1").classList.remove("hidden");
-  $("#nl-step2").classList.add("hidden");
-  const modal = $("#nl-modal");
-  modal.style.maxHeight = "";
-  modal.classList.remove("nl-morphing");
+  const container = $("#nl-parsed-fields");
+  container.innerHTML = "";
+  container.classList.remove("nl-fields-visible");
+  $("#nl-footer-step1").classList.remove("hidden");
+  $("#nl-footer-step2").classList.add("hidden");
   $("#nl-modal-backdrop").classList.remove("hidden");
-  setTimeout(() => $("#nl-text").focus(), 10);
+  setTimeout(() => ta.focus(), 10);
 }
 function closeNLModal() { $("#nl-modal-backdrop").classList.add("hidden"); }
+
+function _nlGoBack() {
+  const ta = $("#nl-text");
+  const container = $("#nl-parsed-fields");
+  // Blur fields briefly, then collapse
+  container.querySelectorAll(".nl-field").forEach((el) => el.classList.add("nl-field-blur"));
+  setTimeout(() => {
+    container.classList.remove("nl-fields-visible");
+    container.innerHTML = "";
+    ta.readOnly = false;
+    ta.classList.remove("nl-text-blurred");
+    $("#nl-footer-step2").classList.add("hidden");
+    $("#nl-footer-step1").classList.remove("hidden");
+    ta.focus();
+  }, 180);
+}
 
 function _nlTransitionToStep2() {
   const text = $("#nl-text").value.trim();
   if (!text) { $("#nl-text").focus(); return; }
   _nlParsed = parseNLTask(text);
 
-  const modal = $("#nl-modal");
-  modal.classList.add("nl-morphing");
+  const ta = $("#nl-text");
+  ta.readOnly = true;
+  // Blur the textarea
+  ta.classList.add("nl-text-blurred");
+  $("#nl-hint").textContent = "";
 
-  const chars = Array.from(text);
-  let frame = 0;
-  const totalFrames = 18;
-  function scramble() {
-    if (frame >= totalFrames) {
-      $("#nl-step1").classList.add("hidden");
-      $("#nl-step2").classList.remove("hidden");
-      _populateNLStep2(_nlParsed);
-      return;
-    }
-    const scrambled = chars.map((c, i) => (Math.random() < 0.4 + frame / totalFrames) ? c : String.fromCharCode(33 + Math.floor(Math.random() * 90)));
-    $("#nl-text").value = scrambled.join("");
-    frame++;
-    requestAnimationFrame(scramble);
-  }
-  requestAnimationFrame(scramble);
+  setTimeout(() => {
+    // Swap footers while still blurred
+    $("#nl-footer-step1").classList.add("hidden");
+    $("#nl-footer-step2").classList.remove("hidden");
+    // Populate + expand extra fields (they start blurred and unblur staggered)
+    _populateNLStep2(_nlParsed);
+    // Unblur the textarea
+    ta.classList.remove("nl-text-blurred");
+  }, 210);
 }
 
 async function submitNLModal() {
   if (!_nlParsed) return;
-  const text = ($("#nl-f-text")?.value || $("#nl-text").value).trim();
+  const text = $("#nl-text").value.trim();
   if (!text) return;
   const priority = $("#nl-f-priority")?.value || "normal";
   const deadline = $("#nl-f-deadline")?.value || "";
@@ -1885,10 +1901,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#nl-close").addEventListener("click", closeNLModal);
   $("#nl-cancel-step1").addEventListener("click", closeNLModal);
   $("#nl-confirm-step1").addEventListener("click", _nlTransitionToStep2);
-  $("#nl-back").addEventListener("click", () => {
-    $("#nl-step2").classList.add("hidden");
-    $("#nl-step1").classList.remove("hidden");
-  });
+  $("#nl-back").addEventListener("click", _nlGoBack);
   $("#nl-cancel").addEventListener("click", closeNLModal);
   $("#nl-submit").addEventListener("click", submitNLModal);
   $("#nl-modal-backdrop").addEventListener("click", (e) => {
@@ -1902,6 +1915,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (p.priority === "high") hints.push("high priority");
     if (p.contact) hints.push(`contact: ${p.contact}`);
     if (p.phone) hints.push(p.phone);
+    if (p.email) hints.push(p.email);
     if (p.estimate_minutes) hints.push(`~${p.estimate_minutes}m`);
     if (p.group) hints.push(`group: ${p.group}`);
     $("#nl-hint").textContent = hints.length ? "Detected: " + hints.join(", ") : "";
