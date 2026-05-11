@@ -105,6 +105,22 @@ def init_db() -> None:
                     completed_date DATE DEFAULT CURRENT_DATE,
                     completed_at TIMESTAMP DEFAULT NOW()
                 );
+                CREATE TABLE IF NOT EXISTS task_time_log (
+                    id SERIAL PRIMARY KEY,
+                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    minutes_spent INT NOT NULL,
+                    logged_at TIMESTAMP DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS task_dependencies (
+                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    depends_on_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    PRIMARY KEY (task_id, depends_on_id)
+                );
+                CREATE INDEX IF NOT EXISTS tasks_parent_id     ON tasks (parent_id);
+                CREATE INDEX IF NOT EXISTS tasks_snoozed_until ON tasks (snoozed_until);
+                CREATE INDEX IF NOT EXISTS task_time_log_task  ON task_time_log (task_id);
+                CREATE INDEX IF NOT EXISTS task_deps_task      ON task_dependencies (task_id);
+                CREATE INDEX IF NOT EXISTS task_deps_depends   ON task_dependencies (depends_on_id);
             """)
             cur.execute("""
                 DO $$ BEGIN
@@ -120,6 +136,30 @@ def init_db() -> None:
                         WHERE table_name='tasks' AND column_name='contact'
                     ) THEN
                         ALTER TABLE tasks ADD COLUMN contact TEXT DEFAULT NULL;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tasks' AND column_name='parent_id'
+                    ) THEN
+                        ALTER TABLE tasks ADD COLUMN parent_id TEXT REFERENCES tasks(id) ON DELETE CASCADE;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tasks' AND column_name='snoozed_until'
+                    ) THEN
+                        ALTER TABLE tasks ADD COLUMN snoozed_until DATE DEFAULT NULL;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tasks' AND column_name='estimate_minutes'
+                    ) THEN
+                        ALTER TABLE tasks ADD COLUMN estimate_minutes INT DEFAULT NULL;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tasks' AND column_name='recurrence_rule'
+                    ) THEN
+                        ALTER TABLE tasks ADD COLUMN recurrence_rule JSONB DEFAULT NULL;
                     END IF;
                 END $$;
             """)
@@ -236,6 +276,12 @@ class Task:
     deadline: Optional[str]
     deadline_raw: Optional[str]
     overdue: bool
+    snoozed_until: Optional[str]
+    estimate_minutes: Optional[int]
+    recurrence_rule: Optional[dict]
+    parent_id: Optional[str]
+    subtask_count: int          # computed via subquery
+    has_blockers: bool          # computed via EXISTS subquery
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -254,6 +300,12 @@ class Task:
             "deadline": self.deadline,
             "deadline_raw": self.deadline_raw,
             "overdue": self.overdue,
+            "snoozed_until": self.snoozed_until,
+            "estimate_minutes": self.estimate_minutes,
+            "recurrence_rule": self.recurrence_rule,
+            "parent_id": self.parent_id,
+            "subtask_count": self.subtask_count,
+            "has_blockers": self.has_blockers,
         }
 
 
@@ -338,6 +390,14 @@ _URGENCY_KW: list = [
 
 def _urgency_score(task: dict) -> int:
     today = date_cls.today()
+    # Snoozed tasks are deprioritized to the bottom
+    snoozed = task.get("snoozed_until")
+    if snoozed:
+        try:
+            if date_cls.fromisoformat(snoozed) > today:
+                return -999
+        except (ValueError, TypeError):
+            pass
     score = 0
     p = task.get("priority", "normal")
     if p == "high":  score += 300
@@ -360,6 +420,13 @@ def _urgency_score(task: dict) -> int:
     t = task.get("type", "")
     if t == "action":   score += 10
     elif t == "reminder": score += 5
+    # Quick-win bonus for short tasks
+    est = task.get("estimate_minutes")
+    if est is not None and est <= 30:
+        score += 15
+    # Blocked tasks are less actionable
+    if task.get("has_blockers"):
+        score -= 50
     kw = 0
     for pat, pts in _URGENCY_KW:
         if pat.search(task.get("text", "")): kw += pts
@@ -469,6 +536,8 @@ def _row_to_meeting(row: dict, task_rows: List[dict]) -> Meeting:
 def _task_row_to_task(row: dict, today: str) -> Task:
     source_date = row["source_date"]
     source_date_str = source_date.isoformat() if source_date else None
+    snoozed_raw = row.get("snoozed_until")
+    snoozed_str = snoozed_raw.isoformat() if snoozed_raw else None
     done = row["done"]
     deadline = row["deadline"]
     return Task(
@@ -487,6 +556,12 @@ def _task_row_to_task(row: dict, today: str) -> Task:
         deadline=deadline,
         deadline_raw=row["deadline_raw"],
         overdue=bool(deadline and not done and deadline < today),
+        snoozed_until=snoozed_str,
+        estimate_minutes=row.get("estimate_minutes"),
+        recurrence_rule=row.get("recurrence_rule"),
+        parent_id=row.get("parent_id"),
+        subtask_count=int(row.get("subtask_count") or 0),
+        has_blockers=bool(row.get("has_blockers")),
     )
 
 
@@ -521,14 +596,27 @@ def db_get_meeting(mid: str) -> Optional[Meeting]:
     return _row_to_meeting(dict(row), [dict(t) for t in task_rows])
 
 
+_TASKS_SELECT = """
+    SELECT
+        t.*,
+        (SELECT COUNT(*) FROM tasks sub WHERE sub.parent_id = t.id AND NOT sub.done) AS subtask_count,
+        EXISTS(
+            SELECT 1 FROM task_dependencies d
+            JOIN tasks dep ON dep.id = d.depends_on_id
+            WHERE d.task_id = t.id AND NOT dep.done
+        ) AS has_blockers
+    FROM tasks t
+"""
+
+
 def db_get_all_tasks(include_done: bool = False) -> List[Task]:
     today = date_cls.today().isoformat()
     with get_db() as conn:
         with conn.cursor() as cur:
             if include_done:
-                cur.execute("SELECT * FROM tasks ORDER BY created_at")
+                cur.execute(_TASKS_SELECT + "ORDER BY t.created_at")
             else:
-                cur.execute("SELECT * FROM tasks WHERE NOT done ORDER BY created_at")
+                cur.execute(_TASKS_SELECT + "WHERE NOT t.done ORDER BY t.created_at")
             rows = cur.fetchall()
     return [_task_row_to_task(dict(r), today) for r in rows]
 
@@ -851,8 +939,25 @@ def api_tasks():
     overdue_only = a.get("overdue", "").lower() in ("1", "true", "yes")
     q = a.get("q", "").lower()
     priority_filter = a.get("priority", "")
+    snoozed_filter = a.get("snoozed", "0")  # "0"=hide snoozed, "1"=only snoozed
+    show_subtasks = a.get("show_subtasks", "0").lower() not in ("0", "false", "no")
+    parent_id_filter = a.get("parent_id", "")
+    smart_view = a.get("smart_view", "")
 
-    tasks = db_get_all_tasks(include_done=True)
+    today_iso = date_cls.today().isoformat()
+    tomorrow_iso = (date_cls.today() + timedelta(days=1)).isoformat()
+    week_out_iso = (date_cls.today() + timedelta(days=7)).isoformat()
+    neglect_cutoff = (date_cls.today() - timedelta(days=14)).isoformat()
+
+    tasks = db_get_all_tasks(include_done=(status == "done" or smart_view != ""))
+
+    def _is_snoozed(t: Task) -> bool:
+        if not t.snoozed_until:
+            return False
+        try:
+            return date_cls.fromisoformat(t.snoozed_until) > date_cls.today()
+        except (ValueError, TypeError):
+            return False
 
     def passes_status(t: Task) -> bool:
         if status == "open":       return not t.done and not t.backburner
@@ -862,6 +967,18 @@ def api_tasks():
 
     pre_group = []
     for t in tasks:
+        # Snooze filtering
+        if snoozed_filter == "1":
+            if not _is_snoozed(t): continue
+        else:
+            if _is_snoozed(t): continue
+
+        # parent_id filter (return only subtasks of a specific task)
+        if parent_id_filter:
+            if t.parent_id != parent_id_filter: continue
+        elif not show_subtasks:
+            if t.parent_id: continue  # hide subtasks from main list
+
         if not passes_status(t): continue
         if type_filter and t.type != type_filter: continue
         if overdue_only and not t.overdue: continue
@@ -877,6 +994,40 @@ def api_tasks():
         d = t.as_dict()
         d["urgency_score"] = _urgency_score(d)
         out.append(d)
+
+    # Smart view filtering (applied after urgency scoring)
+    if smart_view:
+        def _smart_filter(d: dict) -> bool:
+            if smart_view == "today":
+                return (
+                    (d.get("deadline") == today_iso)
+                    or (d["urgency_score"] >= 200 and not d.get("done"))
+                )
+            if smart_view == "upcoming":
+                dl = d.get("deadline") or ""
+                return (
+                    not d.get("done")
+                    and tomorrow_iso <= dl <= week_out_iso
+                )
+            if smart_view == "neglected":
+                return (
+                    not d.get("done")
+                    and not d.get("backburner")
+                    and d.get("priority") in ("high", "normal")
+                    and (d.get("source_date") or "") <= neglect_cutoff
+                )
+            if smart_view == "quick_wins":
+                est = d.get("estimate_minutes")
+                return (
+                    not d.get("done")
+                    and est is not None
+                    and est <= 30
+                    and d["urgency_score"] >= 50
+                )
+            if smart_view == "waiting":
+                return not d.get("done") and bool(d.get("has_blockers"))
+            return True
+        out = [d for d in out if _smart_filter(d)]
 
     out.sort(key=lambda t: -t["urgency_score"])
     return jsonify({"count": len(out), "tasks": out, "groups_in_scope": groups_in_scope})
@@ -921,6 +1072,30 @@ def api_set_priority():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _compute_next_recurrence(rule: dict, today: date_cls) -> Optional[date_cls]:
+    rtype = rule.get("type")
+    if rtype == "daily":
+        return today + timedelta(days=int(rule.get("interval", 1)))
+    if rtype == "weekly":
+        interval = int(rule.get("interval", 1))
+        dow = int(rule.get("day_of_week", today.weekday()))
+        # Find next occurrence of that weekday (at least 1 day from now)
+        days_ahead = (dow - today.weekday()) % 7 or 7
+        return today + timedelta(days=days_ahead + (interval - 1) * 7)
+    if rtype == "monthly":
+        dom = int(rule.get("day_of_month", today.day))
+        # Next month, same day
+        month = today.month + 1 if today.month < 12 else 1
+        year = today.year if today.month < 12 else today.year + 1
+        try:
+            return date_cls(year, month, min(dom, 28))
+        except Exception:
+            return date_cls(year, month, 28)
+    if rtype == "after_completion":
+        return today + timedelta(days=int(rule.get("days", 7)))
+    return None
+
+
 @app.route("/api/tasks/toggle", methods=["POST"])
 def api_toggle_task():
     data = request.get_json(force=True, silent=True) or {}
@@ -940,12 +1115,36 @@ def api_toggle_task():
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE tasks SET done = %s WHERE id = %s RETURNING id",
+                    "UPDATE tasks SET done = %s WHERE id = %s RETURNING id, text, type, "
+                    "group_name, priority, contact, estimate_minutes, recurrence_rule, "
+                    "source_filename, section",
                     (done, task_id),
                 )
-                if cur.fetchone() is None:
+                row = cur.fetchone()
+                if row is None:
                     return jsonify({"ok": False, "error": "task not found"}), 404
-        log_completion(task_id, text, section, filename, done)
+
+                # Spawn next recurrence instance when marking done
+                if done and row["recurrence_rule"]:
+                    rule = row["recurrence_rule"]
+                    next_date = _compute_next_recurrence(rule, date_cls.today())
+                    if next_date:
+                        new_id = str(uuid.uuid4())
+                        next_iso = next_date.isoformat()
+                        cur.execute("""
+                            INSERT INTO tasks
+                                (id, text, type, done, backburner, source_filename, section,
+                                 group_name, source_date, deadline, priority, contact,
+                                 estimate_minutes, recurrence_rule)
+                            VALUES (%s,%s,%s,FALSE,FALSE,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """, (
+                            new_id, row["text"], row["type"],
+                            row["source_filename"], row["section"], row["group_name"],
+                            next_iso, next_iso, row["priority"], row["contact"],
+                            row["estimate_minutes"], json.dumps(rule),
+                        ))
+
+        log_completion(task_id, text or (row["text"] if row else ""), section, filename, done)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -998,13 +1197,17 @@ def api_edit_task():
     new_contact = data.get("contact")  # None means "don't change"; "" means clear it
     # deadline_direct from picker overrides text-extracted deadline
     deadline_direct = (data.get("deadline_direct") or "").strip() or None
+    new_estimate = data.get("estimate_minutes")  # int or None
+    new_recurrence = data.get("recurrence_rule")  # dict or None (False = don't change)
 
     if deadline_direct:
         new_deadline, new_deadline_raw = deadline_direct, deadline_direct
     else:
         new_deadline, new_deadline_raw = extract_deadline(new_text)
-    # Text change means the deterministic ID changes too
-    new_id = _task_id(filename, section, new_text) if filename and section else task_id
+
+    # Only recompute deterministic ID for meeting-sourced tasks; free tasks keep UUID
+    is_free = (filename == "tasks.md" or not filename)
+    new_id = task_id if is_free else (_task_id(filename, section, new_text) if filename and section else task_id)
 
     try:
         with get_db() as conn:
@@ -1017,6 +1220,14 @@ def api_edit_task():
                     sets.append("group_name = %s"); vals.append(new_group or None)
                 if new_contact is not None:
                     sets.append("contact = %s"); vals.append((new_contact or "").strip() or None)
+                if new_estimate is not None:
+                    sets.append("estimate_minutes = %s")
+                    vals.append(int(new_estimate) if new_estimate else None)
+                if new_recurrence is not False:  # explicit None clears it, dict sets it
+                    if new_recurrence is None:
+                        sets.append("recurrence_rule = %s"); vals.append(None)
+                    elif isinstance(new_recurrence, dict):
+                        sets.append("recurrence_rule = %s"); vals.append(json.dumps(new_recurrence))
                 vals.append(task_id)
                 cur.execute(
                     f"UPDATE tasks SET {', '.join(sets)} WHERE id = %s RETURNING id",
@@ -1039,6 +1250,9 @@ def api_add_task():
     if add_priority not in ("high", "normal", "low"):
         add_priority = "normal"
     add_contact = (data.get("contact") or "").strip() or None
+    add_estimate = data.get("estimate_minutes")
+    add_recurrence = data.get("recurrence_rule")  # dict or None
+    add_parent_id = (data.get("parent_id") or "").strip() or None
     if not text:
         return jsonify({"ok": False, "error": "text required"}), 400
 
@@ -1050,6 +1264,10 @@ def api_add_task():
     full_text = text + ((" " + " ".join(tags)) if tags else "")
 
     deadline, deadline_raw = extract_deadline(full_text, context_year=datetime.now().year)
+    # If deadline was passed directly (already parsed client-side), prefer it
+    if deadline_in and not deadline:
+        deadline = deadline_in
+        deadline_raw = deadline_in
     tid = str(uuid.uuid4())
 
     try:
@@ -1058,11 +1276,18 @@ def api_add_task():
                 cur.execute("""
                     INSERT INTO tasks
                         (id, text, type, done, backburner, source_filename, section,
-                         group_name, source_date, deadline, deadline_raw, priority, contact)
+                         group_name, source_date, deadline, deadline_raw, priority, contact,
+                         estimate_minutes, recurrence_rule, parent_id)
                     VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
-                            %s, %s, %s, %s, %s, %s)
-                """, (tid, full_text, group, date_cls.today(), deadline, deadline_raw, add_priority, add_contact))
-        return jsonify({"ok": True, "text": full_text})
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    tid, full_text, group, date_cls.today(), deadline, deadline_raw,
+                    add_priority, add_contact,
+                    int(add_estimate) if add_estimate else None,
+                    json.dumps(add_recurrence) if add_recurrence else None,
+                    add_parent_id,
+                ))
+        return jsonify({"ok": True, "text": full_text, "id": tid})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1158,6 +1383,24 @@ def api_stats():
             "open_reminders": recent_row["open_reminders"],
         }
 
+    # Top 3 non-snoozed open tasks by urgency for primary focus panel
+    scoreable = [t for t in open_tasks if not (
+        t.snoozed_until and date_cls.fromisoformat(t.snoozed_until) > today
+        if t.snoozed_until else False
+    )]
+    top3_scored = sorted(
+        [(t, _urgency_score(t.as_dict())) for t in scoreable],
+        key=lambda x: -x[1],
+    )[:3]
+    top_urgency = [
+        {
+            "id": t.id, "text": t.text, "group": t.group,
+            "urgency_score": score, "deadline": t.deadline,
+            "priority": t.priority, "estimate_minutes": t.estimate_minutes,
+        }
+        for t, score in top3_scored
+    ]
+
     return jsonify({
         "today": today_iso,
         "open_count": len(open_tasks),
@@ -1174,7 +1417,172 @@ def api_stats():
         "completions_30d": week_done_count,
         "recent_meeting": recent,
         "meetings_total": total_meetings,
+        "top_urgency": top_urgency,
     })
+
+
+@app.route("/api/tasks/snooze", methods=["POST"])
+def api_snooze_task():
+    data = request.get_json(force=True, silent=True) or {}
+    task_id = (data.get("id") or "").strip()
+    until = (data.get("until") or "").strip() or None  # ISO date or null to un-snooze
+    if not task_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tasks SET snoozed_until = %s WHERE id = %s RETURNING id",
+                    (until, task_id),
+                )
+                if cur.fetchone() is None:
+                    return jsonify({"ok": False, "error": "task not found"}), 404
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tasks/time-log", methods=["POST"])
+def api_time_log():
+    data = request.get_json(force=True, silent=True) or {}
+    task_id = (data.get("task_id") or "").strip()
+    minutes = data.get("minutes_spent")
+    if not task_id or minutes is None:
+        return jsonify({"ok": False, "error": "task_id and minutes_spent required"}), 400
+    try:
+        minutes = int(minutes)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO task_time_log (task_id, minutes_spent) VALUES (%s, %s)",
+                    (task_id, minutes),
+                )
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tasks/time-estimate-hint")
+def api_time_estimate_hint():
+    group = request.args.get("group", "").strip()
+    if not group:
+        return jsonify({"ok": True, "suggested_minutes": None, "sample_count": 0})
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT ROUND(AVG(tl.minutes_spent)) AS avg_mins, COUNT(*) AS cnt
+                    FROM task_time_log tl
+                    JOIN tasks t ON t.id = tl.task_id
+                    WHERE t.group_name = %s
+                """, (group,))
+                row = cur.fetchone()
+        if row and row["cnt"] > 0:
+            return jsonify({"ok": True, "suggested_minutes": int(row["avg_mins"] or 0), "sample_count": int(row["cnt"])})
+        return jsonify({"ok": True, "suggested_minutes": None, "sample_count": 0})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tasks/search")
+def api_tasks_search():
+    q = request.args.get("q", "").strip().lower()
+    limit = min(int(request.args.get("limit", 10)), 20)
+    if not q:
+        return jsonify({"tasks": []})
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, text, group_name, deadline
+                    FROM tasks
+                    WHERE NOT done AND LOWER(text) LIKE %s
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, (f"%{q}%", limit))
+                rows = cur.fetchall()
+        results = [{"id": r["id"], "text": r["text"], "group": r["group_name"], "deadline": r["deadline"]} for r in rows]
+        return jsonify({"tasks": results})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tasks/dependency/add", methods=["POST"])
+def api_dependency_add():
+    data = request.get_json(force=True, silent=True) or {}
+    task_id = (data.get("task_id") or "").strip()
+    depends_on_id = (data.get("depends_on_id") or "").strip()
+    if not task_id or not depends_on_id:
+        return jsonify({"ok": False, "error": "task_id and depends_on_id required"}), 400
+    if task_id == depends_on_id:
+        return jsonify({"ok": False, "error": "task cannot depend on itself"}), 400
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Check direct circular dependency
+                cur.execute(
+                    "SELECT 1 FROM task_dependencies WHERE task_id = %s AND depends_on_id = %s",
+                    (depends_on_id, task_id),
+                )
+                if cur.fetchone():
+                    return jsonify({"ok": False, "error": "circular dependency"}), 400
+                cur.execute(
+                    "INSERT INTO task_dependencies (task_id, depends_on_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (task_id, depends_on_id),
+                )
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tasks/dependency/remove", methods=["POST"])
+def api_dependency_remove():
+    data = request.get_json(force=True, silent=True) or {}
+    task_id = (data.get("task_id") or "").strip()
+    depends_on_id = (data.get("depends_on_id") or "").strip()
+    if not task_id or not depends_on_id:
+        return jsonify({"ok": False, "error": "task_id and depends_on_id required"}), 400
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM task_dependencies WHERE task_id = %s AND depends_on_id = %s",
+                    (task_id, depends_on_id),
+                )
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tasks/add-subtask", methods=["POST"])
+def api_add_subtask():
+    data = request.get_json(force=True, silent=True) or {}
+    parent_id = (data.get("parent_id") or "").strip()
+    text = (data.get("text") or "").strip()
+    priority = (data.get("priority") or "normal").strip()
+    if not parent_id or not text:
+        return jsonify({"ok": False, "error": "parent_id and text required"}), 400
+    if priority not in ("high", "normal", "low"):
+        priority = "normal"
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Validate parent exists and has no parent itself (one level only)
+                cur.execute("SELECT parent_id FROM tasks WHERE id = %s", (parent_id,))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"ok": False, "error": "Parent task not found"}), 404
+                if row["parent_id"]:
+                    return jsonify({"ok": False, "error": "Cannot nest subtasks more than one level"}), 400
+                new_id = str(uuid4())
+                cur.execute(
+                    """INSERT INTO tasks (id, text, type, done, source_filename, section, priority, parent_id)
+                       VALUES (%s, %s, 'free', FALSE, 'tasks.md', '', %s, %s)""",
+                    (new_id, text, priority, parent_id),
+                )
+        return jsonify({"ok": True, "id": new_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/import", methods=["POST"])
