@@ -57,6 +57,7 @@ def get_db() -> Generator:
 def init_db() -> None:
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Step 1: base tables (no new columns here — added via migration below)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS meetings (
                     id TEXT PRIMARY KEY,
@@ -105,23 +106,8 @@ def init_db() -> None:
                     completed_date DATE DEFAULT CURRENT_DATE,
                     completed_at TIMESTAMP DEFAULT NOW()
                 );
-                CREATE TABLE IF NOT EXISTS task_time_log (
-                    id SERIAL PRIMARY KEY,
-                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                    minutes_spent INT NOT NULL,
-                    logged_at TIMESTAMP DEFAULT NOW()
-                );
-                CREATE TABLE IF NOT EXISTS task_dependencies (
-                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                    depends_on_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                    PRIMARY KEY (task_id, depends_on_id)
-                );
-                CREATE INDEX IF NOT EXISTS tasks_parent_id     ON tasks (parent_id);
-                CREATE INDEX IF NOT EXISTS tasks_snoozed_until ON tasks (snoozed_until);
-                CREATE INDEX IF NOT EXISTS task_time_log_task  ON task_time_log (task_id);
-                CREATE INDEX IF NOT EXISTS task_deps_task      ON task_dependencies (task_id);
-                CREATE INDEX IF NOT EXISTS task_deps_depends   ON task_dependencies (depends_on_id);
             """)
+            # Step 2: column migrations — must run before creating indexes on new columns
             cur.execute("""
                 DO $$ BEGIN
                     IF NOT EXISTS (
@@ -162,6 +148,29 @@ def init_db() -> None:
                         ALTER TABLE tasks ADD COLUMN recurrence_rule JSONB DEFAULT NULL;
                     END IF;
                 END $$;
+            """)
+            # Step 3: new tables and indexes (after columns exist)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS task_time_log (
+                    id SERIAL PRIMARY KEY,
+                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    minutes_spent INT NOT NULL,
+                    logged_at TIMESTAMP DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS task_dependencies (
+                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    depends_on_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    PRIMARY KEY (task_id, depends_on_id)
+                );
+                CREATE INDEX IF NOT EXISTS tasks_meeting_id    ON tasks (meeting_id);
+                CREATE INDEX IF NOT EXISTS tasks_done          ON tasks (done);
+                CREATE INDEX IF NOT EXISTS tasks_parent_id     ON tasks (parent_id);
+                CREATE INDEX IF NOT EXISTS tasks_snoozed_until ON tasks (snoozed_until);
+                CREATE INDEX IF NOT EXISTS meetings_file_date  ON meetings (file_date DESC NULLS LAST);
+                CREATE INDEX IF NOT EXISTS completions_date    ON completions (completed_date);
+                CREATE INDEX IF NOT EXISTS task_time_log_task  ON task_time_log (task_id);
+                CREATE INDEX IF NOT EXISTS task_deps_task      ON task_dependencies (task_id);
+                CREATE INDEX IF NOT EXISTS task_deps_depends   ON task_dependencies (depends_on_id);
             """)
 
 
