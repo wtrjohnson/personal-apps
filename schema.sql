@@ -45,6 +45,14 @@ ALTER TABLE tasks
     CHECK (priority IN ('high', 'normal', 'low'));
 ALTER TABLE tasks
   ADD COLUMN IF NOT EXISTS contact TEXT DEFAULT NULL;
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS parent_id TEXT REFERENCES tasks(id) ON DELETE CASCADE;
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS snoozed_until DATE DEFAULT NULL;
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS estimate_minutes INT DEFAULT NULL;
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS recurrence_rule JSONB DEFAULT NULL;
 
 -- Group alias map: raw group name → canonical display name.
 -- raw_name is stored lowercase-trimmed to match lookup behaviour.
@@ -65,8 +73,28 @@ CREATE TABLE IF NOT EXISTS completions (
     completed_at     TIMESTAMP DEFAULT NOW()
 );
 
+-- Timestamped log of actual time spent on tasks (for learning estimates)
+CREATE TABLE IF NOT EXISTS task_time_log (
+    id              SERIAL PRIMARY KEY,
+    task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    minutes_spent   INT NOT NULL,
+    logged_at       TIMESTAMP DEFAULT NOW()
+);
+
+-- Task dependency graph: task_id is blocked until depends_on_id is done
+CREATE TABLE IF NOT EXISTS task_dependencies (
+    task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    depends_on_id   TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    PRIMARY KEY (task_id, depends_on_id)
+);
+
 -- Indexes for common query patterns
 CREATE INDEX IF NOT EXISTS tasks_meeting_id    ON tasks (meeting_id);
 CREATE INDEX IF NOT EXISTS tasks_done          ON tasks (done);
+CREATE INDEX IF NOT EXISTS tasks_parent_id     ON tasks (parent_id);
+CREATE INDEX IF NOT EXISTS tasks_snoozed_until ON tasks (snoozed_until);
 CREATE INDEX IF NOT EXISTS meetings_file_date  ON meetings (file_date DESC NULLS LAST);
 CREATE INDEX IF NOT EXISTS completions_date    ON completions (completed_date);
+CREATE INDEX IF NOT EXISTS task_time_log_task  ON task_time_log (task_id);
+CREATE INDEX IF NOT EXISTS task_deps_task      ON task_dependencies (task_id);
+CREATE INDEX IF NOT EXISTS task_deps_depends   ON task_dependencies (depends_on_id);
