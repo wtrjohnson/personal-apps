@@ -356,30 +356,21 @@
   <!-- NL Morphing Add-task modal -->
   <div id="nl-modal-backdrop" class="modal-backdrop hidden">
     <div class="modal nl-modal" id="nl-modal" role="dialog" aria-modal="true">
-      <!-- Step 1: freeform input -->
-      <div id="nl-step1">
-        <div class="modal-header">
-          <h2>New task</h2>
-          <button class="modal-close" id="nl-close" aria-label="Close">&times;</button>
-        </div>
-        <div class="modal-body">
-          <textarea id="nl-text" class="nl-textarea" rows="3"
-            placeholder="Just type… 'Call Alex tomorrow about the proposal, urgent'"></textarea>
-          <div class="nl-hint" id="nl-hint"></div>
-          <div class="nl-step1-footer">
-            <button class="secondary-btn" id="nl-cancel-step1">Cancel</button>
-            <button class="primary-btn" id="nl-confirm-step1">Parse &amp; confirm →</button>
-          </div>
-        </div>
+      <div class="modal-header">
+        <h2>New task</h2>
+        <button class="modal-close" id="nl-close" aria-label="Close">&times;</button>
       </div>
-      <!-- Step 2: parsed fields (populated by JS) -->
-      <div id="nl-step2" class="hidden">
-        <div class="modal-header">
-          <h2>Confirm task</h2>
-          <button class="modal-close" id="nl-back" aria-label="Back">← Edit</button>
+      <div class="modal-body">
+        <textarea id="nl-text" class="nl-textarea" rows="3"
+          placeholder="Just type… 'Call Alex tomorrow about the proposal, urgent'"></textarea>
+        <div class="nl-hint" id="nl-hint"></div>
+        <div id="nl-parsed-fields" class="nl-extra-fields"></div>
+        <div class="nl-step1-footer" id="nl-footer-step1">
+          <button class="secondary-btn" id="nl-cancel-step1">Cancel</button>
+          <button class="primary-btn" id="nl-confirm-step1">Parse &amp; confirm →</button>
         </div>
-        <div class="modal-body" id="nl-parsed-fields"></div>
-        <div class="modal-footer">
+        <div class="nl-footer-step2 hidden" id="nl-footer-step2">
+          <button class="secondary-btn" id="nl-back">← Edit</button>
           <button class="secondary-btn" id="nl-cancel">Cancel</button>
           <button class="primary-btn" id="nl-submit">Add task</button>
         </div>
