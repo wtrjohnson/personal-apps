@@ -89,6 +89,10 @@ def init_db() -> None:
                     deadline_raw TEXT,
                     priority TEXT DEFAULT 'normal',
                     contact TEXT DEFAULT NULL,
+                    parent_id TEXT,
+                    snoozed_until DATE DEFAULT NULL,
+                    estimate_minutes INT DEFAULT NULL,
+                    recurrence_rule JSONB DEFAULT NULL,
                     created_at TIMESTAMP DEFAULT NOW()
                 );
                 CREATE TABLE IF NOT EXISTS groups_map (
@@ -160,6 +164,21 @@ def init_db() -> None:
                         WHERE table_name='tasks' AND column_name='recurrence_rule'
                     ) THEN
                         ALTER TABLE tasks ADD COLUMN recurrence_rule JSONB DEFAULT NULL;
+                    END IF;
+                    -- Add FK constraint on parent_id if column exists but constraint doesn't
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.table_constraints tc
+                        JOIN information_schema.constraint_column_usage ccu
+                            ON tc.constraint_name = ccu.constraint_name
+                        WHERE tc.table_name = 'tasks'
+                            AND tc.constraint_type = 'FOREIGN KEY'
+                            AND ccu.column_name = 'parent_id'
+                    ) THEN
+                        BEGIN
+                            ALTER TABLE tasks ADD CONSTRAINT tasks_parent_id_fk
+                                FOREIGN KEY (parent_id) REFERENCES tasks(id) ON DELETE CASCADE;
+                        EXCEPTION WHEN OTHERS THEN NULL;
+                        END;
                     END IF;
                 END $$;
             """)
@@ -1574,7 +1593,7 @@ def api_add_subtask():
                     return jsonify({"ok": False, "error": "Parent task not found"}), 404
                 if row["parent_id"]:
                     return jsonify({"ok": False, "error": "Cannot nest subtasks more than one level"}), 400
-                new_id = str(uuid4())
+                new_id = str(uuid.uuid4())
                 cur.execute(
                     """INSERT INTO tasks (id, text, type, done, source_filename, section, priority, parent_id)
                        VALUES (%s, %s, 'free', FALSE, 'tasks.md', '', %s, %s)""",
