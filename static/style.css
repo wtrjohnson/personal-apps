@@ -2249,6 +2249,45 @@ table.groups tr:last-child td { border-bottom: none; }
   max-width: 640px;
   width: calc(100vw - 80px);
   text-align: center;
+  position: relative;
+}
+
+/* Completion celebration overlay */
+.focus-done-overlay {
+  position: absolute;
+  inset: -40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.focus-mode.completing .focus-done-overlay {
+  opacity: 1;
+}
+.focus-mode-content {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.focus-mode.completing .focus-mode-content {
+  opacity: 0;
+  transform: scale(0.95);
+}
+@keyframes done-circle-pop {
+  0%   { transform: scale(0.2); opacity: 0; }
+  65%  { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1);   opacity: 1; }
+}
+.focus-done-circle {
+  width: 96px;
+  height: 96px;
+  background: var(--moss);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 32px rgba(22,163,74,0.35);
+  animation: done-circle-pop 0.48s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 .focus-mode-label {
   font-size: 11px;
@@ -2283,8 +2322,12 @@ table.groups tr:last-child td { border-bottom: none; }
   color: #fff;
   border: none;
   font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 .focus-btn-complete:hover { background: var(--accent-hover); transform: translateY(-1px); }
+.focus-btn-complete:active { background: var(--moss); transform: scale(0.97); }
 .focus-btn-skip {
   background: none;
   border: 1px solid var(--border-strong);
@@ -2620,52 +2663,12 @@ table.groups tr:last-child td { border-bottom: none; }
 .blocker-empty { padding: 12px; color: var(--muted); font-size: 13px; text-align: center; }
 
 /* =========================================================
-   TIME LOG PROMPT
+   TASK COMPLETION ANIMATION
    ========================================================= */
-/* Inline time-log prompt — appears inside the task row on completion */
-.task-completing {
-  filter: blur(6px);
-  opacity: 0.3;
-  pointer-events: none;
-  user-select: none;
-  transition: filter 0.18s ease, opacity 0.18s ease;
-}
-/* .text div when it holds the time-log buttons */
-.text.tlp-mode {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
 .task-exit {
   opacity: 0;
-  transform: translateX(6px);
-  transition: opacity 0.25s ease, transform 0.25s ease;
-}
-.tlp-label { font-size: 12.5px; color: var(--accent-ink); font-weight: 500; }
-.tlp-options { display: flex; gap: 6px; }
-.tlp-options button {
-  padding: 3px 10px;
-  font-size: 12px;
-  border-radius: 14px;
-  border: 1px solid var(--accent);
-  background: var(--card);
-  color: var(--accent-ink);
-  cursor: pointer;
-  font: inherit;
-  transition: background 0.1s;
-}
-.tlp-options button:hover { background: var(--accent); color: #fff; }
-.tlp-skip {
-  background: none;
-  border: none;
-  font: inherit;
-  font-size: 12px;
-  color: var(--muted);
-  cursor: pointer;
-  text-decoration: underline;
-  padding: 0;
-  margin-left: auto;
+  transform: translateX(8px);
+  transition: opacity 0.22s ease, transform 0.22s ease;
 }
 
 /* =========================================================
