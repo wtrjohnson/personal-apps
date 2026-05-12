@@ -407,42 +407,47 @@ async function _inlineTimeLogPrompt(task) {
     const li = document.querySelector(`li[data-task-id="${task.id}"]`);
     if (!li) { resolve(); return; }
 
-    li.querySelector(".text")?.classList.add("task-completing");
-    li.querySelector(".meta")?.classList.add("task-completing");
+    const textEl = li.querySelector(".text");
+    if (!textEl) { resolve(); return; }
 
-    const prompt = document.createElement("div");
-    prompt.className = "tlp-inline";
-    prompt.innerHTML = `
-      <span class="tlp-label">How long did that take?</span>
-      <div class="tlp-options">
-        <button data-mins="5">5m</button>
-        <button data-mins="15">15m</button>
-        <button data-mins="30">30m</button>
-        <button data-mins="60">1h</button>
-      </div>
-      <button class="tlp-skip">Skip</button>`;
-    li.querySelector(".main").appendChild(prompt);
-    requestAnimationFrame(() => prompt.classList.add("tlp-inline-visible"));
+    // Blur the text to mask the content swap
+    textEl.classList.add("task-completing");
 
-    const finish = async (mins) => {
-      if (mins) {
-        try {
-          await api("/api/tasks/time-log", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ task_id: task.id, minutes_spent: mins }),
-          });
-        } catch (_) {}
-      }
-      li.classList.add("task-exit");
-      setTimeout(resolve, 250);
-    };
+    setTimeout(() => {
+      // Swap text → buttons while hidden under blur
+      textEl.classList.add("tlp-mode");
+      textEl.innerHTML = `
+        <span class="tlp-label">How long?</span>
+        <div class="tlp-options">
+          <button data-mins="5">5m</button>
+          <button data-mins="15">15m</button>
+          <button data-mins="30">30m</button>
+          <button data-mins="60">1h</button>
+        </div>
+        <button class="tlp-skip">Skip</button>`;
+      // Lift the blur to reveal buttons
+      textEl.classList.remove("task-completing");
 
-    const timer = setTimeout(() => finish(null), 20000);
-    prompt.querySelectorAll("[data-mins]").forEach((btn) => {
-      btn.addEventListener("click", () => { clearTimeout(timer); finish(parseInt(btn.dataset.mins)); });
-    });
-    prompt.querySelector(".tlp-skip").addEventListener("click", () => { clearTimeout(timer); finish(null); });
+      const finish = async (mins) => {
+        if (mins) {
+          try {
+            await api("/api/tasks/time-log", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ task_id: task.id, minutes_spent: mins }),
+            });
+          } catch (_) {}
+        }
+        li.classList.add("task-exit");
+        setTimeout(resolve, 250);
+      };
+
+      const timer = setTimeout(() => finish(null), 20000);
+      textEl.querySelectorAll("[data-mins]").forEach((btn) => {
+        btn.addEventListener("click", () => { clearTimeout(timer); finish(parseInt(btn.dataset.mins)); });
+      });
+      textEl.querySelector(".tlp-skip").addEventListener("click", () => { clearTimeout(timer); finish(null); });
+    }, 180);
   });
 }
 
