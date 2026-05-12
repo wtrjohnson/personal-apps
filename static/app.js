@@ -425,8 +425,10 @@ async function _inlineTimeLogPrompt(task) {
           <button data-mins="60">1h</button>
         </div>
         <button class="tlp-skip">Skip</button>`;
-      // Lift the blur to reveal buttons
+      // Snap blur off instantly so buttons are immediately clear and clickable
+      textEl.style.transition = "none";
       textEl.classList.remove("task-completing");
+      requestAnimationFrame(() => { textEl.style.transition = ""; });
 
       const finish = async (mins) => {
         if (mins) {
