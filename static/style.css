@@ -3,36 +3,72 @@
    ========================================================= */
 
 :root {
-  --canvas: #F1EDE4;
-  --canvas-ink: #2A2620;
+  /* --- Neutral foundation --- */
+  --surface: #f5f5f7;
+  --canvas: #f5f5f7;
+  --canvas-ink: #111111;
   --card: #FFFFFF;
-  --card-soft: #FAF7F0;
-  --card-dark: #1A1815;
+  --card-soft: #e8eeff;
+  --card-dark: #111111;
 
-  --ink: #1A1815;
-  --muted: #6B685F;
-  --muted-2: #8E8B82;
+  --ink: #111111;
+  --fog: #888888;
+  --label: #888888;
+  --muted: #888888;
+  --muted-2: #888888;
 
-  --border: #E8E2D3;
-  --border-strong: #CFC9B8;
+  --line: rgba(0,0,0,0.08);
+  --border: rgba(0,0,0,0.08);
+  --border-strong: rgba(0,0,0,0.15);
 
+  /* --- Accent colors --- */
+  --card-blue: #2563eb;
+  --moss: #16a34a;
+  --sand: #d97706;
+  --violet: #7c3aed;
+  --lavender: #7c3aed;
+
+  /* --- Legacy accent (warm gold, retained for backward compat) --- */
   --accent: #C8911F;
   --accent-hover: #B17F14;
   --accent-soft: #F4E6C5;
   --accent-softer: #FBF3DD;
   --accent-ink: #6E5110;
 
-  --overdue: #B42F2F;
-  --overdue-soft: #F8E2E2;
+  /* --- Status colors --- */
+  --status-fresh-bg: #e8fdf0;
+  --status-fresh-text: #16a34a;
+  --status-ready-bg: #e8eeff;
+  --status-ready-text: #2563eb;
+  --status-fatigued-bg: #fef3e2;
+  --status-fatigued-text: #d97706;
+  --status-overreached-bg: #fee2e2;
+  --status-overreached-text: #dc2626;
+
+  --overdue: #dc2626;
+  --overdue-soft: #fee2e2;
   --backburner: #7A6E8C;
   --backburner-soft: #EFEBF3;
-  --ok: #3D7A3D;
-  --ok-soft: #DDEBDD;
+  --ok: #16a34a;
+  --ok-soft: #e8fdf0;
 
-  --shadow-sm: 0 1px 2px rgba(40,28,10,0.04), 0 2px 6px rgba(40,28,10,0.04);
-  --shadow-md: 0 4px 14px rgba(40,28,10,0.06), 0 1px 3px rgba(40,28,10,0.05);
-  --shadow-lg: 0 16px 40px rgba(40,28,10,0.08), 0 4px 10px rgba(40,28,10,0.05);
-  --shadow-pop: 0 20px 50px rgba(40,28,10,0.18);
+  /* --- Dark / legacy palette tokens --- */
+  --night: #050507;
+  --paper: #08080b;
+  --carbon: #111118;
+  --graphite: #191823;
+  --steel: #9b98aa;
+  --ember: #f0c98d;
+  --aqua: #a98bff;
+
+  /* --- Shadows --- */
+  --shadow-soft: 0 4px 24px rgba(0,0,0,0.08);
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.04);
+  --shadow-glow: 0 0 34px rgba(124,58,237,0.2);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.04), 0 2px 6px rgba(0,0,0,0.04);
+  --shadow-md: 0 4px 14px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.05);
+  --shadow-lg: 0 16px 40px rgba(0,0,0,0.08), 0 4px 10px rgba(0,0,0,0.05);
+  --shadow-pop: 0 20px 50px rgba(0,0,0,0.18);
 
   --r-sm: 8px;
   --r-md: 14px;
@@ -42,6 +78,28 @@
 
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+}
+
+/* =========================================================
+   DARK WORKOUT MODE — toggled via .workout-surface class
+   ========================================================= */
+.workout-surface {
+  --canvas: #0f0f14;
+  --surface: #0f0f14;
+  --card: #191823;
+  --card-soft: #1e1d2b;
+  --card-dark: #050507;
+  --ink: #f8f3e7;
+  --fog: #9b98aa;
+  --muted: #9b98aa;
+  --muted-2: #9b98aa;
+  --label: #9b98aa;
+  --border: rgba(255,255,255,0.07);
+  --line: rgba(255,255,255,0.07);
+  --border-strong: rgba(255,255,255,0.14);
+  background: #0f0f14;
+  color: #f8f3e7;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -1995,17 +2053,62 @@ table.groups tr:last-child td { border-bottom: none; }
   margin-top: 10px;
 }
 .focus-action-btn {
-  padding: 6px 14px;
-  font-size: 12.5px;
-  border-radius: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
   border: 1px solid var(--border-strong);
   background: var(--card);
-  color: var(--ink);
+  color: var(--muted);
   cursor: pointer;
   font: inherit;
-  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.18s, padding-right 0.24s ease;
 }
-.focus-action-btn:hover { background: var(--accent-softer); border-color: var(--accent); }
+.focus-btn-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+.focus-btn-label {
+  max-width: 0;
+  overflow: hidden;
+  display: inline-block;
+  white-space: nowrap;
+  transition: max-width 0.24s ease, margin-left 0.24s ease;
+  margin-left: 0;
+}
+.focus-action-btn:hover .focus-btn-label {
+  max-width: 80px;
+  margin-left: 5px;
+}
+.focus-action-btn:hover {
+  padding-right: 11px;
+}
+/* Per-button accent colors on hover */
+.focus-action-btn.focus-complete:hover {
+  background: var(--status-fresh-bg);
+  border-color: var(--moss);
+  color: var(--moss);
+}
+.focus-action-btn.focus-defer:hover {
+  background: var(--status-fatigued-bg);
+  border-color: var(--sand);
+  color: var(--sand);
+}
+.focus-action-btn.focus-focus:hover {
+  background: var(--status-ready-bg);
+  border-color: var(--card-blue);
+  color: var(--card-blue);
+}
 .focus-runners-label {
   font-size: 11px;
   text-transform: uppercase;

@@ -1367,9 +1367,18 @@ function _renderFocusPanel(tasks) {
     <div class="focus-task-text">${escapeHtml(top.text)}</div>
     ${meta.length ? `<div class="focus-task-meta">${meta.join(" · ")}</div>` : ""}
     <div class="focus-actions">
-      <button class="focus-action-btn focus-complete" data-focus-id="${top.id}">Complete ✓</button>
-      <button class="focus-action-btn focus-defer" data-focus-id="${top.id}">Defer 💤</button>
-      <button class="focus-action-btn focus-focus">Focus 🎯</button>
+      <button class="focus-action-btn focus-complete" data-focus-id="${top.id}" title="Complete">
+        <span class="focus-btn-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><polyline points="2.5,8.5 6.5,12.5 13.5,4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        <span class="focus-btn-label">Complete</span>
+      </button>
+      <button class="focus-action-btn focus-defer" data-focus-id="${top.id}" title="Defer">
+        <span class="focus-btn-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.75"/><path d="M8 5v3l2.2 1.4" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        <span class="focus-btn-label">Defer</span>
+      </button>
+      <button class="focus-action-btn focus-focus" title="Focus">
+        <span class="focus-btn-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.75"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.75"/></svg></span>
+        <span class="focus-btn-label">Focus</span>
+      </button>
     </div>`;
   $("#focus-panel-runners").innerHTML = runners.length
     ? `<div class="focus-runners-label">Also up next</div>` + runners.map((t) =>
