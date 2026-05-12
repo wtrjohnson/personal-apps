@@ -233,13 +233,13 @@ function drawSparkline(data) {
   svg.innerHTML = `
     <defs>
       <linearGradient id="spark-grad" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#C8911F" stop-opacity="0.45"/>
-        <stop offset="100%" stop-color="#C8911F" stop-opacity="0"/>
+        <stop offset="0%" stop-color="#2563eb" stop-opacity="0.4"/>
+        <stop offset="100%" stop-color="#2563eb" stop-opacity="0"/>
       </linearGradient>
     </defs>
     <path d="${area}" fill="url(#spark-grad)"/>
-    <path d="${line}" fill="none" stroke="#C8911F" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-    <circle cx="${lastPt[0].toFixed(2)}" cy="${lastPt[1].toFixed(2)}" r="3" fill="#C8911F"/>
+    <path d="${line}" fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${lastPt[0].toFixed(2)}" cy="${lastPt[1].toFixed(2)}" r="3" fill="#2563eb"/>
   `;
 }
 

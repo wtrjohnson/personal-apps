@@ -921,7 +921,7 @@ input, select, textarea { font-family: inherit; }
 .tasks .chip.contact { background: #EAF0FB; color: #1E40AF; border-color: #C3D3F0; }
 .tasks .chip.priority-high { background: #FDE8E8; color: #991B1B; border-color: #F5C6C6; font-weight: 600; }
 .tasks .chip.priority-low  { background: var(--card-soft); color: var(--muted-2); border-color: var(--border); opacity: 0.75; }
-.tasks .chip.urgency-auto  { background: #FEF3E2; color: #B45309; border-color: #F5D9A0; font-style: italic; }
+.tasks .chip.urgency-auto  { background: #f3f0ff; color: #5b21b6; border-color: #ddd6fe; font-style: italic; }
 
 .tasks .source {
   color: var(--muted); font-size: 11px;
