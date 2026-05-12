@@ -2524,26 +2524,18 @@ table.groups tr:last-child td { border-bottom: none; }
    ========================================================= */
 /* Inline time-log prompt — appears inside the task row on completion */
 .task-completing {
-  opacity: 0.2;
+  filter: blur(6px);
+  opacity: 0.3;
   pointer-events: none;
   user-select: none;
-  transition: opacity 0.22s ease;
+  transition: filter 0.18s ease, opacity 0.18s ease;
 }
-.tlp-inline {
+/* .text div when it holds the time-log buttons */
+.text.tlp-mode {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 2px;
   flex-wrap: wrap;
-  max-height: 0;
-  overflow: hidden;
-  opacity: 0;
-  transition: max-height 0.32s cubic-bezier(0.34, 1.05, 0.64, 1), opacity 0.22s ease;
-}
-.tlp-inline.tlp-inline-visible {
-  max-height: 60px;
-  opacity: 1;
-  padding-top: 6px;
 }
 .task-exit {
   opacity: 0;
