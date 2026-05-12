@@ -389,65 +389,61 @@ async function toggleTaskDone(task) {
   await api("/api/tasks/toggle", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      id: task.id,
-      done: newDone,
-    }),
+    body: JSON.stringify({ id: task.id, done: newDone }),
   });
   closeDrawer();
-  if (newDone) await new Promise((r) => setTimeout(r, 260));
-  await refreshTasks();
-  if (state.tab === "smart") loadSmartView(state.smartView);
   if (newDone) {
     showUndoToast(task);
-    _injectTimeLogPrompt(task);
+    await _inlineTimeLogPrompt(task);
   }
+  await refreshTasks();
+  if (state.tab === "smart") loadSmartView(state.smartView);
   if (state.meetings.length) refreshMeetings();
   if (state.tab === "home") renderHome();
 }
 
-function _injectTimeLogPrompt(task) {
-  const existing = document.querySelector(".time-log-prompt");
-  if (existing) existing.remove();
-  const container = $("#toast-container");
-  if (!container) return;
-  const row = document.createElement("div");
-  row.className = "time-log-prompt";
-  row.innerHTML = `
-    <span class="tlp-label">How long did that take?</span>
-    <div class="tlp-options">
-      <button data-mins="15">&lt;15m</button>
-      <button data-mins="30">30m</button>
-      <button data-mins="60">1h</button>
-      <button data-mins="120">2h+</button>
-    </div>
-    <button class="tlp-skip">Skip</button>`;
-  container.appendChild(row);
-  // Extend container visibility to cover the full prompt window (overrides the 6s toast timer)
-  clearTimeout(_undoTimer);
-  _undoTimer = setTimeout(() => {
-    row.remove();
-    container.classList.remove("visible");
-  }, 30000);
-  requestAnimationFrame(() => { row.style.maxHeight = "60px"; row.style.opacity = "1"; });
-  const dismiss = () => {
-    row.remove();
-    clearTimeout(_undoTimer);
-    _undoTimer = setTimeout(() => container.classList.remove("visible"), 2000);
-  };
-  row.querySelectorAll("[data-mins]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      try {
-        await api("/api/tasks/time-log", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ task_id: task.id, minutes_spent: parseInt(btn.dataset.mins) }),
-        });
-      } catch (_) {}
-      dismiss();
+async function _inlineTimeLogPrompt(task) {
+  return new Promise((resolve) => {
+    const li = document.querySelector(`li[data-task-id="${task.id}"]`);
+    if (!li) { resolve(); return; }
+
+    li.querySelector(".text")?.classList.add("task-completing");
+    li.querySelector(".meta")?.classList.add("task-completing");
+
+    const prompt = document.createElement("div");
+    prompt.className = "tlp-inline";
+    prompt.innerHTML = `
+      <span class="tlp-label">How long did that take?</span>
+      <div class="tlp-options">
+        <button data-mins="5">5m</button>
+        <button data-mins="15">15m</button>
+        <button data-mins="30">30m</button>
+        <button data-mins="60">1h</button>
+      </div>
+      <button class="tlp-skip">Skip</button>`;
+    li.querySelector(".main").appendChild(prompt);
+    requestAnimationFrame(() => prompt.classList.add("tlp-inline-visible"));
+
+    const finish = async (mins) => {
+      if (mins) {
+        try {
+          await api("/api/tasks/time-log", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ task_id: task.id, minutes_spent: mins }),
+          });
+        } catch (_) {}
+      }
+      li.classList.add("task-exit");
+      setTimeout(resolve, 250);
+    };
+
+    const timer = setTimeout(() => finish(null), 20000);
+    prompt.querySelectorAll("[data-mins]").forEach((btn) => {
+      btn.addEventListener("click", () => { clearTimeout(timer); finish(parseInt(btn.dataset.mins)); });
     });
+    prompt.querySelector(".tlp-skip").addEventListener("click", () => { clearTimeout(timer); finish(null); });
   });
-  row.querySelector(".tlp-skip").addEventListener("click", dismiss);
 }
 
 async function toggleTaskBackburner(task) {
@@ -1930,7 +1926,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (p.group) hints.push(`group: ${p.group}`);
     $("#nl-hint").textContent = hints.length ? "Detected: " + hints.join(", ") : "";
   }, 400);
-  $("#nl-text").addEventListener("input", (e) => _nlHintDebounced(e.target.value));
+  const _nlAutoParseDebounced = debounce(() => {
+    const ta = $("#nl-text");
+    if (!ta.readOnly && ta.value.trim()) _nlTransitionToStep2();
+  }, 700);
+  $("#nl-text").addEventListener("input", (e) => {
+    _nlHintDebounced(e.target.value);
+    _nlAutoParseDebounced();
+  });
   $("#nl-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); _nlTransitionToStep2(); }
   });
