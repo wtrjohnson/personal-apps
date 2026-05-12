@@ -1,5 +1,5 @@
 /* =========================================================
-   Notes Dashboard — warm card aesthetic
+   Notes Dashboard
    ========================================================= */
 
 :root {
@@ -28,12 +28,12 @@
   --violet: #7c3aed;
   --lavender: #7c3aed;
 
-  /* --- Legacy accent (warm gold, retained for backward compat) --- */
-  --accent: #C8911F;
-  --accent-hover: #B17F14;
-  --accent-soft: #F4E6C5;
-  --accent-softer: #FBF3DD;
-  --accent-ink: #6E5110;
+  /* --- Primary accent (blue) --- */
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: #e8eeff;
+  --accent-softer: #f0f4ff;
+  --accent-ink: #1e40af;
 
   /* --- Status colors --- */
   --status-fresh-bg: #e8fdf0;
