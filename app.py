@@ -1461,48 +1461,6 @@ def api_snooze_task():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/api/tasks/time-log", methods=["POST"])
-def api_time_log():
-    data = request.get_json(force=True, silent=True) or {}
-    task_id = (data.get("task_id") or "").strip()
-    minutes = data.get("minutes_spent")
-    if not task_id or minutes is None:
-        return jsonify({"ok": False, "error": "task_id and minutes_spent required"}), 400
-    try:
-        minutes = int(minutes)
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO task_time_log (task_id, minutes_spent) VALUES (%s, %s)",
-                    (task_id, minutes),
-                )
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/tasks/time-estimate-hint")
-def api_time_estimate_hint():
-    group = request.args.get("group", "").strip()
-    if not group:
-        return jsonify({"ok": True, "suggested_minutes": None, "sample_count": 0})
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT ROUND(AVG(tl.minutes_spent)) AS avg_mins, COUNT(*) AS cnt
-                    FROM task_time_log tl
-                    JOIN tasks t ON t.id = tl.task_id
-                    WHERE t.group_name = %s
-                """, (group,))
-                row = cur.fetchone()
-        if row and row["cnt"] > 0:
-            return jsonify({"ok": True, "suggested_minutes": int(row["avg_mins"] or 0), "sample_count": int(row["cnt"])})
-        return jsonify({"ok": True, "suggested_minutes": None, "sample_count": 0})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
 @app.route("/api/tasks/search")
 def api_tasks_search():
     q = request.args.get("q", "").strip().lower()

@@ -512,14 +512,28 @@
   <!-- Focus mode overlay -->
   <div id="focus-mode" class="focus-mode hidden" role="dialog" aria-modal="true">
     <div class="focus-mode-inner">
-      <div class="focus-mode-label">Focus Mode</div>
-      <div class="focus-mode-text" id="focus-mode-text"></div>
-      <div class="focus-mode-meta" id="focus-mode-meta"></div>
-      <div class="focus-mode-actions">
-        <button class="focus-btn-complete" id="focus-btn-complete">Complete ✓</button>
-        <button class="focus-btn-skip" id="focus-btn-skip">Skip →</button>
+      <!-- Completion celebration (shown briefly when marking done) -->
+      <div class="focus-done-overlay">
+        <div class="focus-done-circle">
+          <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
+            <polyline points="9,23 19,33 35,13" stroke="white" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
       </div>
-      <div class="focus-mode-progress" id="focus-mode-progress"></div>
+      <!-- Task content -->
+      <div class="focus-mode-content">
+        <div class="focus-mode-label">Focus Mode</div>
+        <div class="focus-mode-text" id="focus-mode-text"></div>
+        <div class="focus-mode-meta" id="focus-mode-meta"></div>
+        <div class="focus-mode-actions">
+          <button class="focus-btn-complete" id="focus-btn-complete">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><polyline points="2.5,8.5 6.5,12.5 13.5,4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Complete
+          </button>
+          <button class="focus-btn-skip" id="focus-btn-skip">Skip →</button>
+        </div>
+        <div class="focus-mode-progress" id="focus-mode-progress"></div>
+      </div>
     </div>
     <button class="focus-mode-close" id="focus-mode-close" title="Exit focus mode (Esc)">✕ Esc</button>
   </div>

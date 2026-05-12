@@ -394,63 +394,18 @@ async function toggleTaskDone(task) {
   closeDrawer();
   if (newDone) {
     showUndoToast(task);
-    await _inlineTimeLogPrompt(task);
+    const li = document.querySelector(`li[data-task-id="${task.id}"]`);
+    if (li) {
+      li.classList.add("task-completing");
+      await new Promise(r => setTimeout(r, 380));
+      li.classList.add("task-exit");
+      await new Promise(r => setTimeout(r, 230));
+    }
   }
   await refreshTasks();
   if (state.tab === "smart") loadSmartView(state.smartView);
   if (state.meetings.length) refreshMeetings();
   if (state.tab === "home") renderHome();
-}
-
-async function _inlineTimeLogPrompt(task) {
-  return new Promise((resolve) => {
-    const li = document.querySelector(`li[data-task-id="${task.id}"]`);
-    if (!li) { resolve(); return; }
-
-    const textEl = li.querySelector(".text");
-    if (!textEl) { resolve(); return; }
-
-    // Blur the text to mask the content swap
-    textEl.classList.add("task-completing");
-
-    setTimeout(() => {
-      // Swap text → buttons while hidden under blur
-      textEl.classList.add("tlp-mode");
-      textEl.innerHTML = `
-        <span class="tlp-label">How long?</span>
-        <div class="tlp-options">
-          <button data-mins="5">5m</button>
-          <button data-mins="15">15m</button>
-          <button data-mins="30">30m</button>
-          <button data-mins="60">1h</button>
-        </div>
-        <button class="tlp-skip">Skip</button>`;
-      // Snap blur off instantly so buttons are immediately clear and clickable
-      textEl.style.transition = "none";
-      textEl.classList.remove("task-completing");
-      requestAnimationFrame(() => { textEl.style.transition = ""; });
-
-      const finish = async (mins) => {
-        if (mins) {
-          try {
-            await api("/api/tasks/time-log", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ task_id: task.id, minutes_spent: mins }),
-            });
-          } catch (_) {}
-        }
-        li.classList.add("task-exit");
-        setTimeout(resolve, 250);
-      };
-
-      const timer = setTimeout(() => finish(null), 20000);
-      textEl.querySelectorAll("[data-mins]").forEach((btn) => {
-        btn.addEventListener("click", () => { clearTimeout(timer); finish(parseInt(btn.dataset.mins)); });
-      });
-      textEl.querySelector(".tlp-skip").addEventListener("click", () => { clearTimeout(timer); finish(null); });
-    }, 180);
-  });
 }
 
 async function toggleTaskBackburner(task) {
@@ -1978,7 +1933,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#focus-btn-complete").addEventListener("click", async () => {
     const task = _focusTasks[_focusIdx];
     if (!task) return;
-    await toggleTaskDone(task);
+    const el = $("#focus-mode");
+    // Reset and replay the circle animation
+    const circle = el.querySelector(".focus-done-circle");
+    circle.style.animation = "none";
+    void circle.offsetHeight;
+    circle.style.animation = "";
+    el.classList.add("completing");
+    // API call and minimum display time run in parallel
+    await Promise.all([
+      toggleTaskDone(task),
+      new Promise(r => setTimeout(r, 680)),
+    ]);
+    el.classList.remove("completing");
     _focusIdx++;
     if (_focusIdx >= _focusTasks.length) { closeFocusMode(); return; }
     _renderFocusModeCurrent();
