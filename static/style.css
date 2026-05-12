@@ -2524,11 +2524,10 @@ table.groups tr:last-child td { border-bottom: none; }
    ========================================================= */
 /* Inline time-log prompt — appears inside the task row on completion */
 .task-completing {
-  filter: blur(4px);
-  opacity: 0.25;
+  opacity: 0.2;
   pointer-events: none;
   user-select: none;
-  transition: filter 0.22s ease, opacity 0.22s ease;
+  transition: opacity 0.22s ease;
 }
 .tlp-inline {
   display: flex;
