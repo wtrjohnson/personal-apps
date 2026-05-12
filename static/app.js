@@ -15,6 +15,10 @@ const state = {
   facets: { groups: [], purposes: [], attendees: [], unaliased_raw_groups: [] },
   stats: null,
   meetingFilters: { group: "", purpose: "", attendee: "", dateFrom: "", dateTo: "", hasOpenTasks: false },
+  smartView: "today",
+  smartViewTasks: [],
+  dailyPlanTasks: [],
+  dailyPlanOrder: [],
 };
 
 // ---------- Utilities ----------
@@ -53,6 +57,8 @@ function tasksFilters() {
   const ty = $("#t-type").value; if (ty) p.set("type", ty);
   const g = $("#t-group").value; if (g) p.set("group", g);
   if ($("#t-overdue").checked) p.set("overdue", "1");
+  if ($("#t-snoozed")?.checked) p.set("snoozed", "1");
+  const pr = $("#t-priority")?.value; if (pr) p.set("priority", pr);
   return p.toString();
 }
 
@@ -80,10 +86,28 @@ async function renderHome() {
   $("#hero-overdue").textContent = s.overdue_count;
   $("#hero-due-today").textContent = s.due_today_count;
 
+  const focusEl = $("#hero-focus");
+  if (focusEl) {
+    const items = s.due_today_top || [];
+    if (items.length > 0) {
+      focusEl.innerHTML =
+        `<div class="focus-label">Due today</div>` +
+        `<ul class="focus-list">` +
+        items.map((t) => {
+          const group = t.group
+            ? `<span class="focus-group">${escapeHtml(t.group)}</span>`
+            : "";
+          return `<li class="focus-item">${escapeHtml(t.text)}${group}</li>`;
+        }).join("") +
+        `</ul>`;
+    } else {
+      const pct = s.pct_complete || 0;
+      focusEl.innerHTML = `<div class="focus-fallback">${pct}% done this week</div>`;
+    }
+  }
+
   const nt = $("#nav-tasks-count");
   if (nt) nt.textContent = s.open_count > 0 ? String(s.open_count) : "";
-  const nm = $("#nav-meetings-count");
-  if (nm) nm.textContent = s.meetings_total > 0 ? String(s.meetings_total) : "";
 
   const strip = $("#deadlines-strip");
   const maxCount = Math.max(0, ...s.deadlines.map((d) => d.count));
@@ -114,20 +138,22 @@ async function renderHome() {
     });
   }
   $("#ring-percent").textContent = `${pct}%`;
-  $("#ring-caption").textContent = s.total_tasks === 0
-    ? "No tasks yet."
-    : `${s.done_count} of ${s.total_tasks} tasks complete`;
+  const weekDone = s.completions_30d || 0;
+  const weekOpen = s.open_count || 0;
+  $("#ring-caption").textContent = weekDone + weekOpen === 0
+    ? "No tasks this week."
+    : `${weekDone} done of ${weekDone + weekOpen} this week`;
 
   drawSparkline(s.completions_per_day || []);
   $("#spark-total").textContent = s.completions_30d || 0;
 
+  const odCard = $("#card-overdue");
   const odList = $("#overdue-list");
   const odPill = $("#overdue-count-pill");
   if (!s.overdue_top || s.overdue_top.length === 0) {
-    odList.innerHTML = `<li class="empty-state" style="display:block; cursor:default;">Nothing overdue. 🎉</li>`;
-    odPill.textContent = "";
-    odPill.style.display = "none";
+    if (odCard) odCard.style.display = "none";
   } else {
+    if (odCard) odCard.style.display = "";
     odPill.style.display = "";
     odPill.textContent = `${s.overdue_count} total`;
     odList.innerHTML = s.overdue_top.map((t) => {
@@ -175,6 +201,14 @@ async function renderHome() {
     $("#recent-reminders").textContent = "0";
     delete $("#recent-meeting-card").dataset.meetingId;
   }
+
+  _renderFocusPanel(s.top_urgency || []);
+
+  // Daily planning: auto-open on first visit each day
+  const today = new Date().toISOString().slice(0, 10);
+  if (localStorage.getItem("last_plan_date") !== today && s.open_count > 0) {
+    openDailyPlan();
+  }
 }
 
 function drawSparkline(data) {
@@ -210,15 +244,49 @@ function drawSparkline(data) {
 }
 
 // ---------- Render: Tasks ----------
+const _URGENCY_KW_RE = /\b(?:urgent|urgently|asap|a\.s\.a\.p|critical|blocker|blocking|immediately|right away|p[01]|high priority|top priority|must do|must complete|mandatory|required|eod|end of day)\b/i;
+
+function _hasUrgencySignals(t) {
+  if (t.priority === "high") return false;
+  if (t.overdue) return true;
+  if (_URGENCY_KW_RE.test(t.text)) return true;
+  if (typeof t.urgency_score === "number" && t.urgency_score >= 150) return true;
+  return false;
+}
+
 function _taskRow(t, i, paper) {
   const chips = [];
   chips.push(`<span class="chip type-${t.type}">${escapeHtml(t.type)}</span>`);
   if (t.group) chips.push(`<span class="chip group">${escapeHtml(t.group)}</span>`);
+  if (t.contact) chips.push(`<span class="chip contact">${escapeHtml(t.contact)}</span>`);
   if (t.deadline) {
     const cls = t.overdue ? "chip deadline overdue" : "chip deadline";
-    chips.push(`<span class="${cls}">⏰ ${escapeHtml(t.deadline)}</span>`);
+    chips.push(`<span class="${cls}">${escapeHtml(t.deadline)}</span>`);
+  }
+  if (t.priority === "high") {
+    chips.push(`<span class="chip priority-high">▲ high</span>`);
+  } else if (t.priority === "low") {
+    chips.push(`<span class="chip priority-low">▽ low</span>`);
+  } else if (_hasUrgencySignals(t)) {
+    chips.push(`<span class="chip urgency-auto">~ urgent</span>`);
   }
   if (t.backburner) chips.push(`<span class="chip bb">💤 backburner</span>`);
+  if (t.estimate_minutes) {
+    const est = t.estimate_minutes < 60
+      ? `${t.estimate_minutes}m`
+      : `${(t.estimate_minutes / 60).toFixed(1).replace(/\.0$/, "")}h`;
+    chips.push(`<span class="chip estimate">⏱ ${est}</span>`);
+  }
+  if (t.recurrence_rule) {
+    const rtype = t.recurrence_rule.type || "";
+    const label = { daily: "↻ daily", weekly: "↻ weekly", monthly: "↻ monthly", after_completion: "↻ on done" }[rtype] || "↻ recurring";
+    chips.push(`<span class="chip recur">${label}</span>`);
+  }
+  if (t.subtask_count > 0) {
+    chips.push(`<span class="chip subtasks" data-subtask-toggle="${t.id}" style="cursor:pointer;">▸ ${t.subtask_count} subtask${t.subtask_count > 1 ? "s" : ""}</span>`);
+  }
+  if (t.has_blockers) chips.push(`<span class="chip blocked">🔗 blocked</span>`);
+  if (t.snoozed_until) chips.push(`<span class="chip snoozed">💤 until ${escapeHtml(t.snoozed_until)}</span>`);
 
   const source = t.type === "free"
     ? `<span>Free-form</span>`
@@ -240,6 +308,7 @@ function _taskRow(t, i, paper) {
       <div class="main">
         <div class="text">${escapeHtml(t.text)}</div>
         <div class="meta">${chips.join("")}</div>
+        <ul class="subtask-list hidden" id="subtasks-${t.id}"></ul>
       </div>
       <div class="source">${source}</div>
       <div class="actions">
@@ -321,17 +390,64 @@ async function toggleTaskDone(task) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      source_filename: task.source_filename,
-      section: task.section,
-      text: task.text,
+      id: task.id,
       done: newDone,
     }),
   });
   closeDrawer();
+  if (newDone) await new Promise((r) => setTimeout(r, 260));
   await refreshTasks();
-  if (newDone) showUndoToast(task);
+  if (state.tab === "smart") loadSmartView(state.smartView);
+  if (newDone) {
+    showUndoToast(task);
+    _injectTimeLogPrompt(task);
+  }
   if (state.meetings.length) refreshMeetings();
   if (state.tab === "home") renderHome();
+}
+
+function _injectTimeLogPrompt(task) {
+  const existing = document.querySelector(".time-log-prompt");
+  if (existing) existing.remove();
+  const container = $("#toast-container");
+  if (!container) return;
+  const row = document.createElement("div");
+  row.className = "time-log-prompt";
+  row.innerHTML = `
+    <span class="tlp-label">How long did that take?</span>
+    <div class="tlp-options">
+      <button data-mins="15">&lt;15m</button>
+      <button data-mins="30">30m</button>
+      <button data-mins="60">1h</button>
+      <button data-mins="120">2h+</button>
+    </div>
+    <button class="tlp-skip">Skip</button>`;
+  container.appendChild(row);
+  // Extend container visibility to cover the full prompt window (overrides the 6s toast timer)
+  clearTimeout(_undoTimer);
+  _undoTimer = setTimeout(() => {
+    row.remove();
+    container.classList.remove("visible");
+  }, 30000);
+  requestAnimationFrame(() => { row.style.maxHeight = "60px"; row.style.opacity = "1"; });
+  const dismiss = () => {
+    row.remove();
+    clearTimeout(_undoTimer);
+    _undoTimer = setTimeout(() => container.classList.remove("visible"), 2000);
+  };
+  row.querySelectorAll("[data-mins]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await api("/api/tasks/time-log", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ task_id: task.id, minutes_spent: parseInt(btn.dataset.mins) }),
+        });
+      } catch (_) {}
+      dismiss();
+    });
+  });
+  row.querySelector(".tlp-skip").addEventListener("click", dismiss);
 }
 
 async function toggleTaskBackburner(task) {
@@ -344,15 +460,26 @@ async function toggleTaskBackburner(task) {
   if (state.tab === "home") renderHome();
 }
 
+async function setPriority(task, priority) {
+  await api("/api/tasks/priority", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: task.id, priority }),
+  });
+  await refreshTasks();
+}
+
+async function cyclePriority(task) {
+  const order = ["high", "normal", "low"];
+  const next = order[(order.indexOf(task.priority ?? "normal") + 1) % 3];
+  await setPriority(task, next);
+}
+
 async function deleteTask(task) {
   await api("/api/tasks/delete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      source_filename: task.source_filename,
-      section: task.section,
-      text: task.text,
-    }),
+    body: JSON.stringify({ id: task.id }),
   });
   await refreshTasks();
   if (state.meetings.length) refreshMeetings();
@@ -381,9 +508,7 @@ function showUndoToast(task) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        source_filename: task.source_filename,
-        section: task.section,
-        text: task.text,
+        id: task.id,
         done: false,
       }),
     });
@@ -416,13 +541,25 @@ function openContextMenu(e, task) {
     <div class="ctx-item" data-action="edit">✏︎ Edit</div>
     <div class="ctx-divider"></div>
     ${hasNote ? `<div class="ctx-item" data-action="view-note">↗ View meeting note</div>` : ""}
-    <div class="ctx-item" data-action="backburner">${isBb ? "☀ Move to active" : "💤 Send to backburner"}</div>
+    <div class="ctx-item" data-action="backburner">${isBb ? "☀ Move to active" : "☁ Send to backburner"}</div>
+    <div class="ctx-item" data-action="snooze">💤 Snooze until…</div>
+    ${!task.parent_id ? `<div class="ctx-item" data-action="add-subtask">⊕ Add subtask</div>` : ""}
+    <div class="ctx-item" data-action="add-blocker">🔗 Block on…</div>
+    <div class="ctx-item ctx-has-sub">
+      <span>⬆ Priority</span>
+      <span class="ctx-arrow">›</span>
+      <div class="ctx-submenu">
+        <div class="ctx-item${task.priority === "high" ? " ctx-active" : ""}" data-action="set-priority" data-priority="high">▲ High</div>
+        <div class="ctx-item${(!task.priority || task.priority === "normal") ? " ctx-active" : ""}" data-action="set-priority" data-priority="normal">— Normal</div>
+        <div class="ctx-item${task.priority === "low" ? " ctx-active" : ""}" data-action="set-priority" data-priority="low">▽ Low</div>
+      </div>
+    </div>
     <div class="ctx-divider"></div>
     <div class="ctx-item ctx-danger" data-action="delete">Delete task</div>
   `;
 
   // Position: keep within viewport
-  const menuW = 200, menuH = 180;
+  const menuW = 200, menuH = 210;
   let x = e.clientX, y = e.clientY;
   if (x + menuW > window.innerWidth)  x = window.innerWidth - menuW - 8;
   if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - 8;
@@ -453,6 +590,41 @@ let _editTask = null;
 function openEditModal(task) {
   _editTask = task;
   $("#edit-m-text").value = task.text;
+  if ($("#edit-m-priority")) $("#edit-m-priority").value = task.priority || "normal";
+
+  // Populate group datalist
+  const list = $("#edit-m-group-list");
+  if (list) {
+    list.innerHTML = state.tasksGroupsInScope.concat(state.facets.groups)
+      .filter((v, i, a) => a.indexOf(v) === i)
+      .map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
+  }
+  if ($("#edit-m-group")) $("#edit-m-group").value = task.group || "";
+  if ($("#edit-m-contact")) $("#edit-m-contact").value = task.contact || "";
+  if ($("#edit-m-estimate")) $("#edit-m-estimate").value = task.estimate_minutes || "";
+  if ($("#edit-m-recur")) {
+    _updateRecurDetail("edit-m", task.recurrence_rule || null);
+  }
+
+  // Populate year select and deadline
+  const yearSel = $("#edit-m-dl-year");
+  if (yearSel) {
+    const thisYear = new Date().getFullYear();
+    yearSel.innerHTML = `<option value="">Year</option>` +
+      [thisYear - 1, thisYear, thisYear + 1, thisYear + 2]
+        .map((y) => `<option value="${y}">${y}</option>`).join("");
+  }
+  if (task.deadline && task.deadline.match(/^\d{4}-\d{2}-\d{2}$/)) {
+    const [yy, mo, dd] = task.deadline.split("-");
+    if ($("#edit-m-dl-month")) $("#edit-m-dl-month").value = mo;
+    if ($("#edit-m-dl-day"))   $("#edit-m-dl-day").value = dd;
+    if ($("#edit-m-dl-year"))  $("#edit-m-dl-year").value = yy;
+  } else {
+    ["edit-m-dl-month", "edit-m-dl-day", "edit-m-dl-year"].forEach((id) => {
+      const el = $("#" + id); if (el) el.value = "";
+    });
+  }
+
   $("#edit-modal-backdrop").classList.remove("hidden");
   setTimeout(() => {
     const inp = $("#edit-m-text");
@@ -470,6 +642,11 @@ async function submitEditModal() {
   if (!_editTask) return;
   const newText = $("#edit-m-text").value.trim();
   if (!newText) { $("#edit-m-text").focus(); return; }
+  const newPriority = $("#edit-m-priority")?.value || "normal";
+  const newGroup = $("#edit-m-group")?.value.trim() || null;
+  const newDeadline = getDeadlineValue("edit-m") || null;
+  const newContact = $("#edit-m-contact")?.value.trim() ?? null;
+  const estimateVal = parseInt($("#edit-m-estimate")?.value);
   await api("/api/tasks/edit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -478,6 +655,12 @@ async function submitEditModal() {
       section: _editTask.section,
       old_text: _editTask.text,
       new_text: newText,
+      priority: newPriority,
+      group: newGroup,
+      deadline_direct: newDeadline,
+      contact: newContact,
+      estimate_minutes: isNaN(estimateVal) ? null : estimateVal,
+      recurrence_rule: getRecurrenceRule("edit-m"),
     }),
   });
   closeEditModal();
@@ -544,50 +727,256 @@ async function openDrawer(task) {
 }
 
 // ---------- Add-task modal ----------
-function getDeadlineValue() {
-  const mo = $("#m-dl-month").value;
-  const dd = $("#m-dl-day").value;
-  const yy = $("#m-dl-year").value;
+function getDeadlineValue(prefix = "m") {
+  const mo = $(`#${prefix}-dl-month`).value;
+  const dd = $(`#${prefix}-dl-day`).value;
+  const yy = $(`#${prefix}-dl-year`).value;
   if (!mo || !dd || !yy) return "";
   return `${yy}-${mo}-${dd}`;
 }
 
-function openAddModal() {
-  // Populate year select
-  const yearSel = $("#m-dl-year");
-  const thisYear = new Date().getFullYear();
-  yearSel.innerHTML = `<option value="">Year</option>` +
-    [thisYear - 1, thisYear, thisYear + 1, thisYear + 2]
-      .map((y) => `<option value="${y}">${y}</option>`).join("");
-
-  const list = $("#m-group-list");
-  list.innerHTML = state.tasksGroupsInScope.concat(state.facets.groups)
-    .filter((v, i, a) => a.indexOf(v) === i)
-    .map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
-
-  $("#m-text").value = "";
-  $("#m-group").value = "";
-  ["m-dl-month", "m-dl-day", "m-dl-year"].forEach((id) => ($("#" + id).value = ""));
-  $("#modal-backdrop").classList.remove("hidden");
-  setTimeout(() => $("#m-text").focus(), 10);
+function setDeadlineSelects(date, prefix = "m") {
+  const mo = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const yy = String(date.getFullYear());
+  $(`#${prefix}-dl-month`).value = mo;
+  $(`#${prefix}-dl-day`).value = dd;
+  $(`#${prefix}-dl-year`).value = yy;
 }
-function closeAddModal() { $("#modal-backdrop").classList.add("hidden"); }
 
-async function submitAddModal() {
-  const text = $("#m-text").value.trim();
-  if (!text) { $("#m-text").focus(); return; }
-  const group = $("#m-group").value.trim();
-  const deadline = getDeadlineValue();
+function _nextWeekday(targetDay) {
+  const today = new Date();
+  const d = new Date(today);
+  const curDay = today.getDay(); // 0=Sun, 1=Mon, ..., 5=Fri, 6=Sat
+  let diff = targetDay - curDay;
+  if (diff <= 0) diff += 7;
+  d.setDate(today.getDate() + diff);
+  return d;
+}
+
+function _thisFriday() {
+  const today = new Date();
+  const curDay = today.getDay();
+  if (curDay === 6) { // Saturday → next Friday
+    const d = new Date(today); d.setDate(today.getDate() + 6); return d;
+  }
+  const diff = curDay === 0 ? 5 : 5 - curDay; // Sunday=5 ahead, else days to Fri
+  const d = new Date(today);
+  d.setDate(today.getDate() + (diff <= 0 ? 7 + diff : diff));
+  return d;
+}
+
+// ---------- Recurrence helpers ----------
+function _updateRecurDetail(prefix, rule) {
+  const sel = $(`#${prefix}-recur`);
+  if (sel) sel.value = rule?.type || "";
+  const detail = $(`#${prefix}-recur-detail`);
+  if (!detail) return;
+  const type = rule?.type || "";
+  if (!type) { detail.classList.add("hidden"); detail.innerHTML = ""; return; }
+  detail.classList.remove("hidden");
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  if (type === "daily") {
+    detail.innerHTML = `<label>Every <input type="number" id="${prefix}-recur-interval" value="${rule?.interval || 1}" min="1" max="90" style="width:50px"> days</label>`;
+  } else if (type === "weekly") {
+    detail.innerHTML = `<label>Every <input type="number" id="${prefix}-recur-interval" value="${rule?.interval || 1}" min="1" max="52" style="width:50px"> week(s) on
+      <select id="${prefix}-recur-day">${days.map((d, i) => `<option value="${i}"${rule?.day_of_week === i ? " selected" : ""}>${d}</option>`).join("")}</select></label>`;
+  } else if (type === "monthly") {
+    detail.innerHTML = `<label>On day <input type="number" id="${prefix}-recur-day" value="${rule?.day_of_month || 1}" min="1" max="31" style="width:50px"> of the month</label>`;
+  } else if (type === "after_completion") {
+    detail.innerHTML = `<label><input type="number" id="${prefix}-recur-days" value="${rule?.days || 7}" min="1" max="365" style="width:50px"> days after completion</label>`;
+  }
+}
+
+function getRecurrenceRule(prefix) {
+  const sel = $(`#${prefix}-recur`);
+  if (!sel || !sel.value) return null;
+  const type = sel.value;
+  if (type === "daily") {
+    return { type, interval: parseInt($(`#${prefix}-recur-interval`)?.value) || 1 };
+  } else if (type === "weekly") {
+    return { type, interval: parseInt($(`#${prefix}-recur-interval`)?.value) || 1, day_of_week: parseInt($(`#${prefix}-recur-day`)?.value) || 0 };
+  } else if (type === "monthly") {
+    return { type, day_of_month: parseInt($(`#${prefix}-recur-day`)?.value) || 1 };
+  } else if (type === "after_completion") {
+    return { type, days: parseInt($(`#${prefix}-recur-days`)?.value) || 7 };
+  }
+  return null;
+}
+
+// ---------- NL Morphing Add-task modal ----------
+function _clientExtractDeadline(text) {
+  const t = text.toLowerCase();
+  const today = new Date();
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const addDays = (n) => { const d = new Date(today); d.setDate(d.getDate() + n); return d; };
+
+  if (/\btomorrow\b/.test(t)) return iso(addDays(1));
+  const inN = t.match(/\bin (\d+) days?\b/);
+  if (inN) return iso(addDays(parseInt(inN[1])));
+  if (/\bend of (this )?week\b/.test(t)) return iso(_thisFriday());
+  if (/\bnext week\b/.test(t)) return iso(_thisFriday());
+  const dayNames = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
+  const nextDay = t.match(/\bnext (sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
+  if (nextDay) return iso(_nextWeekday(dayNames.indexOf(nextDay[1])));
+  return null;
+}
+
+function parseNLTask(text) {
+  const result = { text, priority: "normal", contact: null, phone: null, email: null, deadline: null, group: null, estimate_minutes: null };
+
+  if (/\b(urgent|urgently|asap|a\.s\.a\.p\.?|critical|immediately|must do|p[01])\b/i.test(text)) {
+    result.priority = "high";
+  }
+
+  const contactM = text.match(/\b(?:call|email|meet|text|ping)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/);
+  if (contactM) result.contact = contactM[1];
+
+  const phoneM = text.match(/\b(\d{3}[-.\s]?\d{3}[-.\s]?\d{4})\b/);
+  if (phoneM) result.phone = phoneM[1];
+
+  const emailM = text.match(/\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/);
+  if (emailM) result.email = emailM[0];
+
+  const estM = text.match(/\b(\d+(?:\.\d+)?)\s*(min(?:utes?)?|h(?:ours?)?)\b/i);
+  if (estM) {
+    const val = parseFloat(estM[1]);
+    result.estimate_minutes = /h/i.test(estM[2]) ? Math.round(val * 60) : Math.round(val);
+  }
+
+  result.deadline = _clientExtractDeadline(text);
+
+  const allGroups = state.tasksGroupsInScope.concat(state.facets.groups).filter((v, i, a) => a.indexOf(v) === i);
+  for (const g of allGroups) {
+    if (text.toLowerCase().includes(g.toLowerCase())) {
+      result.group = g;
+      result.groupUncertain = true;
+      break;
+    }
+  }
+
+  return result;
+}
+
+function _populateNLStep2(parsed) {
+  const fields = [];
+  fields.push({ id: "nl-f-priority", label: "Priority", type: "select", value: parsed.priority, options: [["normal","Normal"],["high","High"],["low","Low"]] });
+  fields.push({ id: "nl-f-deadline", label: "Deadline", type: "date", value: parsed.deadline || "" });
+  fields.push({ id: "nl-f-group", label: "Group", type: "text", value: parsed.group || "", uncertain: parsed.groupUncertain });
+  const contactVal = [parsed.email, parsed.phone, parsed.contact].filter(Boolean).join("  ");
+  if (contactVal) {
+    fields.push({ id: "nl-f-contact", label: "Contact method", type: "text", value: contactVal });
+  }
+  if (parsed.estimate_minutes) {
+    fields.push({ id: "nl-f-estimate", label: "Estimate (min)", type: "number", value: parsed.estimate_minutes });
+  }
+
+  const container = $("#nl-parsed-fields");
+  container.innerHTML = fields.map((f, i) => {
+    const uncertain = f.uncertain ? " nl-field-uncertain" : "";
+    let input;
+    if (f.type === "select") {
+      input = `<select id="${f.id}">${f.options.map(([v, l]) => `<option value="${v}"${v === f.value ? " selected" : ""}>${l}</option>`).join("")}</select>`;
+    } else {
+      input = `<input id="${f.id}" type="${f.type}" value="${escapeHtml(String(f.value || ""))}" autocomplete="off">`;
+    }
+    return `<div class="nl-field nl-field-blur${uncertain}" style="transition-delay:${i * 55}ms">
+      <label>${f.label}${f.uncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
+      ${input}
+    </div>`;
+  }).join("");
+
+  // Expand container, then unblur fields staggered
+  requestAnimationFrame(() => {
+    container.classList.add("nl-fields-visible");
+    requestAnimationFrame(() => {
+      container.querySelectorAll(".nl-field-blur").forEach((el) => el.classList.remove("nl-field-blur"));
+    });
+  });
+}
+
+let _nlParsed = null;
+
+function openNLModal() {
+  _nlParsed = null;
+  const ta = $("#nl-text");
+  ta.value = "";
+  ta.readOnly = false;
+  ta.classList.remove("nl-text-blurred");
+  $("#nl-hint").textContent = "";
+  const container = $("#nl-parsed-fields");
+  container.innerHTML = "";
+  container.classList.remove("nl-fields-visible");
+  $("#nl-footer-step1").classList.remove("hidden");
+  $("#nl-footer-step2").classList.add("hidden");
+  $("#nl-modal-backdrop").classList.remove("hidden");
+  setTimeout(() => ta.focus(), 10);
+}
+function closeNLModal() { $("#nl-modal-backdrop").classList.add("hidden"); }
+
+function _nlGoBack() {
+  const ta = $("#nl-text");
+  const container = $("#nl-parsed-fields");
+  // Blur fields briefly, then collapse
+  container.querySelectorAll(".nl-field").forEach((el) => el.classList.add("nl-field-blur"));
+  setTimeout(() => {
+    container.classList.remove("nl-fields-visible");
+    container.innerHTML = "";
+    ta.readOnly = false;
+    ta.classList.remove("nl-text-blurred");
+    $("#nl-footer-step2").classList.add("hidden");
+    $("#nl-footer-step1").classList.remove("hidden");
+    ta.focus();
+  }, 180);
+}
+
+function _nlTransitionToStep2() {
+  const text = $("#nl-text").value.trim();
+  if (!text) { $("#nl-text").focus(); return; }
+  _nlParsed = parseNLTask(text);
+
+  const ta = $("#nl-text");
+  ta.readOnly = true;
+  // Blur the textarea
+  ta.classList.add("nl-text-blurred");
+  $("#nl-hint").textContent = "";
+
+  setTimeout(() => {
+    // Swap footers while still blurred
+    $("#nl-footer-step1").classList.add("hidden");
+    $("#nl-footer-step2").classList.remove("hidden");
+    // Populate + expand extra fields (they start blurred and unblur staggered)
+    _populateNLStep2(_nlParsed);
+    // Unblur the textarea
+    ta.classList.remove("nl-text-blurred");
+  }, 210);
+}
+
+async function submitNLModal() {
+  if (!_nlParsed) return;
+  const text = $("#nl-text").value.trim();
+  if (!text) return;
+  const priority = $("#nl-f-priority")?.value || "normal";
+  const deadline = $("#nl-f-deadline")?.value || "";
+  const group = $("#nl-f-group")?.value.trim() || "";
+  const contact = $("#nl-f-contact")?.value.trim() || null;
+  const estimateRaw = parseInt($("#nl-f-estimate")?.value);
+  const estimate_minutes = isNaN(estimateRaw) ? null : estimateRaw;
+
   await api("/api/tasks/add", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, group, deadline }),
+    body: JSON.stringify({ text, group, deadline, priority, contact, estimate_minutes }),
   });
-  closeAddModal();
+  closeNLModal();
   if (state.tab === "tasks") await refreshTasks();
   if (state.tab === "home")  await renderHome();
   await loadFacets();
 }
+
+// ---------- (legacy alias — kept for any old references) ----------
+const openAddModal = openNLModal;
+const closeAddModal = closeNLModal;
 
 // ---------- Render: Meetings ----------
 function renderMeetingsList() {
@@ -934,6 +1323,7 @@ function switchTab(tab) {
   if (tab === "groups")   loadGroups();
   if (tab === "meetings" && !state.meetings.length) refreshMeetings();
   if (tab === "tasks")    refreshTasks();
+  if (tab === "smart")    loadSmartView(state.smartView);
 }
 
 // ---------- Search overlay ----------
@@ -952,15 +1342,382 @@ function closeSearchOverlay() {
 function updateTaskFilterToggleState() {
   const btn = $("#task-filter-toggle");
   if (!btn) return;
-  const hasFilters = !!($("#t-type")?.value || $("#t-group")?.value || $("#t-overdue")?.checked);
+  const hasFilters = !!($("#t-type")?.value || $("#t-group")?.value || $("#t-overdue")?.checked || $("#t-priority")?.value);
   btn.classList.toggle("has-filters", hasFilters);
   btn.setAttribute("aria-expanded", String(!$("#task-filter-bar").hidden));
 }
+
+// ---------- Focus panel (home dashboard) ----------
+function _renderFocusPanel(tasks) {
+  const panel = $("#card-focus-panel");
+  if (!panel) return;
+  if (!tasks || !tasks.length) { panel.style.display = "none"; return; }
+  panel.style.display = "";
+  const top = tasks[0];
+  const runners = tasks.slice(1, 3);
+  const meta = [];
+  if (top.group) meta.push(escapeHtml(top.group));
+  if (top.deadline) meta.push("⏰ " + escapeHtml(top.deadline));
+  if (top.priority === "high") meta.push("▲ High");
+  if (top.estimate_minutes) meta.push("⏱ " + top.estimate_minutes + "m");
+  $("#focus-panel-top").innerHTML = `
+    <div class="focus-task-text">${escapeHtml(top.text)}</div>
+    ${meta.length ? `<div class="focus-task-meta">${meta.join(" · ")}</div>` : ""}
+    <div class="focus-actions">
+      <button class="focus-action-btn focus-complete" data-focus-id="${top.id}">Complete ✓</button>
+      <button class="focus-action-btn focus-defer" data-focus-id="${top.id}">Defer 💤</button>
+      <button class="focus-action-btn focus-focus">Focus 🎯</button>
+    </div>`;
+  $("#focus-panel-runners").innerHTML = runners.length
+    ? `<div class="focus-runners-label">Also up next</div>` + runners.map((t) =>
+        `<div class="focus-runner"><span class="focus-runner-text">${escapeHtml(t.text)}</span>${t.group ? ` <span class="focus-runner-group">${escapeHtml(t.group)}</span>` : ""}</div>`
+      ).join("")
+    : "";
+}
+
+// ---------- Smart Views ----------
+async function loadSmartView(viewName) {
+  state.smartView = viewName;
+  $$(".smart-view-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === viewName));
+  const titles = { today: "Today", upcoming: "Upcoming", neglected: "Neglected", quick_wins: "Quick Wins", waiting: "Waiting on…" };
+  const descs = {
+    today: "Tasks due today or highest urgency.",
+    upcoming: "Deadlines in the next 7 days.",
+    neglected: "High-priority tasks older than 2 weeks.",
+    quick_wins: "Tasks estimating 30 minutes or less.",
+    waiting: "Tasks blocked by unfinished dependencies.",
+  };
+  const vName = viewName;
+  if ($("#smart-view-title")) $("#smart-view-title").textContent = titles[vName] || vName;
+  if ($("#smart-view-desc"))  $("#smart-view-desc").textContent = descs[vName] || "";
+
+  const ul = $("#smart-view-tasks");
+  ul.innerHTML = `<li class="empty">Loading…</li>`;
+  try {
+    const data = await api("/api/tasks?smart_view=" + encodeURIComponent(viewName) + "&status=open");
+    state.smartViewTasks = data.tasks;
+    if (!data.tasks.length) {
+      ul.innerHTML = `<li class="empty">No tasks in this view.</li>`;
+    } else {
+      ul.innerHTML = data.tasks.map((t, i) => _taskRow(t, i, "smart-view")).join("");
+    }
+  } catch (e) {
+    ul.innerHTML = `<li class="empty">Failed to load.</li>`;
+  }
+}
+
+// ---------- Snooze popup ----------
+let _snoozeTask = null;
+
+function openSnoozePopup(task) {
+  _snoozeTask = task;
+  const popup = $("#snooze-popup");
+  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowISO = tomorrow.toISOString().slice(0, 10);
+  const inp = $("#snooze-date-input");
+  inp.min = tomorrowISO;
+  inp.value = tomorrowISO;
+  popup.classList.remove("hidden");
+}
+
+function closeSnoozePopup() {
+  $("#snooze-popup").classList.add("hidden");
+  _snoozeTask = null;
+}
+
+async function confirmSnooze() {
+  if (!_snoozeTask) return;
+  const until = $("#snooze-date-input").value;
+  if (!until) return;
+  await api("/api/tasks/snooze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: _snoozeTask.id, until }),
+  });
+  closeSnoozePopup();
+  await refreshTasks();
+  if (state.tab === "smart") loadSmartView(state.smartView);
+}
+
+// ---------- Focus mode ----------
+let _focusTasks = [];
+let _focusIdx = 0;
+
+function openFocusMode(tasksOrSingle) {
+  if (!tasksOrSingle) return;
+  const arr = Array.isArray(tasksOrSingle) ? tasksOrSingle : [tasksOrSingle];
+  _focusTasks = arr.filter((t) => t && !t.done);
+  if (!_focusTasks.length) return;
+  _focusIdx = 0;
+  _renderFocusModeCurrent();
+  document.body.classList.add("focus-mode-active");
+  const el = $("#focus-mode");
+  el.classList.remove("hidden");
+  requestAnimationFrame(() => el.classList.add("focus-mode-in"));
+}
+
+function closeFocusMode() {
+  const el = $("#focus-mode");
+  el.classList.remove("focus-mode-in");
+  el.classList.add("hidden");
+  document.body.classList.remove("focus-mode-active");
+  _focusTasks = [];
+  _focusIdx = 0;
+}
+
+function _renderFocusModeCurrent() {
+  const task = _focusTasks[_focusIdx];
+  if (!task) { closeFocusMode(); return; }
+  $("#focus-mode-text").textContent = task.text;
+  const meta = [];
+  if (task.group) meta.push(escapeHtml(task.group));
+  if (task.deadline) meta.push("⏰ " + escapeHtml(task.deadline));
+  if (task.priority === "high") meta.push("▲ High priority");
+  if (task.estimate_minutes) meta.push("⏱ " + task.estimate_minutes + "m");
+  $("#focus-mode-meta").innerHTML = meta.join(" · ");
+  const total = _focusTasks.length;
+  $("#focus-mode-progress").textContent = total > 1 ? `${_focusIdx + 1} of ${total}` : "";
+}
+
+// ---------- Command palette ----------
+const CMD_STATIC = [
+  { label: "Go to Home",        icon: "🏠", action: () => { closeCommandPalette(); switchTab("home"); } },
+  { label: "Go to Tasks",       icon: "✓",  action: () => { closeCommandPalette(); switchTab("tasks"); } },
+  { label: "Go to Meetings",    icon: "📅", action: () => { closeCommandPalette(); switchTab("meetings"); } },
+  { label: "Go to Smart Views", icon: "⚡", action: () => { closeCommandPalette(); switchTab("smart"); } },
+  { label: "Add new task",      icon: "+",  action: () => { closeCommandPalette(); openNLModal(); } },
+  { label: "Focus Mode",        icon: "🎯", action: () => { closeCommandPalette(); openFocusMode(state.stats?.top_urgency?.[0]); } },
+  { label: "Daily Plan",        icon: "📋", action: () => { closeCommandPalette(); openDailyPlan(); } },
+];
+let _cmdSelectedIdx = 0;
+let _cmdCurrentItems = [];
+
+function openCommandPalette() {
+  $("#cmd-q").value = "";
+  _renderCmdResults(CMD_STATIC);
+  $("#cmd-palette").classList.remove("hidden");
+  setTimeout(() => $("#cmd-q").focus(), 10);
+}
+
+function closeCommandPalette() {
+  $("#cmd-palette").classList.add("hidden");
+}
+
+const _cmdDebounced = debounce(async (q) => {
+  if (!q.trim()) { _renderCmdResults(CMD_STATIC); return; }
+  const filtered = CMD_STATIC.filter((c) => c.label.toLowerCase().includes(q.toLowerCase()));
+  let taskResults = [];
+  try {
+    const data = await api("/api/tasks/search?q=" + encodeURIComponent(q) + "&limit=6");
+    taskResults = (data.tasks || []).map((t) => ({
+      label: t.text,
+      meta: t.group || "",
+      icon: "✓",
+      action: () => { closeCommandPalette(); switchTab("tasks"); },
+    }));
+  } catch (_) {}
+  _renderCmdResults([...filtered, ...taskResults]);
+}, 200);
+
+function _renderCmdResults(items) {
+  _cmdCurrentItems = items;
+  _cmdSelectedIdx = 0;
+  const ul = $("#cmd-results");
+  if (!items.length) { ul.innerHTML = `<li class="cmd-empty">No results</li>`; return; }
+  ul.innerHTML = items.map((item, i) =>
+    `<li class="cmd-item${i === 0 ? " selected" : ""}" data-cmd-idx="${i}">
+      <span class="cmd-icon">${item.icon || ""}</span>
+      <span class="cmd-label">${escapeHtml(item.label)}</span>
+      ${item.meta ? `<span class="cmd-meta">${escapeHtml(item.meta)}</span>` : ""}
+    </li>`
+  ).join("");
+}
+
+// ---------- Daily planning ----------
+async function openDailyPlan() {
+  const greeting = greetingFor(new Date());
+  if ($("#daily-plan-title")) $("#daily-plan-title").textContent = `${greeting} — here's your day`;
+  try {
+    const [todayData, overdueData] = await Promise.all([
+      api("/api/tasks?smart_view=today&status=open"),
+      api("/api/tasks?overdue=1&status=open"),
+    ]);
+    const seen = new Set();
+    const tasks = [];
+    [...(todayData.tasks || []), ...(overdueData.tasks || [])].forEach((t) => {
+      if (!seen.has(t.id)) { seen.add(t.id); tasks.push(t); }
+    });
+    state.dailyPlanTasks = tasks;
+    if ($("#daily-plan-desc")) {
+      $("#daily-plan-desc").textContent = tasks.length
+        ? `${tasks.length} task${tasks.length === 1 ? "" : "s"} to tackle today.`
+        : "You're all clear for today!";
+    }
+    _renderDailyPlanModal();
+    $("#daily-plan-backdrop").classList.remove("hidden");
+  } catch (e) {
+    console.error("daily plan load failed", e);
+  }
+}
+
+function closeDailyPlanModal() {
+  $("#daily-plan-backdrop").classList.add("hidden");
+  localStorage.setItem("last_plan_date", new Date().toISOString().slice(0, 10));
+}
+
+function _renderDailyPlanModal() {
+  const ul = $("#daily-plan-list");
+  if (!ul) return;
+  if (!state.dailyPlanTasks.length) {
+    ul.innerHTML = `<li class="dp-empty">Nothing due today — clear skies!</li>`;
+    return;
+  }
+  ul.innerHTML = state.dailyPlanTasks.map((t, i) => `
+    <li class="dp-item" data-dp-idx="${i}">
+      <span class="dp-rank">${i + 1}</span>
+      <div class="dp-content">
+        <div class="dp-text">${escapeHtml(t.text)}</div>
+        ${t.group ? `<span class="dp-group">${escapeHtml(t.group)}</span>` : ""}
+      </div>
+      <div class="dp-actions">
+        ${i > 0 ? `<button class="dp-move dp-up" data-dp-up="${i}" title="Move up">↑</button>` : `<span class="dp-move"></span>`}
+        ${i < state.dailyPlanTasks.length - 1 ? `<button class="dp-move dp-down" data-dp-down="${i}" title="Move down">↓</button>` : `<span class="dp-move"></span>`}
+        <button class="dp-defer" data-dp-defer="${i}">defer</button>
+      </div>
+    </li>`).join("");
+}
+
+// ---------- Subtasks ----------
+let _subtaskParentTask = null;
+
+async function toggleSubtasks(taskId) {
+  const ul = document.getElementById(`subtasks-${taskId}`);
+  if (!ul) return;
+  if (!ul.classList.contains("hidden")) { ul.classList.add("hidden"); return; }
+  ul.innerHTML = "<li style='color:var(--muted);font-size:12px;padding:4px 0'>Loading…</li>";
+  ul.classList.remove("hidden");
+  try {
+    const data = await api(`/api/tasks?parent_id=${taskId}&show_subtasks=1&status=open`);
+    const doneData = await api(`/api/tasks?parent_id=${taskId}&show_subtasks=1&status=done`);
+    const all = [...(data.tasks || []), ...(doneData.tasks || [])];
+    if (!all.length) {
+      ul.innerHTML = `<li class="subtask-item subtask-empty">No subtasks yet.</li>`;
+    } else {
+      ul.innerHTML = all.map((t) => `
+        <li class="subtask-item${t.done ? " done" : ""}" data-task-id="${t.id}">
+          <span class="checkbox action-toggle" title="${t.done ? "Mark open" : "Mark done"}"></span>
+          <span class="subtask-text">${escapeHtml(t.text)}</span>
+          ${t.priority === "high" ? `<span class="chip priority-high" style="font-size:10px;padding:1px 5px;">▲</span>` : ""}
+        </li>`).join("");
+    }
+  } catch (err) {
+    ul.innerHTML = `<li class="subtask-item subtask-empty">Failed to load.</li>`;
+  }
+}
+
+function openAddSubtaskModal(parentTask) {
+  _subtaskParentTask = parentTask;
+  if ($("#subtask-parent-label")) $("#subtask-parent-label").textContent = `Under: "${parentTask.text}"`;
+  if ($("#subtask-text")) $("#subtask-text").value = "";
+  if ($("#subtask-priority")) $("#subtask-priority").value = "normal";
+  $("#subtask-modal-backdrop").classList.remove("hidden");
+  setTimeout(() => $("#subtask-text")?.focus(), 10);
+}
+
+function closeAddSubtaskModal() {
+  $("#subtask-modal-backdrop").classList.add("hidden");
+  _subtaskParentTask = null;
+}
+
+async function submitAddSubtaskModal() {
+  if (!_subtaskParentTask) return;
+  const text = $("#subtask-text")?.value.trim();
+  if (!text) { $("#subtask-text")?.focus(); return; }
+  const priority = $("#subtask-priority")?.value || "normal";
+  await api("/api/tasks/add-subtask", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ parent_id: _subtaskParentTask.id, text, priority }),
+  });
+  closeAddSubtaskModal();
+  const parentId = _subtaskParentTask?.id;
+  await refreshTasks();
+  if (parentId) toggleSubtasks(parentId);
+}
+
+// ---------- Blocker/dependency modal ----------
+let _blockerTask = null;
+
+function openBlockerModal(task) {
+  _blockerTask = task;
+  if ($("#blocker-task-label")) $("#blocker-task-label").textContent = `Making blocked: "${task.text}"`;
+  if ($("#blocker-q")) { $("#blocker-q").value = ""; }
+  if ($("#blocker-results")) $("#blocker-results").innerHTML = "";
+  $("#blocker-modal-backdrop").classList.remove("hidden");
+  setTimeout(() => $("#blocker-q")?.focus(), 10);
+}
+
+function closeBlockerModal() {
+  $("#blocker-modal-backdrop").classList.add("hidden");
+  _blockerTask = null;
+}
+
+const _blockerSearchDebounced = debounce(async (q) => {
+  const ul = $("#blocker-results");
+  if (!q.trim() || !ul) return;
+  try {
+    const data = await api("/api/tasks/search?q=" + encodeURIComponent(q) + "&limit=8");
+    const tasks = (data.tasks || []).filter((t) => t.id !== _blockerTask?.id);
+    if (!tasks.length) { ul.innerHTML = `<li class="blocker-empty">No tasks found.</li>`; return; }
+    ul.innerHTML = tasks.map((t) =>
+      `<li class="blocker-result-item" data-blocker-id="${t.id}">
+        <span>${escapeHtml(t.text)}</span>
+        ${t.group ? `<span class="blocker-group">${escapeHtml(t.group)}</span>` : ""}
+      </li>`
+    ).join("");
+  } catch (_) {}
+}, 200);
 
 // ---------- Event wiring ----------
 document.addEventListener("DOMContentLoaded", async () => {
   // Dock nav
   $$(".dock-btn[data-tab]").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+
+  // Safe-triangle dock submenu
+  (function () {
+    const wrap = document.querySelector(".dock-btn-wrap");
+    if (!wrap) return;
+    const btn = wrap.querySelector(".dock-btn");
+    const sub = wrap.querySelector(".dock-submenu");
+    let closeTimer = null;
+    let exitPt = null;
+
+    function open() { clearTimeout(closeTimer); sub.classList.add("open"); }
+    function close() { sub.classList.remove("open"); exitPt = null; }
+    function scheduleClose() { clearTimeout(closeTimer); closeTimer = setTimeout(close, 80); }
+
+    function inTriangle(px, py, ax, ay, bx, by, cx, cy) {
+      const s = (x1, y1, x2, y2, x3, y3) => (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3);
+      const d1 = s(px,py,ax,ay,bx,by), d2 = s(px,py,bx,by,cx,cy), d3 = s(px,py,cx,cy,ax,ay);
+      return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
+    }
+
+    btn.addEventListener("mouseenter", open);
+    btn.addEventListener("mouseleave", (e) => { exitPt = { x: e.clientX, y: e.clientY }; scheduleClose(); });
+    sub.addEventListener("mouseenter", () => clearTimeout(closeTimer));
+    sub.addEventListener("mouseleave", scheduleClose);
+
+    document.addEventListener("mousemove", (e) => {
+      if (!sub.classList.contains("open") || !exitPt) return;
+      if (e.target.closest(".dock-btn-wrap")) { clearTimeout(closeTimer); return; }
+      const r = sub.getBoundingClientRect();
+      if (inTriangle(e.clientX, e.clientY, exitPt.x, exitPt.y, r.left, r.top - 4, r.left, r.bottom + 4)) {
+        clearTimeout(closeTimer);
+      } else {
+        close();
+      }
+    });
+  })();
 
   // Search overlay
   $("#dock-search-btn").addEventListener("click", openSearchOverlay);
@@ -973,12 +1730,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // Tasks filters
-  ["t-type", "t-group", "t-overdue"].forEach((id) =>
-    $("#" + id).addEventListener("change", () => { refreshTasks(); updateTaskFilterToggleState(); }));
+  ["t-type", "t-group", "t-overdue", "t-priority", "t-snoozed"].forEach((id) =>
+    $("#" + id)?.addEventListener("change", () => { refreshTasks(); updateTaskFilterToggleState(); }));
   $("#t-clear").addEventListener("click", () => {
     $("#t-type").value = "";
     $("#t-group").value = "";
     $("#t-overdue").checked = false;
+    if ($("#t-priority")) $("#t-priority").value = "";
+    if ($("#t-snoozed")) $("#t-snoozed").checked = false;
     $("#q").value = "";
     refreshTasks();
     updateTaskFilterToggleState();
@@ -1007,6 +1766,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const task = state.tasksByStatus[paper]?.[idx];
     if (!task) return;
     if (e.target.closest(".action-toggle")) {
+      if (!task.done) li.classList.add("task-completing");
       await toggleTaskDone(task); return;
     }
     if (e.target.closest(".action-bb")) {
@@ -1039,6 +1799,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (action === "delete")       { await deleteTask(task); }
     if (action === "view-note")    { openDrawer(task); }
     if (action === "backburner")   { await toggleTaskBackburner(task); }
+    if (action === "set-priority") { await setPriority(task, item.dataset.priority); }
+    if (action === "snooze")       { openSnoozePopup(task); }
+    if (action === "add-subtask")  { openAddSubtaskModal(task); }
+    if (action === "add-blocker")  { openBlockerModal(task); }
   });
 
   // Edit modal
@@ -1070,8 +1834,26 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.target.id === "drawer-backdrop") closeDrawer();
   });
 
+  // Quick deadline buttons (add modal)
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".dl-quick-btn");
+    if (!btn) return;
+    const prefix = btn.dataset.prefix || "m";
+    const which = btn.dataset.quick;
+    const today = new Date();
+    if (which === "today") {
+      setDeadlineSelects(today, prefix);
+    } else if (which === "this-week") {
+      setDeadlineSelects(_thisFriday(), prefix);
+    } else if (which === "next-week") {
+      const nextMon = _nextWeekday(1);
+      const nextFri = new Date(nextMon); nextFri.setDate(nextMon.getDate() + 4);
+      setDeadlineSelects(nextFri, prefix);
+    }
+  });
+
   // Home cards
-  $("#hero-add-task").addEventListener("click", openAddModal);
+  $("#hero-add-task").addEventListener("click", openNLModal);
   $("#hero-view-tasks").addEventListener("click", () => switchTab("tasks"));
 
   // Deadline strip
@@ -1124,20 +1906,239 @@ document.addEventListener("DOMContentLoaded", async () => {
     await selectMeeting(mid);
   });
 
-  // Add task modal
-  $("#open-add-modal").addEventListener("click", openAddModal);
-  $("#modal-close").addEventListener("click",   closeAddModal);
-  $("#modal-cancel").addEventListener("click",  closeAddModal);
-  $("#modal-submit").addEventListener("click",  submitAddModal);
-  $("#modal-backdrop").addEventListener("click", (e) => {
-    if (e.target.id === "modal-backdrop") closeAddModal();
+  // NL modal
+  $("#open-add-modal").addEventListener("click", openNLModal);
+  $("#nl-close").addEventListener("click", closeNLModal);
+  $("#nl-cancel-step1").addEventListener("click", closeNLModal);
+  $("#nl-confirm-step1").addEventListener("click", _nlTransitionToStep2);
+  $("#nl-back").addEventListener("click", _nlGoBack);
+  $("#nl-cancel").addEventListener("click", closeNLModal);
+  $("#nl-submit").addEventListener("click", submitNLModal);
+  $("#nl-modal-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "nl-modal-backdrop") closeNLModal();
   });
-  ["m-text", "m-group"].forEach((id) => {
-    $("#" + id).addEventListener("keydown", (e) => {
-      if (e.key === "Enter")  { e.preventDefault(); submitAddModal(); }
-      if (e.key === "Escape") { closeAddModal(); }
+  const _nlHintDebounced = debounce((text) => {
+    if (!text.trim()) { $("#nl-hint").textContent = ""; return; }
+    const p = parseNLTask(text);
+    const hints = [];
+    if (p.deadline) hints.push(p.deadline);
+    if (p.priority === "high") hints.push("high priority");
+    if (p.contact) hints.push(`contact: ${p.contact}`);
+    if (p.phone) hints.push(p.phone);
+    if (p.email) hints.push(p.email);
+    if (p.estimate_minutes) hints.push(`~${p.estimate_minutes}m`);
+    if (p.group) hints.push(`group: ${p.group}`);
+    $("#nl-hint").textContent = hints.length ? "Detected: " + hints.join(", ") : "";
+  }, 400);
+  $("#nl-text").addEventListener("input", (e) => _nlHintDebounced(e.target.value));
+  $("#nl-text").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); _nlTransitionToStep2(); }
+  });
+
+  // Edit modal recurrence picker
+  $("#edit-m-recur")?.addEventListener("change", () => {
+    _updateRecurDetail("edit-m", { type: $("#edit-m-recur").value });
+  });
+
+  // Snooze popup
+  $("#snooze-cancel").addEventListener("click", closeSnoozePopup);
+  $("#snooze-confirm").addEventListener("click", confirmSnooze);
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".snooze-quick");
+    if (!btn) return;
+    const val = btn.dataset.snooze;
+    const today = new Date();
+    let d;
+    if (val === "next-monday") d = _nextWeekday(1);
+    else if (val === "next-week") { d = _nextWeekday(1); d.setDate(d.getDate() + 4); }
+    else { d = new Date(today); d.setDate(today.getDate() + parseInt(val)); }
+    $("#snooze-date-input").value = d.toISOString().slice(0, 10);
+  });
+
+  // Focus mode
+  $("#focus-btn-complete").addEventListener("click", async () => {
+    const task = _focusTasks[_focusIdx];
+    if (!task) return;
+    await toggleTaskDone(task);
+    _focusIdx++;
+    if (_focusIdx >= _focusTasks.length) { closeFocusMode(); return; }
+    _renderFocusModeCurrent();
+  });
+  $("#focus-btn-skip").addEventListener("click", () => {
+    _focusIdx++;
+    if (_focusIdx >= _focusTasks.length) { closeFocusMode(); return; }
+    _renderFocusModeCurrent();
+  });
+  $("#focus-mode-close").addEventListener("click", closeFocusMode);
+
+  // Focus panel (home dashboard)
+  document.addEventListener("click", async (e) => {
+    if (e.target.closest(".focus-complete")) {
+      const btn = e.target.closest(".focus-complete");
+      const id = btn.dataset.focusId;
+      const task = state.stats?.top_urgency?.find((t) => t.id === id);
+      if (task) await toggleTaskDone(task);
+    }
+    if (e.target.closest(".focus-defer")) {
+      const btn = e.target.closest(".focus-defer");
+      const id = btn.dataset.focusId;
+      const task = state.stats?.top_urgency?.find((t) => t.id === id);
+      if (task) openSnoozePopup(task);
+    }
+    if (e.target.closest(".focus-focus")) {
+      openFocusMode(state.stats?.top_urgency || []);
+    }
+  });
+
+  // Command palette
+  $("#cmd-backdrop").addEventListener("click", closeCommandPalette);
+  $("#cmd-q").addEventListener("input", (e) => _cmdDebounced(e.target.value));
+  $("#cmd-q").addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") {
+      _cmdSelectedIdx = Math.min(_cmdSelectedIdx + 1, _cmdCurrentItems.length - 1);
+    } else if (e.key === "ArrowUp") {
+      _cmdSelectedIdx = Math.max(_cmdSelectedIdx - 1, 0);
+    } else if (e.key === "Enter") {
+      const item = _cmdCurrentItems[_cmdSelectedIdx];
+      if (item) item.action();
+      return;
+    } else {
+      return;
+    }
+    e.preventDefault();
+    $$(".cmd-item").forEach((li, i) => li.classList.toggle("selected", i === _cmdSelectedIdx));
+  });
+  $("#cmd-results").addEventListener("click", (e) => {
+    const li = e.target.closest(".cmd-item");
+    if (!li) return;
+    const idx = parseInt(li.dataset.cmdIdx, 10);
+    const item = _cmdCurrentItems[idx];
+    if (item) item.action();
+  });
+
+  // Daily planning modal
+  $("#daily-plan-close").addEventListener("click", closeDailyPlanModal);
+  $("#daily-plan-skip").addEventListener("click", closeDailyPlanModal);
+  $("#daily-plan-go").addEventListener("click", () => {
+    state.dailyPlanOrder = state.dailyPlanTasks.map((t) => t.id);
+    closeDailyPlanModal();
+    openFocusMode(state.dailyPlanTasks);
+  });
+  $("#daily-plan-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "daily-plan-backdrop") closeDailyPlanModal();
+  });
+  $("#daily-plan-list").addEventListener("click", (e) => {
+    const upBtn = e.target.closest("[data-dp-up]");
+    const downBtn = e.target.closest("[data-dp-down]");
+    const deferBtn = e.target.closest("[data-dp-defer]");
+    if (upBtn) {
+      const i = parseInt(upBtn.dataset.dpUp, 10);
+      [state.dailyPlanTasks[i - 1], state.dailyPlanTasks[i]] = [state.dailyPlanTasks[i], state.dailyPlanTasks[i - 1]];
+      _renderDailyPlanModal();
+    } else if (downBtn) {
+      const i = parseInt(downBtn.dataset.dpDown, 10);
+      [state.dailyPlanTasks[i], state.dailyPlanTasks[i + 1]] = [state.dailyPlanTasks[i + 1], state.dailyPlanTasks[i]];
+      _renderDailyPlanModal();
+    } else if (deferBtn) {
+      const i = parseInt(deferBtn.dataset.dpDefer, 10);
+      openSnoozePopup(state.dailyPlanTasks[i]);
+    }
+  });
+
+  // Subtask modal
+  $("#subtask-modal-close").addEventListener("click", closeAddSubtaskModal);
+  $("#subtask-modal-cancel").addEventListener("click", closeAddSubtaskModal);
+  $("#subtask-modal-submit").addEventListener("click", submitAddSubtaskModal);
+  $("#subtask-modal-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "subtask-modal-backdrop") closeAddSubtaskModal();
+  });
+  $("#subtask-text")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); submitAddSubtaskModal(); }
+  });
+
+  // Subtask toggle chips (event delegation on paper-stack + smart-view)
+  document.addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-subtask-toggle]");
+    if (!chip) return;
+    toggleSubtasks(chip.dataset.subtaskToggle);
+  });
+
+  // Subtask checkboxes (inside subtask-list)
+  document.addEventListener("click", async (e) => {
+    if (!e.target.closest(".subtask-list")) return;
+    const li = e.target.closest("li[data-task-id]");
+    if (!li || !e.target.closest(".action-toggle")) return;
+    const taskId = li.dataset.taskId;
+    // Find the task in any state list or smart view
+    let task = state.smartViewTasks.find((t) => t.id === taskId);
+    if (!task) {
+      for (const paper of ["active", "backburner", "done"]) {
+        task = state.tasksByStatus[paper].find((t) => t.id === taskId);
+        if (task) break;
+      }
+    }
+    // Fallback: create minimal task object for toggle
+    if (!task) task = { id: taskId, done: li.classList.contains("done") };
+    await api("/api/tasks/toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: taskId, done: !task.done }),
     });
+    await refreshTasks();
   });
+
+  // Blocker modal
+  $("#blocker-modal-close").addEventListener("click", closeBlockerModal);
+  $("#blocker-modal-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "blocker-modal-backdrop") closeBlockerModal();
+  });
+  $("#blocker-q")?.addEventListener("input", (e) => _blockerSearchDebounced(e.target.value));
+  $("#blocker-results")?.addEventListener("click", async (e) => {
+    const li = e.target.closest(".blocker-result-item");
+    if (!li || !_blockerTask) return;
+    const dependsOnId = li.dataset.blockerId;
+    try {
+      await api("/api/tasks/dependency/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task_id: _blockerTask.id, depends_on_id: dependsOnId }),
+      });
+      closeBlockerModal();
+      await refreshTasks();
+    } catch (err) {
+      alert("Could not add dependency: " + err.message);
+    }
+  });
+
+  // Smart view sidebar buttons
+  $("#view-smart")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".smart-view-btn");
+    if (btn) loadSmartView(btn.dataset.view);
+  });
+
+  // Smart view task interactions (toggle, context menu, etc.)
+  $("#smart-view-tasks")?.addEventListener("click", async (e) => {
+    const li = e.target.closest("li[data-task-id]");
+    if (!li) return;
+    const idx = parseInt(li.dataset.idx, 10);
+    const task = state.smartViewTasks[idx];
+    if (!task) return;
+    if (e.target.closest(".action-toggle")) {
+      await toggleTaskDone(task);
+    } else if (e.target.closest(".action-bb")) {
+      await toggleTaskBackburner(task);
+    }
+  });
+  $("#smart-view-tasks")?.addEventListener("contextmenu", (e) => {
+    const li = e.target.closest("li[data-task-id]");
+    if (!li) return;
+    const idx = parseInt(li.dataset.idx, 10);
+    const task = state.smartViewTasks[idx];
+    if (task) openContextMenu(e, task);
+  });
+
+  // Snoozed filter
+  $("#t-snoozed")?.addEventListener("change", () => { refreshTasks(); updateTaskFilterToggleState(); });
 
   // ---- Radial menu setup ----
   initRadialPositions();
@@ -1304,11 +2305,25 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.addEventListener("keydown", async (e) => {
     const tag = (document.activeElement?.tagName || "").toLowerCase();
     const typing = ["input", "textarea", "select"].includes(tag);
+    // Cmd+K / Ctrl+K: command palette (before typing guard)
+    if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      e.preventDefault();
+      if (!$("#cmd-palette").classList.contains("hidden")) closeCommandPalette();
+      else openCommandPalette();
+      return;
+    }
+
     if (e.key === "Escape") {
+      if (!$("#cmd-palette").classList.contains("hidden")) { closeCommandPalette(); return; }
+      if (!$("#focus-mode").classList.contains("hidden"))  { closeFocusMode(); return; }
+      if (!$("#daily-plan-backdrop").classList.contains("hidden")) { closeDailyPlanModal(); return; }
+      if (!$("#snooze-popup").classList.contains("hidden")) { closeSnoozePopup(); return; }
+      if (!$("#subtask-modal-backdrop").classList.contains("hidden")) { closeAddSubtaskModal(); return; }
+      if (!$("#blocker-modal-backdrop").classList.contains("hidden")) { closeBlockerModal(); return; }
       if ($("#search-overlay").classList.contains("open")) { closeSearchOverlay(); return; }
       if (!$("#import-modal-backdrop").classList.contains("hidden"))  { closeImportModal(); return; }
       if (!$("#edit-modal-backdrop").classList.contains("hidden"))    { closeEditModal(); return; }
-      if (!$("#modal-backdrop").classList.contains("hidden"))          { closeAddModal(); return; }
+      if (!$("#nl-modal-backdrop").classList.contains("hidden"))       { closeNLModal(); return; }
       if (state.drawerTask) { closeDrawer(); return; }
       if ($("#radial-root")?.classList.contains("open")) { closeRadial(); return; }
       if (typing) { document.activeElement.blur(); return; }
@@ -1319,6 +2334,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.key === "2") { e.preventDefault(); switchTab("tasks"); return; }
     if (e.key === "3") { e.preventDefault(); switchTab("meetings"); return; }
     if (e.key === "4") { e.preventDefault(); switchTab("groups"); return; }
+    if (e.key === "5") { e.preventDefault(); switchTab("smart"); return; }
+    if (e.key === "f") { e.preventDefault(); openFocusMode(state.stats?.top_urgency?.[0]); return; }
 
     if (state.tab === "tasks") {
       const frontPaper = state.paperOrder[0];
@@ -1338,9 +2355,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       } else if (e.key === "b" && state.selectedTaskIdx >= 0) {
         e.preventDefault();
         await toggleTaskBackburner(frontTasks[state.selectedTaskIdx]);
+      } else if (e.key === "p" && state.selectedTaskIdx >= 0) {
+        e.preventDefault();
+        await cyclePriority(frontTasks[state.selectedTaskIdx]);
       } else if (e.key === "a") {
         e.preventDefault();
-        openAddModal();
+        openNLModal();
       }
     } else if (state.tab === "meetings") {
       if ((e.key === "j" || e.key === "k") && state.meetings.length) {
