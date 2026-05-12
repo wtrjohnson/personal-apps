@@ -407,11 +407,11 @@ async function toggleTaskDone(task) {
 }
 
 function _injectTimeLogPrompt(task) {
-  const li = document.querySelector(`li[data-task-id="${task.id}"]`);
-  if (!li) return;
   const existing = document.querySelector(".time-log-prompt");
   if (existing) existing.remove();
-  const row = document.createElement("li");
+  const container = $("#toast-container");
+  if (!container) return;
+  const row = document.createElement("div");
   row.className = "time-log-prompt";
   row.innerHTML = `
     <span class="tlp-label">How long did that take?</span>
@@ -422,8 +422,19 @@ function _injectTimeLogPrompt(task) {
       <button data-mins="120">2h+</button>
     </div>
     <button class="tlp-skip">Skip</button>`;
-  li.after(row);
+  container.appendChild(row);
+  // Extend container visibility to cover the full prompt window (overrides the 6s toast timer)
+  clearTimeout(_undoTimer);
+  _undoTimer = setTimeout(() => {
+    row.remove();
+    container.classList.remove("visible");
+  }, 30000);
   requestAnimationFrame(() => { row.style.maxHeight = "60px"; row.style.opacity = "1"; });
+  const dismiss = () => {
+    row.remove();
+    clearTimeout(_undoTimer);
+    _undoTimer = setTimeout(() => container.classList.remove("visible"), 2000);
+  };
   row.querySelectorAll("[data-mins]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       try {
@@ -433,11 +444,10 @@ function _injectTimeLogPrompt(task) {
           body: JSON.stringify({ task_id: task.id, minutes_spent: parseInt(btn.dataset.mins) }),
         });
       } catch (_) {}
-      row.remove();
+      dismiss();
     });
   });
-  row.querySelector(".tlp-skip").addEventListener("click", () => row.remove());
-  setTimeout(() => { if (row.isConnected) row.remove(); }, 30000);
+  row.querySelector(".tlp-skip").addEventListener("click", dismiss);
 }
 
 async function toggleTaskBackburner(task) {

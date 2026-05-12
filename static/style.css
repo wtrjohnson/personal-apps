@@ -2529,13 +2529,13 @@ table.groups tr:last-child td { border-bottom: none; }
   padding: 8px 14px;
   background: var(--accent-softer);
   border-left: 3px solid var(--accent);
-  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  border-radius: var(--r-sm);
+  margin-top: 6px;
   max-height: 0;
   overflow: hidden;
   opacity: 0;
   transition: max-height 0.25s ease, opacity 0.25s ease;
   flex-wrap: wrap;
-  list-style: none;
 }
 .tlp-label { font-size: 12.5px; color: var(--accent-ink); font-weight: 500; }
 .tlp-options { display: flex; gap: 6px; }
