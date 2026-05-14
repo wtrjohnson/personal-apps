@@ -1230,6 +1230,9 @@ let _intakePenSize = 4;
 let _intakeUndoStack = [];
 let _intakeLastX = 0;
 let _intakeLastY = 0;
+let _intakeLastMidX = 0;
+let _intakeLastMidY = 0;
+let _intakeLastPressure = 0.5;
 let _intakePhase = "extract"; // "extract" | "save"
 const INTAKE_MAX_UNDO = 30;
 
@@ -1238,6 +1241,7 @@ function openIntakeModal() {
   document.body.style.overflow = "hidden";
   document.body.style.touchAction = "none";
   $("#intake-modal-backdrop").classList.remove("hidden");
+  $("#intake-modal-backdrop").classList.add("intake-open");
   const dateInput = $("#intake-date");
   if (!dateInput.value) {
     dateInput.value = new Date().toISOString().split("T")[0];
@@ -1275,6 +1279,7 @@ function openIntakeModal() {
 
 function closeIntakeModal() {
   $("#intake-modal-backdrop").classList.add("hidden");
+  $("#intake-modal-backdrop").classList.remove("intake-open");
   // Restore body scroll
   document.body.style.overflow = "";
   document.body.style.touchAction = "";
@@ -1285,7 +1290,9 @@ function _initIntakeCanvas() {
   const wrap = canvas.parentElement;
   const dpr = window.devicePixelRatio || 1;
   const w = wrap.clientWidth;
-  const h = Math.round(Math.max(Math.min(w * 0.5, 400), 240));
+  // Use viewport height so the canvas is much taller on iPad
+  const vh = window.innerHeight;
+  const h = Math.round(Math.max(280, Math.min(vh * 0.52, 700)));
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
   canvas.style.width = w + "px";
@@ -1337,10 +1344,12 @@ function _intakeApplyStyle(ctx) {
   if (_intakeTool === "eraser") {
     ctx.strokeStyle = "#ffffff";
     ctx.fillStyle = "#ffffff";
+    // Eraser keeps fixed width (pressure not relevant)
     ctx.lineWidth = _intakePenSize * 5;
   } else {
     ctx.strokeStyle = "#111111";
     ctx.fillStyle = "#111111";
+    // lineWidth set dynamically per-segment in pointermove for pressure sensitivity
     ctx.lineWidth = _intakePenSize;
   }
 }
@@ -1361,26 +1370,48 @@ function _setupIntakeCanvasEvents() {
     const pos = _intakeGetPos(canvas, e);
     _intakeLastX = pos.x;
     _intakeLastY = pos.y;
+    _intakeLastMidX = pos.x;
+    _intakeLastMidY = pos.y;
+    _intakeLastPressure = e.pressure || 0.5;
     const ctx = canvas.getContext("2d");
     _intakeApplyStyle(ctx);
+    // Draw pressure-sized initial dot
+    const pressure = e.pressure || 0.5;
+    const dotR = Math.max(0.5, (_intakePenSize * (0.4 + pressure * 1.0)) / 2);
     ctx.beginPath();
-    ctx.arc(pos.x, pos.y, ctx.lineWidth / 2, 0, Math.PI * 2);
+    ctx.arc(pos.x, pos.y, dotR, 0, Math.PI * 2);
     ctx.fill();
   });
 
   canvas.addEventListener("pointermove", (e) => {
-    e.preventDefault(); // always prevent scroll even for touch, just don't draw
+    e.preventDefault(); // always prevent scroll, even for touch (don't draw though)
     if (!_intakeIsDrawing) return;
     if (e.pointerType === "touch") return; // palm rejection
-    const pos = _intakeGetPos(canvas, e);
     const ctx = canvas.getContext("2d");
     _intakeApplyStyle(ctx);
-    ctx.beginPath();
-    ctx.moveTo(_intakeLastX, _intakeLastY);
-    ctx.lineTo(pos.x, pos.y);
-    ctx.stroke();
-    _intakeLastX = pos.x;
-    _intakeLastY = pos.y;
+    // Use coalesced events for finer-grained intermediate positions
+    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const ce of events) {
+      const pos = _intakeGetPos(canvas, ce);
+      const pressure = ce.pressure || 0.5;
+      const midX = (_intakeLastX + pos.x) / 2;
+      const midY = (_intakeLastY + pos.y) / 2;
+      // Pressure-modulated width: varies ±50% around base pen size
+      const avgPressure = (_intakeLastPressure + pressure) / 2;
+      if (_intakeTool !== "eraser") {
+        ctx.lineWidth = Math.max(0.5, _intakePenSize * (0.4 + avgPressure * 1.2));
+      }
+      // Quadratic bezier from last midpoint to new midpoint via the last point (control)
+      ctx.beginPath();
+      ctx.moveTo(_intakeLastMidX, _intakeLastMidY);
+      ctx.quadraticCurveTo(_intakeLastX, _intakeLastY, midX, midY);
+      ctx.stroke();
+      _intakeLastMidX = midX;
+      _intakeLastMidY = midY;
+      _intakeLastX = pos.x;
+      _intakeLastY = pos.y;
+      _intakeLastPressure = pressure;
+    }
   });
 
   canvas.addEventListener("pointerup", () => { _intakeIsDrawing = false; });

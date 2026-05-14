@@ -2980,3 +2980,32 @@ table.groups tr:last-child td { border-bottom: none; }
   .modal-intake { max-width: 100%; }
   .intake-context-row { flex-direction: column; gap: 8px; }
 }
+
+/* Full-screen intake on tablet / iPad */
+@media (max-width: 1100px) {
+  .modal-backdrop.intake-open {
+    padding: 0;
+    align-items: stretch;
+  }
+  .modal-backdrop.intake-open .modal-intake {
+    max-width: 100%;
+    width: 100%;
+    height: 100%;
+    max-height: 100%;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .modal-backdrop.intake-open .modal-header {
+    flex-shrink: 0;
+  }
+  .modal-backdrop.intake-open .intake-modal-body {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+  .modal-backdrop.intake-open .modal-footer {
+    flex-shrink: 0;
+  }
+}
