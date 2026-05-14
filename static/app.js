@@ -1234,6 +1234,9 @@ let _intakePhase = "extract"; // "extract" | "save"
 const INTAKE_MAX_UNDO = 30;
 
 function openIntakeModal() {
+  // Lock body scroll so resting palm doesn't move the page behind the modal
+  document.body.style.overflow = "hidden";
+  document.body.style.touchAction = "none";
   $("#intake-modal-backdrop").classList.remove("hidden");
   const dateInput = $("#intake-date");
   if (!dateInput.value) {
@@ -1272,6 +1275,9 @@ function openIntakeModal() {
 
 function closeIntakeModal() {
   $("#intake-modal-backdrop").classList.add("hidden");
+  // Restore body scroll
+  document.body.style.overflow = "";
+  document.body.style.touchAction = "";
 }
 
 function _initIntakeCanvas() {
@@ -1342,8 +1348,13 @@ function _intakeApplyStyle(ctx) {
 function _setupIntakeCanvasEvents() {
   const canvas = $("#intake-canvas");
 
+  // Prevent context menu on long-press (iOS long-press callout)
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    // Palm rejection: only draw with Pencil (pen) or mouse, ignore finger/palm (touch)
+    if (e.pointerType === "touch") return;
     _intakeSaveUndo();
     _intakeIsDrawing = true;
     canvas.setPointerCapture(e.pointerId);
@@ -1358,8 +1369,9 @@ function _setupIntakeCanvasEvents() {
   });
 
   canvas.addEventListener("pointermove", (e) => {
+    e.preventDefault(); // always prevent scroll even for touch, just don't draw
     if (!_intakeIsDrawing) return;
-    e.preventDefault();
+    if (e.pointerType === "touch") return; // palm rejection
     const pos = _intakeGetPos(canvas, e);
     const ctx = canvas.getContext("2d");
     _intakeApplyStyle(ctx);
@@ -2514,9 +2526,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Intake modal
   $("#intake-modal-close").addEventListener("click", closeIntakeModal);
   $("#intake-modal-cancel").addEventListener("click", closeIntakeModal);
-  $("#intake-modal-backdrop").addEventListener("click", (e) => {
-    if (e.target.id === "intake-modal-backdrop") closeIntakeModal();
-  });
+  // No backdrop-tap-to-close: too easy to accidentally dismiss with a resting palm on iPad
   $("#intake-modal-submit").addEventListener("click", submitIntake);
   $("#intake-btn-pen").addEventListener("click", () => {
     _intakeTool = "pen";

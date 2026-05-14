@@ -2718,6 +2718,12 @@ table.groups tr:last-child td { border-bottom: none; }
 .modal-intake {
   max-width: 740px;
   width: 100%;
+  /* Prevent text selection and iOS callouts anywhere in the modal */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  /* Contain scroll so palm resting on edge doesn't move the page */
+  overscroll-behavior: contain;
 }
 
 .intake-modal-body {
@@ -2754,6 +2760,7 @@ table.groups tr:last-child td { border-bottom: none; }
   cursor: pointer;
   color: var(--muted);
   transition: background 0.12s, color 0.12s;
+  touch-action: manipulation; /* snappy tap, no double-tap zoom */
 }
 
 .intake-tool-btn:hover { background: var(--border); color: var(--ink); }
@@ -2773,6 +2780,7 @@ table.groups tr:last-child td { border-bottom: none; }
   color: var(--muted);
   transition: background 0.12s, color 0.12s;
   font-family: inherit;
+  touch-action: manipulation; /* snappy tap, no double-tap zoom */
 }
 
 .intake-size-btn:hover { background: var(--border); color: var(--ink); }
@@ -2786,12 +2794,16 @@ table.groups tr:last-child td { border-bottom: none; }
   background: #ffffff;
   margin-bottom: 12px;
   cursor: crosshair;
+  /* Belt-and-suspenders: also block callouts at wrapper level */
+  touch-action: none;
+  -webkit-touch-callout: none;
 }
 
 .intake-canvas {
   display: block;
   width: 100%;
   touch-action: none;
+  -webkit-touch-callout: none;
 }
 
 /* Context row */
@@ -2826,6 +2838,9 @@ table.groups tr:last-child td { border-bottom: none; }
   background: var(--card);
   color: var(--ink);
   box-sizing: border-box;
+  /* Re-enable selection (overrides .modal-intake suppression) */
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .intake-context-field input:focus {
@@ -2949,6 +2964,10 @@ table.groups tr:last-child td { border-bottom: none; }
   background: var(--card);
   color: var(--ink);
   resize: vertical;
+  /* Re-enable selection so OCR output can be edited */
+  user-select: text;
+  -webkit-user-select: text;
+  touch-action: auto; /* allow normal scroll/pan within textarea */
 }
 
 .intake-textarea:focus {
