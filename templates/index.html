@@ -670,6 +670,28 @@
         <button class="modal-close" id="intake-modal-close" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body intake-modal-body">
+        <!-- Metadata fields -->
+        <div class="intake-context-row">
+          <div class="intake-context-field" style="flex:2">
+            <label for="intake-group">Group / Project</label>
+            <input id="intake-group" type="text" list="intake-group-list" placeholder="e.g. Work, Personal…" autocomplete="off" inputmode="text">
+            <datalist id="intake-group-list"></datalist>
+          </div>
+          <div class="intake-context-field" style="flex:1">
+            <label for="intake-date">Date</label>
+            <input id="intake-date" type="date">
+          </div>
+        </div>
+        <div class="intake-context-row" style="margin-top:8px">
+          <div class="intake-context-field" style="flex:2">
+            <label for="intake-topic">Topic</label>
+            <input id="intake-topic" type="text" placeholder="Meeting topic or title…" autocomplete="off" inputmode="text">
+          </div>
+          <div class="intake-context-field" style="flex:2">
+            <label for="intake-attendees">Attendees</label>
+            <input id="intake-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off" inputmode="text">
+          </div>
+        </div>
         <!-- Toolbar -->
         <div class="intake-toolbar">
           <div class="intake-tool-group">
@@ -681,9 +703,9 @@
             </button>
           </div>
           <div class="intake-tool-group intake-size-group">
-            <button class="intake-size-btn" data-size="2" title="Thin (1px)">S</button>
-            <button class="intake-size-btn active" data-size="4" title="Medium (2px)">M</button>
-            <button class="intake-size-btn" data-size="8" title="Thick (3px)">L</button>
+            <button class="intake-size-btn" data-size="2" title="Thin">S</button>
+            <button class="intake-size-btn active" data-size="4" title="Medium">M</button>
+            <button class="intake-size-btn" data-size="8" title="Thick">L</button>
           </div>
           <div class="intake-tool-group">
             <button class="intake-tool-btn" id="intake-btn-undo" title="Undo">
@@ -698,15 +720,19 @@
         <div class="intake-canvas-wrap">
           <canvas id="intake-canvas" class="intake-canvas"></canvas>
         </div>
-        <!-- Context fields -->
-        <div class="intake-context-row">
-          <div class="intake-context-field">
-            <label for="intake-group">Group / Project</label>
-            <input id="intake-group" type="text" placeholder="e.g. Work, Personal…" autocomplete="off">
+        <!-- Review section — shown after OCR -->
+        <div id="intake-review" class="intake-review-section hidden">
+          <div class="intake-review-field">
+            <label for="intake-transcription">Transcription <span class="intake-label-hint">— edit to correct OCR errors</span></label>
+            <textarea id="intake-transcription" class="intake-textarea" rows="4" placeholder="OCR text will appear here…" inputmode="text"></textarea>
           </div>
-          <div class="intake-context-field">
-            <label for="intake-date">Date</label>
-            <input id="intake-date" type="date">
+          <div class="intake-review-field">
+            <label for="intake-action-items">Action Items <span class="intake-label-hint">— one per line</span></label>
+            <textarea id="intake-action-items" class="intake-textarea" rows="3" placeholder="Deploy fix&#10;Review PR&#10;Send update to Alice" inputmode="text"></textarea>
+          </div>
+          <div class="intake-review-field">
+            <label for="intake-reminders">Reminders <span class="intake-label-hint">— one per line</span></label>
+            <textarea id="intake-reminders" class="intake-textarea" rows="2" placeholder="Check back next week&#10;Ask Bob about budget" inputmode="text"></textarea>
           </div>
         </div>
         <!-- Result banner -->
@@ -714,11 +740,12 @@
       </div>
       <div class="modal-footer">
         <button class="secondary-btn" id="intake-modal-cancel">Cancel</button>
-        <button class="primary-btn" id="intake-modal-submit">Process notes</button>
+        <button class="primary-btn" id="intake-modal-submit">Extract text</button>
       </div>
     </div>
   </div>
 
+  <script src="https://unpkg.com/tesseract.js@4/dist/tesseract.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

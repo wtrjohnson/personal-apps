@@ -2820,7 +2820,7 @@ table.groups tr:last-child td { border-bottom: none; }
   width: 100%;
   padding: 9px 11px;
   font: inherit;
-  font-size: 13.5px;
+  font-size: 16px; /* prevents iOS zoom on focus */
   border: 1px solid var(--border-strong);
   border-radius: var(--r-sm);
   background: var(--card);
@@ -2901,6 +2901,61 @@ table.groups tr:last-child td { border-bottom: none; }
 }
 
 .intake-view-btn:hover { opacity: 0.75; }
+
+/* Review section (shown post-OCR) */
+.intake-review-section {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.intake-review-section.hidden { display: none; }
+
+.intake-review-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.intake-review-field label {
+  display: block;
+  font-size: 10.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  font-weight: 600;
+}
+
+.intake-label-hint {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 10px;
+  color: var(--muted-2, var(--muted));
+}
+
+.intake-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 16px; /* prevents iOS zoom on focus */
+  line-height: 1.5;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--card);
+  color: var(--ink);
+  resize: vertical;
+}
+
+.intake-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-softer);
+}
 
 @media (max-width: 600px) {
   .modal-intake { max-width: 100%; }

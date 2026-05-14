@@ -1230,6 +1230,7 @@ let _intakePenSize = 4;
 let _intakeUndoStack = [];
 let _intakeLastX = 0;
 let _intakeLastY = 0;
+let _intakePhase = "extract"; // "extract" | "save"
 const INTAKE_MAX_UNDO = 30;
 
 function openIntakeModal() {
@@ -1238,16 +1239,32 @@ function openIntakeModal() {
   if (!dateInput.value) {
     dateInput.value = new Date().toISOString().split("T")[0];
   }
+  // Reset phase and UI state
+  _intakePhase = "extract";
   $("#intake-result").className = "intake-result hidden";
   $("#intake-result").innerHTML = "";
+  $("#intake-review").classList.add("hidden");
+  $("#intake-transcription").value = "";
+  $("#intake-action-items").value = "";
+  $("#intake-reminders").value = "";
   $("#intake-modal-submit").disabled = false;
-  $("#intake-modal-submit").textContent = "Process notes";
+  $("#intake-modal-submit").textContent = "Extract text";
+  // Reset drawing tools
   _intakeTool = "pen";
   _intakePenSize = 4;
   $("#intake-btn-pen").classList.add("active");
   $("#intake-btn-eraser").classList.remove("active");
   document.querySelectorAll(".intake-size-btn").forEach((b) => {
     b.classList.toggle("active", Number(b.dataset.size) === 4);
+  });
+  // Populate group datalist from known facets
+  const dl = $("#intake-group-list");
+  dl.innerHTML = "";
+  const groups = state.facets?.groups || [];
+  groups.forEach((g) => {
+    const opt = document.createElement("option");
+    opt.value = g;
+    dl.appendChild(opt);
   });
   // Init canvas after layout is visible
   requestAnimationFrame(() => _initIntakeCanvas());
@@ -1358,42 +1375,72 @@ function _setupIntakeCanvasEvents() {
   canvas.addEventListener("pointercancel", () => { _intakeIsDrawing = false; });
 }
 
-async function submitIntake() {
+function _intakeHasCanvasContent() {
   const canvas = $("#intake-canvas");
-  // Check if canvas has any non-white pixels
   const ctx = canvas.getContext("2d");
   const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-  let hasContent = false;
   for (let i = 0; i < pixels.length; i += 4) {
-    if (pixels[i] < 240 || pixels[i + 1] < 240 || pixels[i + 2] < 240) {
-      hasContent = true;
-      break;
-    }
+    if (pixels[i] < 240 || pixels[i + 1] < 240 || pixels[i + 2] < 240) return true;
   }
-  if (!hasContent) {
+  return false;
+}
+
+async function _intakeExtractText() {
+  if (!_intakeHasCanvasContent()) {
     alert("Please write something on the canvas first.");
     return;
   }
-
   const btn = $("#intake-modal-submit");
   btn.disabled = true;
-  btn.textContent = "Processing…";
+  btn.textContent = "Extracting…";
+  try {
+    const canvas = $("#intake-canvas");
+    const result = await Tesseract.recognize(canvas, "eng");
+    const text = (result.data.text || "").trim();
+    $("#intake-transcription").value = text;
+    $("#intake-review").classList.remove("hidden");
+    _intakePhase = "save";
+    btn.disabled = false;
+    btn.textContent = "Save notes";
+  } catch (err) {
+    const resultEl = $("#intake-result");
+    resultEl.classList.remove("hidden");
+    resultEl.className = "intake-result intake-result-err";
+    resultEl.innerHTML = `<strong>OCR error:</strong> ${escapeHtml(err.message)}`;
+    btn.disabled = false;
+    btn.textContent = "Extract text";
+  }
+}
+
+async function _intakeSaveNotes() {
+  const body = $("#intake-transcription").value.trim();
+  const actionItems = $("#intake-action-items").value.trim();
+  const reminders = $("#intake-reminders").value.trim();
+  if (!body && !actionItems && !reminders) {
+    alert("Nothing to save — add some notes or tasks first.");
+    return;
+  }
+  const btn = $("#intake-modal-submit");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
   const resultEl = $("#intake-result");
   resultEl.className = "intake-result hidden";
-
   try {
     const res = await fetch("/api/notes/intake", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        image: canvas.toDataURL("image/png"),
         group: $("#intake-group").value.trim(),
+        topic: $("#intake-topic").value.trim(),
         date: $("#intake-date").value,
+        attendees: $("#intake-attendees").value.trim(),
+        body,
+        action_items: actionItems,
+        reminders,
       }),
     });
     const data = await res.json();
     resultEl.classList.remove("hidden");
-
     if (data.ok) {
       resultEl.className = "intake-result intake-result-ok";
       const chips = [
@@ -1412,20 +1459,28 @@ async function submitIntake() {
       btn.textContent = "Done";
       setTimeout(() => {
         btn.disabled = false;
-        btn.textContent = "Process notes";
+        btn.textContent = "Save notes";
       }, 4000);
     } else {
       resultEl.className = "intake-result intake-result-err";
       resultEl.innerHTML = `<strong>Error:</strong> ${escapeHtml(data.error || "Unknown error")}`;
       btn.disabled = false;
-      btn.textContent = "Process notes";
+      btn.textContent = "Save notes";
     }
   } catch (err) {
     resultEl.classList.remove("hidden");
     resultEl.className = "intake-result intake-result-err";
     resultEl.innerHTML = `<strong>Error:</strong> ${escapeHtml(err.message)}`;
     btn.disabled = false;
-    btn.textContent = "Process notes";
+    btn.textContent = "Save notes";
+  }
+}
+
+async function submitIntake() {
+  if (_intakePhase === "extract") {
+    await _intakeExtractText();
+  } else {
+    await _intakeSaveNotes();
   }
 }
 
