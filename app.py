@@ -1584,6 +1584,67 @@ def api_import_notes():
 
 
 # --------------------------------------------------
+# HANDWRITING INTAKE (local Tesseract OCR via frontend, text assembly backend)
+# --------------------------------------------------
+
+@app.route("/api/notes/intake", methods=["POST"])
+def api_notes_intake():
+    data = request.get_json(force=True, silent=True) or {}
+
+    note_group = (data.get("group") or "").strip() or "intake"
+    note_topic = (data.get("topic") or "").strip()
+    note_date = (data.get("date") or "").strip() or date_cls.today().isoformat()
+    note_attendees = (data.get("attendees") or "").strip()
+    note_body = (data.get("body") or "").strip()
+    action_items_raw = (data.get("action_items") or "").strip()
+    reminders_raw = (data.get("reminders") or "").strip()
+
+    if not any([note_body, action_items_raw, reminders_raw]):
+        return jsonify({"ok": False, "error": "Nothing to save — add some notes or tasks"}), 400
+
+    # Build body with sections the existing parser understands
+    body_parts: List[str] = []
+    if note_body:
+        body_parts.append(note_body)
+
+    action_lines = [l.strip() for l in action_items_raw.splitlines() if l.strip()]
+    if action_lines:
+        body_parts.append("\n## Action Items\n")
+        body_parts.extend(f"- [ ] {line}" for line in action_lines)
+
+    reminder_lines = [l.strip() for l in reminders_raw.splitlines() if l.strip()]
+    if reminder_lines:
+        body_parts.append("\n## Reminders/Important\n")
+        body_parts.extend(f"- [ ] {line}" for line in reminder_lines)
+
+    body = "\n".join(body_parts)
+
+    # YAML frontmatter
+    safe_group = re.sub(r"[^a-zA-Z0-9_-]", "-", note_group)[:30]
+    fm_parts = [f"group: {note_group}", f"date: {note_date}"]
+    if note_topic:
+        fm_parts.append(f"topic: {note_topic}")
+    if note_attendees:
+        fm_parts.append(f"attendees: {note_attendees}")
+
+    content = "---\n" + "\n".join(fm_parts) + "\n---\n\n" + body
+    filename = f"{note_date} - {safe_group}.md"
+
+    try:
+        summary = import_meeting_from_content(filename, content)
+        return jsonify({
+            "ok": True,
+            "meeting_id": summary["id"],
+            "filename": filename,
+            "task_count": summary["tasks"],
+            "topic": note_topic,
+            "group": note_group,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Database error: {e}"}), 500
+
+
+# --------------------------------------------------
 # SHORTCUT ENDPOINT (API key auth, no session required)
 # --------------------------------------------------
 

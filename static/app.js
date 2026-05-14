@@ -1222,6 +1222,268 @@ async function submitImport() {
   }
 }
 
+// ===== Handwriting Intake =====
+
+let _intakeIsDrawing = false;
+let _intakeTool = "pen";
+let _intakePenSize = 4;
+let _intakeUndoStack = [];
+let _intakeLastX = 0;
+let _intakeLastY = 0;
+let _intakePhase = "extract"; // "extract" | "save"
+const INTAKE_MAX_UNDO = 30;
+
+function openIntakeModal() {
+  $("#intake-modal-backdrop").classList.remove("hidden");
+  const dateInput = $("#intake-date");
+  if (!dateInput.value) {
+    dateInput.value = new Date().toISOString().split("T")[0];
+  }
+  // Reset phase and UI state
+  _intakePhase = "extract";
+  $("#intake-result").className = "intake-result hidden";
+  $("#intake-result").innerHTML = "";
+  $("#intake-review").classList.add("hidden");
+  $("#intake-transcription").value = "";
+  $("#intake-action-items").value = "";
+  $("#intake-reminders").value = "";
+  $("#intake-modal-submit").disabled = false;
+  $("#intake-modal-submit").textContent = "Extract text";
+  // Reset drawing tools
+  _intakeTool = "pen";
+  _intakePenSize = 4;
+  $("#intake-btn-pen").classList.add("active");
+  $("#intake-btn-eraser").classList.remove("active");
+  document.querySelectorAll(".intake-size-btn").forEach((b) => {
+    b.classList.toggle("active", Number(b.dataset.size) === 4);
+  });
+  // Populate group datalist from known facets
+  const dl = $("#intake-group-list");
+  dl.innerHTML = "";
+  const groups = state.facets?.groups || [];
+  groups.forEach((g) => {
+    const opt = document.createElement("option");
+    opt.value = g;
+    dl.appendChild(opt);
+  });
+  // Init canvas after layout is visible
+  requestAnimationFrame(() => _initIntakeCanvas());
+}
+
+function closeIntakeModal() {
+  $("#intake-modal-backdrop").classList.add("hidden");
+}
+
+function _initIntakeCanvas() {
+  const canvas = $("#intake-canvas");
+  const wrap = canvas.parentElement;
+  const dpr = window.devicePixelRatio || 1;
+  const w = wrap.clientWidth;
+  const h = Math.round(Math.max(Math.min(w * 0.5, 400), 240));
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+  _intakeUndoStack = [];
+}
+
+function _intakeSaveUndo() {
+  const canvas = $("#intake-canvas");
+  const ctx = canvas.getContext("2d");
+  if (_intakeUndoStack.length >= INTAKE_MAX_UNDO) _intakeUndoStack.shift();
+  _intakeUndoStack.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+}
+
+function _intakeUndo() {
+  if (!_intakeUndoStack.length) return;
+  const canvas = $("#intake-canvas");
+  const ctx = canvas.getContext("2d");
+  ctx.putImageData(_intakeUndoStack.pop(), 0, 0);
+}
+
+function _intakeClearCanvas() {
+  const canvas = $("#intake-canvas");
+  const ctx = canvas.getContext("2d");
+  _intakeSaveUndo();
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.width / dpr;
+  const h = canvas.height / dpr;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+}
+
+function _intakeGetPos(canvas, e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: e.clientX - rect.left,
+    y: e.clientY - rect.top,
+  };
+}
+
+function _intakeApplyStyle(ctx) {
+  ctx.globalCompositeOperation = "source-over";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (_intakeTool === "eraser") {
+    ctx.strokeStyle = "#ffffff";
+    ctx.fillStyle = "#ffffff";
+    ctx.lineWidth = _intakePenSize * 5;
+  } else {
+    ctx.strokeStyle = "#111111";
+    ctx.fillStyle = "#111111";
+    ctx.lineWidth = _intakePenSize;
+  }
+}
+
+function _setupIntakeCanvasEvents() {
+  const canvas = $("#intake-canvas");
+
+  canvas.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    _intakeSaveUndo();
+    _intakeIsDrawing = true;
+    canvas.setPointerCapture(e.pointerId);
+    const pos = _intakeGetPos(canvas, e);
+    _intakeLastX = pos.x;
+    _intakeLastY = pos.y;
+    const ctx = canvas.getContext("2d");
+    _intakeApplyStyle(ctx);
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, ctx.lineWidth / 2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!_intakeIsDrawing) return;
+    e.preventDefault();
+    const pos = _intakeGetPos(canvas, e);
+    const ctx = canvas.getContext("2d");
+    _intakeApplyStyle(ctx);
+    ctx.beginPath();
+    ctx.moveTo(_intakeLastX, _intakeLastY);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.stroke();
+    _intakeLastX = pos.x;
+    _intakeLastY = pos.y;
+  });
+
+  canvas.addEventListener("pointerup", () => { _intakeIsDrawing = false; });
+  canvas.addEventListener("pointercancel", () => { _intakeIsDrawing = false; });
+}
+
+function _intakeHasCanvasContent() {
+  const canvas = $("#intake-canvas");
+  const ctx = canvas.getContext("2d");
+  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (pixels[i] < 240 || pixels[i + 1] < 240 || pixels[i + 2] < 240) return true;
+  }
+  return false;
+}
+
+async function _intakeExtractText() {
+  if (!_intakeHasCanvasContent()) {
+    alert("Please write something on the canvas first.");
+    return;
+  }
+  const btn = $("#intake-modal-submit");
+  btn.disabled = true;
+  btn.textContent = "Extracting…";
+  try {
+    const canvas = $("#intake-canvas");
+    const result = await Tesseract.recognize(canvas, "eng");
+    const text = (result.data.text || "").trim();
+    $("#intake-transcription").value = text;
+    $("#intake-review").classList.remove("hidden");
+    _intakePhase = "save";
+    btn.disabled = false;
+    btn.textContent = "Save notes";
+  } catch (err) {
+    const resultEl = $("#intake-result");
+    resultEl.classList.remove("hidden");
+    resultEl.className = "intake-result intake-result-err";
+    resultEl.innerHTML = `<strong>OCR error:</strong> ${escapeHtml(err.message)}`;
+    btn.disabled = false;
+    btn.textContent = "Extract text";
+  }
+}
+
+async function _intakeSaveNotes() {
+  const body = $("#intake-transcription").value.trim();
+  const actionItems = $("#intake-action-items").value.trim();
+  const reminders = $("#intake-reminders").value.trim();
+  if (!body && !actionItems && !reminders) {
+    alert("Nothing to save — add some notes or tasks first.");
+    return;
+  }
+  const btn = $("#intake-modal-submit");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  const resultEl = $("#intake-result");
+  resultEl.className = "intake-result hidden";
+  try {
+    const res = await fetch("/api/notes/intake", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        group: $("#intake-group").value.trim(),
+        topic: $("#intake-topic").value.trim(),
+        date: $("#intake-date").value,
+        attendees: $("#intake-attendees").value.trim(),
+        body,
+        action_items: actionItems,
+        reminders,
+      }),
+    });
+    const data = await res.json();
+    resultEl.classList.remove("hidden");
+    if (data.ok) {
+      resultEl.className = "intake-result intake-result-ok";
+      const chips = [
+        data.topic ? `<span class="intake-chip">${escapeHtml(data.topic)}</span>` : "",
+        data.group ? `<span class="intake-chip">${escapeHtml(data.group)}</span>` : "",
+        `<span class="intake-chip">${data.task_count} task${data.task_count !== 1 ? "s" : ""}</span>`,
+      ].join("");
+      resultEl.innerHTML = `<strong>Saved!</strong> ${chips}
+        <button class="intake-view-btn" id="intake-view-meeting">View note →</button>`;
+      $("#intake-view-meeting").addEventListener("click", () => {
+        switchTab("meetings");
+        closeIntakeModal();
+      });
+      await refreshMeetings();
+      await loadFacets();
+      btn.textContent = "Done";
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = "Save notes";
+      }, 4000);
+    } else {
+      resultEl.className = "intake-result intake-result-err";
+      resultEl.innerHTML = `<strong>Error:</strong> ${escapeHtml(data.error || "Unknown error")}`;
+      btn.disabled = false;
+      btn.textContent = "Save notes";
+    }
+  } catch (err) {
+    resultEl.classList.remove("hidden");
+    resultEl.className = "intake-result intake-result-err";
+    resultEl.innerHTML = `<strong>Error:</strong> ${escapeHtml(err.message)}`;
+    btn.disabled = false;
+    btn.textContent = "Save notes";
+  }
+}
+
+async function submitIntake() {
+  if (_intakePhase === "extract") {
+    await _intakeExtractText();
+  } else {
+    await _intakeSaveNotes();
+  }
+}
+
 // ---------- Data fetches ----------
 const refreshMeetingsDebounced = debounce(async () => {
   const qs = meetingsFilters();
@@ -2249,6 +2511,34 @@ document.addEventListener("DOMContentLoaded", async () => {
     refreshMeetings();
   });
 
+  // Intake modal
+  $("#intake-modal-close").addEventListener("click", closeIntakeModal);
+  $("#intake-modal-cancel").addEventListener("click", closeIntakeModal);
+  $("#intake-modal-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "intake-modal-backdrop") closeIntakeModal();
+  });
+  $("#intake-modal-submit").addEventListener("click", submitIntake);
+  $("#intake-btn-pen").addEventListener("click", () => {
+    _intakeTool = "pen";
+    $("#intake-btn-pen").classList.add("active");
+    $("#intake-btn-eraser").classList.remove("active");
+  });
+  $("#intake-btn-eraser").addEventListener("click", () => {
+    _intakeTool = "eraser";
+    $("#intake-btn-eraser").classList.add("active");
+    $("#intake-btn-pen").classList.remove("active");
+  });
+  $("#intake-btn-undo").addEventListener("click", _intakeUndo);
+  $("#intake-btn-clear").addEventListener("click", _intakeClearCanvas);
+  document.querySelectorAll(".intake-size-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _intakePenSize = Number(btn.dataset.size);
+      document.querySelectorAll(".intake-size-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+  _setupIntakeCanvasEvents();
+
   // Import modal
   $("#import-modal-close").addEventListener("click",  closeImportModal);
   $("#import-modal-cancel").addEventListener("click", closeImportModal);
@@ -2307,6 +2597,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!$("#subtask-modal-backdrop").classList.contains("hidden")) { closeAddSubtaskModal(); return; }
       if (!$("#blocker-modal-backdrop").classList.contains("hidden")) { closeBlockerModal(); return; }
       if ($("#search-overlay").classList.contains("open")) { closeSearchOverlay(); return; }
+      if (!$("#intake-modal-backdrop").classList.contains("hidden")) { closeIntakeModal(); return; }
       if (!$("#import-modal-backdrop").classList.contains("hidden"))  { closeImportModal(); return; }
       if (!$("#edit-modal-backdrop").classList.contains("hidden"))    { closeEditModal(); return; }
       if (!$("#nl-modal-backdrop").classList.contains("hidden"))       { closeNLModal(); return; }
@@ -2322,6 +2613,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.key === "4") { e.preventDefault(); switchTab("groups"); return; }
     if (e.key === "5") { e.preventDefault(); switchTab("smart"); return; }
     if (e.key === "f") { e.preventDefault(); openFocusMode(state.stats?.top_urgency?.[0]); return; }
+    if (e.key === "w") { e.preventDefault(); openIntakeModal(); return; }
 
     if (state.tab === "tasks") {
       const frontPaper = state.paperOrder[0];
