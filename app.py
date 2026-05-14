@@ -32,6 +32,7 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
 AUTH_USERNAME = os.environ.get("DASHBOARD_USERNAME", "admin")
 AUTH_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 SHORTCUT_API_KEY = os.environ.get("SHORTCUT_API_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = SECRET_KEY
@@ -1581,6 +1582,152 @@ def api_import_notes():
             results.append({"filename": fname, "ok": False, "error": str(e)})
     ok_count = sum(1 for r in results if r.get("ok"))
     return jsonify({"ok": True, "processed": ok_count, "total": len(results), "results": results})
+
+
+# --------------------------------------------------
+# HANDWRITING INTAKE (Claude Vision OCR)
+# --------------------------------------------------
+
+@app.route("/api/notes/intake", methods=["POST"])
+def api_notes_intake():
+    if not ANTHROPIC_API_KEY:
+        return jsonify({"ok": False, "error": "Claude API not configured — set ANTHROPIC_API_KEY"}), 503
+
+    data = request.get_json(force=True, silent=True) or {}
+    image_data: str = data.get("image", "")
+    context_group = (data.get("group") or "").strip() or None
+    context_date = (data.get("date") or "").strip() or None
+
+    if not image_data:
+        return jsonify({"ok": False, "error": "No image provided"}), 400
+
+    # Strip data URL prefix if present
+    if "," in image_data:
+        image_data = image_data.split(",", 1)[1]
+
+    today = date_cls.today().isoformat()
+    hint_parts: List[str] = []
+    if context_group:
+        hint_parts.append(f"Group/project: {context_group}")
+    if context_date:
+        hint_parts.append(f"Note date: {context_date}")
+    hint_text = ("\n\nUser-provided context:\n" + "\n".join(hint_parts)) if hint_parts else ""
+
+    prompt = (
+        "You are a handwritten note transcription assistant. Analyze this handwritten note "
+        "image and extract structured information.\n\n"
+        "Return ONLY valid JSON (no markdown fences, no explanation) in this exact format:\n"
+        '{\n'
+        '  "group": "project or group name, or null if unclear",\n'
+        '  "topic": "main topic or title of the notes",\n'
+        '  "date": "date as YYYY-MM-DD if mentioned in notes, or null",\n'
+        '  "purpose": ["list of goals or meeting purposes if any"],\n'
+        '  "outcome": "summary of decisions or outcomes, or empty string",\n'
+        '  "deadline": "overall deadline as YYYY-MM-DD if any, or empty string",\n'
+        '  "attendees": "comma-separated attendee names if any, or empty string",\n'
+        '  "body": "full transcription of all handwritten text in markdown format, preserving structure",\n'
+        '  "tasks": [\n'
+        '    {\n'
+        '      "type": "action",\n'
+        '      "text": "task description",\n'
+        '      "deadline": "YYYY-MM-DD or null",\n'
+        '      "contact": "person responsible if mentioned, or null"\n'
+        '    }\n'
+        '  ]\n'
+        '}\n\n'
+        'Task type "action" = something that needs to be done.\n'
+        'Task type "reminder" = something to remember or a note.\n'
+        'If no tasks are present, return tasks as [].\n'
+        f"Today's date is {today}.{hint_text}"
+    )
+
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_data,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Claude API error: {e}"}), 502
+
+    raw = response.content[0].text.strip()
+    # Strip markdown fences if Claude wraps anyway
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+
+    try:
+        note = json.loads(raw)
+    except Exception:
+        return jsonify({"ok": False, "error": "Could not parse Claude response", "raw": raw[:500]}), 502
+
+    # Normalise fields
+    note_date = note.get("date") or context_date or today
+    note_group = note.get("group") or context_group or "intake"
+    safe_group = re.sub(r"[^a-zA-Z0-9_-]", "-", note_group)[:30]
+    filename = f"{note_date} - {safe_group}.md"
+
+    purpose_list: List[str] = note.get("purpose") or []
+    if isinstance(purpose_list, str):
+        purpose_list = [purpose_list] if purpose_list else []
+
+    action_tasks = [t for t in (note.get("tasks") or []) if t.get("type") == "action"]
+    reminder_tasks = [t for t in (note.get("tasks") or []) if t.get("type") == "reminder"]
+
+    body_lines = [note.get("body") or ""]
+    if action_tasks:
+        body_lines.append("\n\n## Action Items\n")
+        for t in action_tasks:
+            dl = f" deadline: {t['deadline']}" if t.get("deadline") else ""
+            body_lines.append(f"- [ ] {t['text']}{dl}")
+    if reminder_tasks:
+        body_lines.append("\n\n## Reminders/Important\n")
+        for t in reminder_tasks:
+            dl = f" deadline: {t['deadline']}" if t.get("deadline") else ""
+            body_lines.append(f"- [ ] {t['text']}{dl}")
+
+    body = "\n".join(body_lines)
+
+    fm_parts = [f"group: {note_group}", f"date: {note_date}"]
+    if note.get("topic"):
+        fm_parts.append(f"topic: {note['topic']}")
+    if purpose_list:
+        fm_parts.append("purpose:\n" + "\n".join(f"  - {p}" for p in purpose_list))
+    if note.get("outcome"):
+        fm_parts.append(f"outcome: {note['outcome']}")
+    if note.get("deadline"):
+        fm_parts.append(f"deadline: {note['deadline']}")
+    if note.get("attendees"):
+        fm_parts.append(f"attendees: {note['attendees']}")
+
+    content = "---\n" + "\n".join(fm_parts) + "\n---\n\n" + body
+
+    try:
+        summary = import_meeting_from_content(filename, content)
+        return jsonify({
+            "ok": True,
+            "meeting_id": summary["id"],
+            "filename": filename,
+            "task_count": summary["tasks"],
+            "topic": note.get("topic") or "",
+            "group": note_group,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Database error: {e}"}), 500
 
 
 # --------------------------------------------------

@@ -2711,3 +2711,198 @@ table.groups tr:last-child td { border-bottom: none; }
   border-radius: var(--r-sm);
   border: 1px solid var(--border);
 }
+
+/* =========================================================
+   HANDWRITING INTAKE MODAL
+   ========================================================= */
+.modal-intake {
+  max-width: 740px;
+  width: 100%;
+}
+
+.intake-modal-body {
+  padding: 14px 18px 18px;
+}
+
+/* Toolbar */
+.intake-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.intake-tool-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--card-soft);
+  border-radius: var(--r-sm);
+  padding: 3px;
+}
+
+.intake-tool-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--muted);
+  transition: background 0.12s, color 0.12s;
+}
+
+.intake-tool-btn:hover { background: var(--border); color: var(--ink); }
+.intake-tool-btn.active { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+
+.intake-size-group { gap: 3px; }
+
+.intake-size-btn {
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  transition: background 0.12s, color 0.12s;
+  font-family: inherit;
+}
+
+.intake-size-btn:hover { background: var(--border); color: var(--ink); }
+.intake-size-btn.active { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+
+/* Canvas */
+.intake-canvas-wrap {
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: #ffffff;
+  margin-bottom: 12px;
+  cursor: crosshair;
+}
+
+.intake-canvas {
+  display: block;
+  width: 100%;
+  touch-action: none;
+}
+
+/* Context row */
+.intake-context-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 0;
+}
+
+.intake-context-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.intake-context-field label {
+  display: block;
+  font-size: 10.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  margin-bottom: 5px;
+  font-weight: 600;
+}
+
+.intake-context-field input {
+  width: 100%;
+  padding: 9px 11px;
+  font: inherit;
+  font-size: 13.5px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--card);
+  color: var(--ink);
+  box-sizing: border-box;
+}
+
+.intake-context-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-softer);
+}
+
+/* Result banner */
+.intake-result {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.intake-result.hidden { display: none; }
+
+.intake-result-ok {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #6ee7b7;
+}
+
+.intake-result-err {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fca5a5;
+}
+
+@media (prefers-color-scheme: dark) {
+  .intake-result-ok {
+    background: #052e1c;
+    color: #6ee7b7;
+    border-color: #065f46;
+  }
+  .intake-result-err {
+    background: #2d0a0a;
+    color: #fca5a5;
+    border-color: #991b1b;
+  }
+}
+
+.intake-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: rgba(0,0,0,0.08);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.intake-result-ok .intake-chip {
+  background: rgba(6, 95, 70, 0.12);
+  color: #065f46;
+}
+
+.intake-view-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: inherit;
+  text-decoration: underline;
+  padding: 0;
+  margin-left: auto;
+}
+
+.intake-view-btn:hover { opacity: 0.75; }
+
+@media (max-width: 600px) {
+  .modal-intake { max-width: 100%; }
+  .intake-context-row { flex-direction: column; gap: 8px; }
+}
