@@ -996,10 +996,35 @@ function renderDetail(m) {
       <h3>Open Reminders</h3>
       ${listOrNone(m.reminders_open)}
     </div>
+    ${(m.contacts || []).length ? `
+    <div class="detail-contacts">
+      <h3>Contacts</h3>
+      <div class="detail-contact-list">
+        ${(m.contacts || []).map((c) => `
+        <div class="detail-contact-card" data-cid="${escapeHtml(c.id)}" data-mid="${escapeHtml(m.id)}">
+          <div class="detail-contact-info">
+            <div class="detail-contact-name">${escapeHtml(c.name)}</div>
+            ${c.title || c.company ? `<div class="detail-contact-sub">${escapeHtml([c.title, c.company].filter(Boolean).join(" · "))}</div>` : ""}
+            ${c.email ? `<div class="detail-contact-meta">${escapeHtml(c.email)}</div>` : ""}
+            ${c.phone ? `<div class="detail-contact-meta">${escapeHtml(c.phone)}</div>` : ""}
+          </div>
+          <button class="detail-contact-unlink" title="Unlink contact">✕</button>
+        </div>`).join("")}
+      </div>
+    </div>` : ""}
     <div class="body">${m.body_html}</div>
   `;
   const ci = $("#detail .canvas-note-image");
   if (ci) ci.addEventListener("click", () => _openCanvasFullscreen(ci.src));
+
+  $("#detail").querySelectorAll(".detail-contact-unlink").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const card = btn.closest(".detail-contact-card");
+      const { cid, mid } = card.dataset;
+      await fetch(`/api/meetings/${mid}/contacts/${cid}`, { method: "DELETE" });
+      selectMeeting(mid);
+    });
+  });
 }
 
 // Delete note handler (delegated from #detail)
@@ -1262,6 +1287,7 @@ let _intakeTool = "pen";
 let _intakePenColor = "#111111";
 let _intakePenSize = 3;
 let _intakeScanResult = null; // {text, items: [{type, text, accepted}]}
+let _intakeLinkedContacts = []; // [{id, name, company, title, email, phone}]
 
 function _intakeCanvasEl() { return $("#intake-canvas"); }
 function _intakeCtx() { return _intakeCanvasEl().getContext("2d"); }
@@ -1509,6 +1535,104 @@ function _renderScanResults() {
   queueEl.classList.remove("hidden");
 }
 
+// --- Business card scanning ---
+function _extractCardFields(text) {
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const emailRe = /[\w.+-]+@[\w.-]+\.[a-z]{2,}/i;
+  const phoneRe = /(\+?[\d][\d\s().+-]{7,}\d)/;
+  const urlRe = /https?:\/\/[^\s]+|www\.[^\s]+/i;
+
+  const email = (text.match(emailRe) || [])[0] || "";
+  const phone = (text.match(phoneRe) || [])[0] || "";
+
+  const remaining = lines.filter((l) =>
+    !emailRe.test(l) && !phoneRe.test(l) && !urlRe.test(l) && l.length > 1
+  );
+  const name = remaining[0] || "";
+  const company = remaining[1] || "";
+  const title = remaining[2] || "";
+  return { name, company, title, email, phone: phone.replace(/\s+/g, " ").trim() };
+}
+
+function _renderSavedCards() {
+  const el = $("#card-saved-contacts");
+  el.innerHTML = _intakeLinkedContacts.map((c, idx) => `
+    <div class="saved-contact-chip">
+      <span>${escapeHtml(c.name)}${c.company ? " · " + escapeHtml(c.company) : ""}</span>
+      <button class="saved-contact-remove" data-idx="${idx}">✕</button>
+    </div>`).join("");
+  el.querySelectorAll(".saved-contact-remove").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _intakeLinkedContacts.splice(+btn.dataset.idx, 1);
+      _renderSavedCards();
+    });
+  });
+}
+
+(function _initCardScanner() {
+  const fileInput = $("#card-photo-input");
+  const scanBtn = $("#card-scan-btn");
+  const preview = $("#card-preview");
+
+  scanBtn.addEventListener("click", () => fileInput.click());
+
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    fileInput.value = "";
+
+    scanBtn.disabled = true;
+    scanBtn.textContent = "Reading…";
+
+    try {
+      const { createWorker } = Tesseract;
+      const worker = await createWorker("eng");
+      const url = URL.createObjectURL(file);
+      const { data: { text } } = await worker.recognize(url);
+      await worker.terminate();
+      URL.revokeObjectURL(url);
+
+      const fields = _extractCardFields(text);
+      $("#card-field-name").value = fields.name;
+      $("#card-field-company").value = fields.company;
+      $("#card-field-title").value = fields.title;
+      $("#card-field-email").value = fields.email;
+      $("#card-field-phone").value = fields.phone;
+      preview.classList.remove("hidden");
+    } catch (err) {
+      alert("Card scan failed: " + err.message);
+    } finally {
+      scanBtn.disabled = false;
+      scanBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Scan Business Card';
+    }
+  });
+
+  $("#card-preview-dismiss").addEventListener("click", () => preview.classList.add("hidden"));
+
+  $("#card-save-btn").addEventListener("click", async () => {
+    const contact = {
+      name: $("#card-field-name").value.trim(),
+      company: $("#card-field-company").value.trim(),
+      title: $("#card-field-title").value.trim(),
+      email: $("#card-field-email").value.trim(),
+      phone: $("#card-field-phone").value.trim(),
+    };
+    if (!contact.name) { alert("Name is required"); return; }
+
+    const res = await fetch("/api/contacts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(contact),
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(data.error || "Save failed"); return; }
+
+    _intakeLinkedContacts.push({ ...contact, id: data.id });
+    _renderSavedCards();
+    preview.classList.add("hidden");
+  });
+})();
+
 function openIntakeModal() {
   document.body.style.overflow = "hidden";
   document.body.style.touchAction = "none";
@@ -1534,7 +1658,10 @@ function openIntakeModal() {
   });
   _intakeSetTool("pen");
   _intakeScanResult = null;
+  _intakeLinkedContacts = [];
   $("#intake-review-queue").classList.add("hidden");
+  $("#card-preview").classList.add("hidden");
+  $("#card-saved-contacts").innerHTML = "";
   requestAnimationFrame(() => _initIntakeCanvas());
 }
 
@@ -1589,6 +1716,16 @@ async function _intakeSaveNotes() {
     const data = await res.json();
     resultEl.classList.remove("hidden");
     if (data.ok) {
+      // Link any scanned contacts to the saved meeting
+      if (_intakeLinkedContacts.length && data.meeting_id) {
+        await Promise.all(_intakeLinkedContacts.map((c) =>
+          fetch(`/api/meetings/${data.meeting_id}/contacts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ contact_id: c.id }),
+          })
+        ));
+      }
       resultEl.className = "intake-result intake-result-ok";
       const chips = [
         data.topic ? `<span class="intake-chip">${escapeHtml(data.topic)}</span>` : "",
