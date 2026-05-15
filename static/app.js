@@ -1234,7 +1234,28 @@ let _intakeLastMidX = 0;
 let _intakeLastMidY = 0;
 let _intakeLastPressure = 0.5;
 let _intakePhase = "extract"; // "extract" | "save"
+let _intakeFocusMode = false;
+let _intakeFocusTapCount = 0;
+let _intakeFocusTapTimer = null;
+let _intakeFocusTapX = 0;
+let _intakeFocusTapY = 0;
+let _intakeFocusDidDrag = false;
 const INTAKE_MAX_UNDO = 30;
+
+function _enterIntakeFocusMode() {
+  _intakeFocusMode = true;
+  $("#intake-modal-backdrop").classList.add("canvas-focus-mode");
+  requestAnimationFrame(() => _initIntakeCanvas());
+}
+
+function _exitIntakeFocusMode() {
+  _intakeFocusMode = false;
+  _intakeFocusTapCount = 0;
+  clearTimeout(_intakeFocusTapTimer);
+  _intakeFocusTapTimer = null;
+  $("#intake-modal-backdrop").classList.remove("canvas-focus-mode");
+  requestAnimationFrame(() => _initIntakeCanvas());
+}
 
 function openIntakeModal() {
   // Lock body scroll so resting palm doesn't move the page behind the modal
@@ -1242,6 +1263,12 @@ function openIntakeModal() {
   document.body.style.touchAction = "none";
   $("#intake-modal-backdrop").classList.remove("hidden");
   $("#intake-modal-backdrop").classList.add("intake-open");
+  // Reset focus mode state
+  _intakeFocusMode = false;
+  _intakeFocusTapCount = 0;
+  clearTimeout(_intakeFocusTapTimer);
+  _intakeFocusTapTimer = null;
+  $("#intake-modal-backdrop").classList.remove("canvas-focus-mode");
   const dateInput = $("#intake-date");
   if (!dateInput.value) {
     dateInput.value = new Date().toISOString().split("T")[0];
@@ -1278,8 +1305,13 @@ function openIntakeModal() {
 }
 
 function closeIntakeModal() {
+  _intakeFocusMode = false;
+  _intakeFocusTapCount = 0;
+  clearTimeout(_intakeFocusTapTimer);
+  _intakeFocusTapTimer = null;
   $("#intake-modal-backdrop").classList.add("hidden");
   $("#intake-modal-backdrop").classList.remove("intake-open");
+  $("#intake-modal-backdrop").classList.remove("canvas-focus-mode");
   // Restore body scroll
   document.body.style.overflow = "";
   document.body.style.touchAction = "";
@@ -1290,9 +1322,14 @@ function _initIntakeCanvas() {
   const wrap = canvas.parentElement;
   const dpr = window.devicePixelRatio || 1;
   const w = wrap.clientWidth;
-  // Use viewport height so the canvas is much taller on iPad
-  const vh = window.innerHeight;
-  const h = Math.round(Math.max(280, Math.min(vh * 0.52, 700)));
+  let h;
+  if (_intakeFocusMode) {
+    // Fill the flex-grown wrap; fall back to viewport minus toolbar if layout not resolved
+    h = Math.max(280, wrap.clientHeight || window.innerHeight - 56);
+  } else {
+    const vh = window.innerHeight;
+    h = Math.round(Math.max(280, Math.min(vh * 0.52, 700)));
+  }
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
   canvas.style.width = w + "px";
@@ -1364,10 +1401,22 @@ function _setupIntakeCanvasEvents() {
     e.preventDefault();
     // Palm rejection: only draw with Pencil (pen) or mouse, ignore finger/palm (touch)
     if (e.pointerType === "touch") return;
+
+    // Enter focus mode on first interaction; don't draw on the activating tap
+    if (!_intakeFocusMode) {
+      _enterIntakeFocusMode();
+      return;
+    }
+
+    // Track position for triple-tap drag detection
+    const pos = _intakeGetPos(canvas, e);
+    _intakeFocusTapX = pos.x;
+    _intakeFocusTapY = pos.y;
+    _intakeFocusDidDrag = false;
+
     _intakeSaveUndo();
     _intakeIsDrawing = true;
     canvas.setPointerCapture(e.pointerId);
-    const pos = _intakeGetPos(canvas, e);
     _intakeLastX = pos.x;
     _intakeLastY = pos.y;
     _intakeLastMidX = pos.x;
@@ -1393,6 +1442,10 @@ function _setupIntakeCanvasEvents() {
     const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
     for (const ce of events) {
       const pos = _intakeGetPos(canvas, ce);
+      // Mark as dragged so pointerup won't count this as a triple-tap tap
+      const ddx = pos.x - _intakeFocusTapX;
+      const ddy = pos.y - _intakeFocusTapY;
+      if (ddx * ddx + ddy * ddy > 64) _intakeFocusDidDrag = true;
       const pressure = ce.pressure || 0.5;
       const midX = (_intakeLastX + pos.x) / 2;
       const midY = (_intakeLastY + pos.y) / 2;
@@ -1414,8 +1467,25 @@ function _setupIntakeCanvasEvents() {
     }
   });
 
-  canvas.addEventListener("pointerup", () => { _intakeIsDrawing = false; });
+  canvas.addEventListener("pointerup", (e) => {
+    _intakeIsDrawing = false;
+    if (e.pointerType === "touch") return;
+    // Count quick taps (no drag) for triple-tap exit gesture
+    if (_intakeFocusMode && !_intakeFocusDidDrag) {
+      _intakeFocusTapCount++;
+      clearTimeout(_intakeFocusTapTimer);
+      if (_intakeFocusTapCount >= 3) {
+        _exitIntakeFocusMode();
+        return;
+      }
+      _intakeFocusTapTimer = setTimeout(() => { _intakeFocusTapCount = 0; }, 800);
+    }
+  });
   canvas.addEventListener("pointercancel", () => { _intakeIsDrawing = false; });
+
+  // Exit button
+  $("#intake-focus-exit").addEventListener("click", _exitIntakeFocusMode);
+  $("#intake-focus-exit").addEventListener("pointerdown", (e) => e.stopPropagation());
 }
 
 function _intakeHasCanvasContent() {
