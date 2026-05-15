@@ -1230,14 +1230,45 @@ let _intakePenSize = 4;
 let _intakeUndoStack = [];
 let _intakeLastX = 0;
 let _intakeLastY = 0;
+let _intakeLastMidX = 0;
+let _intakeLastMidY = 0;
+let _intakeLastPressure = 0.5;
 let _intakePhase = "extract"; // "extract" | "save"
+let _intakeFocusMode = false;
+let _intakeFocusTapCount = 0;
+let _intakeFocusTapTimer = null;
+let _intakeFocusTapX = 0;
+let _intakeFocusTapY = 0;
+let _intakeFocusDidDrag = false;
 const INTAKE_MAX_UNDO = 30;
+
+function _enterIntakeFocusMode() {
+  _intakeFocusMode = true;
+  $("#intake-modal-backdrop").classList.add("canvas-focus-mode");
+  requestAnimationFrame(() => _initIntakeCanvas());
+}
+
+function _exitIntakeFocusMode() {
+  _intakeFocusMode = false;
+  _intakeFocusTapCount = 0;
+  clearTimeout(_intakeFocusTapTimer);
+  _intakeFocusTapTimer = null;
+  $("#intake-modal-backdrop").classList.remove("canvas-focus-mode");
+  requestAnimationFrame(() => _initIntakeCanvas());
+}
 
 function openIntakeModal() {
   // Lock body scroll so resting palm doesn't move the page behind the modal
   document.body.style.overflow = "hidden";
   document.body.style.touchAction = "none";
   $("#intake-modal-backdrop").classList.remove("hidden");
+  $("#intake-modal-backdrop").classList.add("intake-open");
+  // Reset focus mode state
+  _intakeFocusMode = false;
+  _intakeFocusTapCount = 0;
+  clearTimeout(_intakeFocusTapTimer);
+  _intakeFocusTapTimer = null;
+  $("#intake-modal-backdrop").classList.remove("canvas-focus-mode");
   const dateInput = $("#intake-date");
   if (!dateInput.value) {
     dateInput.value = new Date().toISOString().split("T")[0];
@@ -1274,7 +1305,13 @@ function openIntakeModal() {
 }
 
 function closeIntakeModal() {
+  _intakeFocusMode = false;
+  _intakeFocusTapCount = 0;
+  clearTimeout(_intakeFocusTapTimer);
+  _intakeFocusTapTimer = null;
   $("#intake-modal-backdrop").classList.add("hidden");
+  $("#intake-modal-backdrop").classList.remove("intake-open");
+  $("#intake-modal-backdrop").classList.remove("canvas-focus-mode");
   // Restore body scroll
   document.body.style.overflow = "";
   document.body.style.touchAction = "";
@@ -1285,7 +1322,14 @@ function _initIntakeCanvas() {
   const wrap = canvas.parentElement;
   const dpr = window.devicePixelRatio || 1;
   const w = wrap.clientWidth;
-  const h = Math.round(Math.max(Math.min(w * 0.5, 400), 240));
+  let h;
+  if (_intakeFocusMode) {
+    // Fill the flex-grown wrap; fall back to viewport minus toolbar if layout not resolved
+    h = Math.max(280, wrap.clientHeight || window.innerHeight - 56);
+  } else {
+    const vh = window.innerHeight;
+    h = Math.round(Math.max(280, Math.min(vh * 0.52, 700)));
+  }
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
   canvas.style.width = w + "px";
@@ -1337,10 +1381,12 @@ function _intakeApplyStyle(ctx) {
   if (_intakeTool === "eraser") {
     ctx.strokeStyle = "#ffffff";
     ctx.fillStyle = "#ffffff";
+    // Eraser keeps fixed width (pressure not relevant)
     ctx.lineWidth = _intakePenSize * 5;
   } else {
     ctx.strokeStyle = "#111111";
     ctx.fillStyle = "#111111";
+    // lineWidth set dynamically per-segment in pointermove for pressure sensitivity
     ctx.lineWidth = _intakePenSize;
   }
 }
@@ -1355,36 +1401,91 @@ function _setupIntakeCanvasEvents() {
     e.preventDefault();
     // Palm rejection: only draw with Pencil (pen) or mouse, ignore finger/palm (touch)
     if (e.pointerType === "touch") return;
+
+    // Enter focus mode on first interaction; don't draw on the activating tap
+    if (!_intakeFocusMode) {
+      _enterIntakeFocusMode();
+      return;
+    }
+
+    // Track position for triple-tap drag detection
+    const pos = _intakeGetPos(canvas, e);
+    _intakeFocusTapX = pos.x;
+    _intakeFocusTapY = pos.y;
+    _intakeFocusDidDrag = false;
+
     _intakeSaveUndo();
     _intakeIsDrawing = true;
     canvas.setPointerCapture(e.pointerId);
-    const pos = _intakeGetPos(canvas, e);
     _intakeLastX = pos.x;
     _intakeLastY = pos.y;
+    _intakeLastMidX = pos.x;
+    _intakeLastMidY = pos.y;
+    _intakeLastPressure = e.pressure || 0.5;
     const ctx = canvas.getContext("2d");
     _intakeApplyStyle(ctx);
+    // Draw pressure-sized initial dot
+    const pressure = e.pressure || 0.5;
+    const dotR = Math.max(0.5, (_intakePenSize * (0.4 + pressure * 1.0)) / 2);
     ctx.beginPath();
-    ctx.arc(pos.x, pos.y, ctx.lineWidth / 2, 0, Math.PI * 2);
+    ctx.arc(pos.x, pos.y, dotR, 0, Math.PI * 2);
     ctx.fill();
   });
 
   canvas.addEventListener("pointermove", (e) => {
-    e.preventDefault(); // always prevent scroll even for touch, just don't draw
+    e.preventDefault(); // always prevent scroll, even for touch (don't draw though)
     if (!_intakeIsDrawing) return;
     if (e.pointerType === "touch") return; // palm rejection
-    const pos = _intakeGetPos(canvas, e);
     const ctx = canvas.getContext("2d");
     _intakeApplyStyle(ctx);
-    ctx.beginPath();
-    ctx.moveTo(_intakeLastX, _intakeLastY);
-    ctx.lineTo(pos.x, pos.y);
-    ctx.stroke();
-    _intakeLastX = pos.x;
-    _intakeLastY = pos.y;
+    // Use coalesced events for finer-grained intermediate positions
+    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const ce of events) {
+      const pos = _intakeGetPos(canvas, ce);
+      // Mark as dragged so pointerup won't count this as a triple-tap tap
+      const ddx = pos.x - _intakeFocusTapX;
+      const ddy = pos.y - _intakeFocusTapY;
+      if (ddx * ddx + ddy * ddy > 64) _intakeFocusDidDrag = true;
+      const pressure = ce.pressure || 0.5;
+      const midX = (_intakeLastX + pos.x) / 2;
+      const midY = (_intakeLastY + pos.y) / 2;
+      // Pressure-modulated width: varies ±50% around base pen size
+      const avgPressure = (_intakeLastPressure + pressure) / 2;
+      if (_intakeTool !== "eraser") {
+        ctx.lineWidth = Math.max(0.5, _intakePenSize * (0.4 + avgPressure * 1.2));
+      }
+      // Quadratic bezier from last midpoint to new midpoint via the last point (control)
+      ctx.beginPath();
+      ctx.moveTo(_intakeLastMidX, _intakeLastMidY);
+      ctx.quadraticCurveTo(_intakeLastX, _intakeLastY, midX, midY);
+      ctx.stroke();
+      _intakeLastMidX = midX;
+      _intakeLastMidY = midY;
+      _intakeLastX = pos.x;
+      _intakeLastY = pos.y;
+      _intakeLastPressure = pressure;
+    }
   });
 
-  canvas.addEventListener("pointerup", () => { _intakeIsDrawing = false; });
+  canvas.addEventListener("pointerup", (e) => {
+    _intakeIsDrawing = false;
+    if (e.pointerType === "touch") return;
+    // Count quick taps (no drag) for triple-tap exit gesture
+    if (_intakeFocusMode && !_intakeFocusDidDrag) {
+      _intakeFocusTapCount++;
+      clearTimeout(_intakeFocusTapTimer);
+      if (_intakeFocusTapCount >= 3) {
+        _exitIntakeFocusMode();
+        return;
+      }
+      _intakeFocusTapTimer = setTimeout(() => { _intakeFocusTapCount = 0; }, 800);
+    }
+  });
   canvas.addEventListener("pointercancel", () => { _intakeIsDrawing = false; });
+
+  // Exit button
+  $("#intake-focus-exit").addEventListener("click", _exitIntakeFocusMode);
+  $("#intake-focus-exit").addEventListener("pointerdown", (e) => e.stopPropagation());
 }
 
 function _intakeHasCanvasContent() {

@@ -2980,3 +2980,113 @@ table.groups tr:last-child td { border-bottom: none; }
   .modal-intake { max-width: 100%; }
   .intake-context-row { flex-direction: column; gap: 8px; }
 }
+
+/* Full-screen intake on tablet / iPad */
+@media (max-width: 1100px) {
+  .modal-backdrop.intake-open {
+    padding: 0;
+    align-items: stretch;
+  }
+  .modal-backdrop.intake-open .modal-intake {
+    max-width: 100%;
+    width: 100%;
+    height: 100%;
+    max-height: 100%;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .modal-backdrop.intake-open .modal-header {
+    flex-shrink: 0;
+  }
+  .modal-backdrop.intake-open .intake-modal-body {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+  .modal-backdrop.intake-open .modal-footer {
+    flex-shrink: 0;
+  }
+}
+
+/* ===== Canvas focus mode — immersive full-screen drawing ===== */
+
+.modal-backdrop.canvas-focus-mode {
+  padding: 0;
+  align-items: stretch;
+}
+
+.modal-backdrop.canvas-focus-mode .modal-intake {
+  max-width: 100%;
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-backdrop.canvas-focus-mode .modal-header,
+.modal-backdrop.canvas-focus-mode .modal-footer,
+.modal-backdrop.canvas-focus-mode .intake-context-row,
+.modal-backdrop.canvas-focus-mode .intake-review-section {
+  display: none !important;
+}
+
+.modal-backdrop.canvas-focus-mode .intake-modal-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-backdrop.canvas-focus-mode .intake-toolbar {
+  flex-shrink: 0;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+}
+
+.modal-backdrop.canvas-focus-mode .intake-canvas-wrap {
+  flex: 1;
+  margin-bottom: 0;
+  border-radius: 0;
+  border: none;
+  position: relative;
+}
+
+/* Focus-mode exit button — bottom-right corner of canvas */
+.intake-focus-exit {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.22);
+  color: #fff;
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+  z-index: 10;
+  transition: background 0.15s;
+}
+
+.intake-focus-exit:hover,
+.intake-focus-exit:active {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.modal-backdrop.canvas-focus-mode .intake-focus-exit {
+  display: flex;
+}
