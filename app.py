@@ -165,6 +165,12 @@ def init_db() -> None:
                     ) THEN
                         ALTER TABLE tasks ADD COLUMN recurrence_rule JSONB DEFAULT NULL;
                     END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='meetings' AND column_name='canvas_image'
+                    ) THEN
+                        ALTER TABLE meetings ADD COLUMN canvas_image TEXT;
+                    END IF;
                     -- Add FK constraint on parent_id if column exists but constraint doesn't
                     IF NOT EXISTS (
                         SELECT 1 FROM information_schema.table_constraints tc
@@ -249,6 +255,7 @@ class Meeting:
     body: str
     body_html: str
     mtime: Optional[float]
+    canvas_image: Optional[str] = None
 
     def summary(self) -> Dict[str, Any]:
         return {
@@ -275,6 +282,7 @@ class Meeting:
             "reminders_done": self.reminders_done,
             "body": self.body,
             "body_html": self.body_html,
+            "canvas_image": self.canvas_image,
         }
 
 
@@ -549,6 +557,7 @@ def _row_to_meeting(row: dict, task_rows: List[dict]) -> Meeting:
         body=row["body"] or "",
         body_html=row["body_html"] or "",
         mtime=row["mtime"],
+        canvas_image=row.get("canvas_image"),
     )
 
 
@@ -644,7 +653,7 @@ def db_get_all_tasks(include_done: bool = False) -> List[Task]:
 # IMPORT (parse markdown → DB)
 # --------------------------------------------------
 
-def import_meeting_from_content(filename: str, content: str) -> dict:
+def import_meeting_from_content(filename: str, content: str, canvas_image: Optional[str] = None) -> dict:
     """Parse and upsert a meeting from raw markdown content."""
     post = frontmatter.loads(content)
     meta = post.metadata or {}
@@ -716,6 +725,11 @@ def import_meeting_from_content(filename: str, content: str) -> dict:
                 s("topic"), json.dumps(sl("purpose")), s("outcome"),
                 s("deadline"), s("attendees"), body_md, body_html, None,
             ))
+            if canvas_image:
+                cur.execute(
+                    "UPDATE meetings SET canvas_image = %s WHERE id = %s",
+                    (canvas_image, mid),
+                )
             for t in tasks:
                 cur.execute("""
                     INSERT INTO tasks
@@ -1595,11 +1609,41 @@ def api_notes_intake():
     note_topic = (data.get("topic") or "").strip()
     note_date = (data.get("date") or "").strip() or date_cls.today().isoformat()
     note_attendees = (data.get("attendees") or "").strip()
+    canvas_image = data.get("canvas_image") or None
+
+    # confirmed_items from canvas scan: [{type, text}]
+    confirmed_items: List[dict] = data.get("confirmed_items") or []
+
     note_body = (data.get("body") or "").strip()
     action_items_raw = (data.get("action_items") or "").strip()
     reminders_raw = (data.get("reminders") or "").strip()
 
-    if not any([note_body, action_items_raw, reminders_raw]):
+    # If canvas items provided, merge them into the body sections
+    if confirmed_items:
+        task_items = [i["text"] for i in confirmed_items if i.get("type") in ("task",) and i.get("text")]
+        important_items = [i["text"] for i in confirmed_items if i.get("type") in ("important", "followup") and i.get("text")]
+        bill_refs = [i["text"] for i in confirmed_items if i.get("type") == "bill" and i.get("text")]
+        person_refs = [i["text"] for i in confirmed_items if i.get("type") == "person" and i.get("text")]
+        deadline_refs = [i["text"] for i in confirmed_items if i.get("type") == "deadline" and i.get("text")]
+
+        # Merge into action_items and reminders
+        existing_actions = [l.strip() for l in action_items_raw.splitlines() if l.strip()]
+        existing_reminders = [l.strip() for l in reminders_raw.splitlines() if l.strip()]
+        action_items_raw = "\n".join(existing_actions + task_items)
+        reminders_raw = "\n".join(existing_reminders + important_items)
+
+        # Append structured references as context in the body
+        extras = []
+        if bill_refs:
+            extras.append("Bills referenced: " + ", ".join(bill_refs))
+        if person_refs:
+            extras.append("People: " + ", ".join(person_refs))
+        if deadline_refs:
+            extras.append("Deadlines noted: " + ", ".join(deadline_refs))
+        if extras:
+            note_body = (note_body + "\n\n" + "\n".join(extras)).strip()
+
+    if not any([note_body, action_items_raw, reminders_raw, canvas_image]):
         return jsonify({"ok": False, "error": "Nothing to save — add some notes or tasks"}), 400
 
     # Build body with sections the existing parser understands
@@ -1631,7 +1675,7 @@ def api_notes_intake():
     filename = f"{note_date} - {safe_group}.md"
 
     try:
-        summary = import_meeting_from_content(filename, content)
+        summary = import_meeting_from_content(filename, content, canvas_image=canvas_image)
         return jsonify({
             "ok": True,
             "meeting_id": summary["id"],

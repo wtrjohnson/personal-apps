@@ -677,6 +677,7 @@ async function openDrawer(task) {
         <div class="meta">${meta.join("")}</div>
         <a href="#" class="open-full" data-mid="${m.id}">Open full meeting view →</a>
       </header>
+      ${m.canvas_image ? `<img class="canvas-note-image" src="${m.canvas_image}" alt="Handwritten note">` : ""}
       <div class="body">${m.body_html}</div>
     `;
   } catch (e) {
@@ -982,6 +983,7 @@ function renderDetail(m) {
       <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
       <div class="meta">${meta.join("")}</div>
     </header>
+    ${m.canvas_image ? `<img class="canvas-note-image" src="${m.canvas_image}" alt="Handwritten note">` : ""}
     <div class="tasks-panel">
       <h3>Open Action Items</h3>
       ${listOrNone(m.action_items_open)}
@@ -1224,8 +1226,307 @@ async function submitImport() {
 
 // ===== Handwriting Intake =====
 
+// --- Canvas state ---
+let _intakeStrokes = [];         // [{color, width, points: [{x,y}]}]
+let _intakeCurrentStroke = null;
+let _intakeTool = "pen";
+let _intakeCanvasMode = true;    // true = canvas, false = text
+let _intakeDetections = [];      // [{type, text, confirmed}]
+
+function _intakeCanvasEl() { return $("#intake-canvas"); }
+function _intakeCtx() { return _intakeCanvasEl().getContext("2d"); }
+
+function _initIntakeCanvas() {
+  const canvas = _intakeCanvasEl();
+  const wrap = canvas.parentElement;
+  // Set physical pixel dimensions matching CSS display size
+  const dpr = window.devicePixelRatio || 1;
+  const w = wrap.clientWidth || 680;
+  const h = 380;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  const ctx = _intakeCtx();
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+  _intakeStrokes = [];
+  _intakeCurrentStroke = null;
+}
+
+function _intakeRedraw() {
+  const canvas = _intakeCanvasEl();
+  const ctx = _intakeCtx();
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.width / dpr;
+  const h = canvas.height / dpr;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+  for (const stroke of _intakeStrokes) {
+    if (stroke.points.length < 2) continue;
+    ctx.beginPath();
+    ctx.strokeStyle = stroke.color;
+    ctx.lineWidth = stroke.width;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
+    for (let i = 1; i < stroke.points.length; i++) {
+      ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
+    }
+    ctx.stroke();
+  }
+}
+
+function _intakePointerPos(e) {
+  const canvas = _intakeCanvasEl();
+  const rect = canvas.getBoundingClientRect();
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+
+function _intakePointerDown(e) {
+  e.preventDefault();
+  const pos = _intakePointerPos(e);
+  const isPen = _intakeTool === "pen";
+  _intakeCurrentStroke = {
+    color: isPen ? "#111111" : "#ffffff",
+    width: isPen ? (e.pointerType === "pen" ? Math.max(1.5, e.pressure * 4) : 2) : 18,
+    points: [pos],
+  };
+  const ctx = _intakeCtx();
+  ctx.beginPath();
+  ctx.arc(pos.x, pos.y, _intakeCurrentStroke.width / 2, 0, Math.PI * 2);
+  ctx.fillStyle = _intakeCurrentStroke.color;
+  ctx.fill();
+}
+
+function _intakePointerMove(e) {
+  if (!_intakeCurrentStroke) return;
+  e.preventDefault();
+  const pos = _intakePointerPos(e);
+  _intakeCurrentStroke.points.push(pos);
+  const pts = _intakeCurrentStroke.points;
+  const ctx = _intakeCtx();
+  ctx.beginPath();
+  ctx.strokeStyle = _intakeCurrentStroke.color;
+  ctx.lineWidth = _intakeCurrentStroke.width;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (pts.length >= 2) {
+    ctx.moveTo(pts[pts.length - 2].x, pts[pts.length - 2].y);
+    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+    ctx.stroke();
+  }
+}
+
+function _intakePointerUp(e) {
+  if (!_intakeCurrentStroke) return;
+  e.preventDefault();
+  if (_intakeCurrentStroke.points.length > 0) {
+    _intakeStrokes.push(_intakeCurrentStroke);
+  }
+  _intakeCurrentStroke = null;
+}
+
+function _intakeUndo() {
+  if (_intakeStrokes.length === 0) return;
+  _intakeStrokes.pop();
+  _intakeRedraw();
+}
+
+function _intakeClearCanvas() {
+  _intakeStrokes = [];
+  _intakeDetections = [];
+  _intakeRedraw();
+  $("#intake-review-queue").classList.add("hidden");
+}
+
+function _intakeSetTool(tool) {
+  _intakeTool = tool;
+  $("#intake-tool-pen").classList.toggle("active", tool === "pen");
+  $("#intake-tool-eraser").classList.toggle("active", tool === "eraser");
+}
+
+function _intakeSetMode(mode) {
+  _intakeCanvasMode = mode === "canvas";
+  $("#intake-mode-canvas").classList.toggle("active", _intakeCanvasMode);
+  $("#intake-mode-text").classList.toggle("active", !_intakeCanvasMode);
+  $("#intake-canvas-mode").classList.toggle("hidden", !_intakeCanvasMode);
+  $("#intake-text-mode").classList.toggle("hidden", _intakeCanvasMode);
+  if (!_intakeCanvasMode) {
+    requestAnimationFrame(() => $("#intake-scribble").focus());
+  }
+}
+
+// --- Tesseract lazy loader ---
+async function _loadTesseract() {
+  if (window.Tesseract) return;
+  await new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js";
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("Failed to load Tesseract.js"));
+    document.head.appendChild(s);
+  });
+}
+
+// --- Marker patterns ---
+const MARKER_PATTERNS = [
+  { type: "task",      re: /^\[[\s_xX]*\]$|^□$|^☐$/ },
+  { type: "important", re: /^[!i][!1]$|^!!!*$/ },
+  { type: "followup",  re: /^\?$/ },
+  { type: "bill",      re: /^#[A-Za-z]{1,4}\d+/ },
+  { type: "person",    re: /^@[A-Za-z]/ },
+  { type: "deadline",  re: /^due[:\s]/i },
+];
+
+const MARKER_ICONS = {
+  task: "☐",
+  important: "!!",
+  followup: "?",
+  bill: "#",
+  person: "@",
+  deadline: "⏰",
+};
+
+const MARKER_LABELS = {
+  task: "Task",
+  important: "Note",
+  followup: "Follow-up",
+  bill: "Bill",
+  person: "Person",
+  deadline: "Deadline",
+};
+
+function _wordsOnSameLine(allWords, markerWord) {
+  const { x1: mx1, y0: my0, y1: my1 } = markerWord.bbox;
+  const mh = Math.max(1, my1 - my0);
+  return allWords
+    .filter((w) => {
+      if (w === markerWord) return false;
+      if (w.bbox.x0 <= mx1) return false;
+      const overlap = Math.min(my1, w.bbox.y1) - Math.max(my0, w.bbox.y0);
+      return overlap > mh * 0.35;
+    })
+    .sort((a, b) => a.bbox.x0 - b.bbox.x0);
+}
+
+async function _intakeScan() {
+  const canvas = _intakeCanvasEl();
+  const scanBtn = $("#intake-scan");
+  const queueEl = $("#intake-review-queue");
+
+  if (_intakeStrokes.length === 0) {
+    alert("Draw something on the canvas first, then tap Scan.");
+    return;
+  }
+
+  scanBtn.disabled = true;
+  scanBtn.textContent = "Scanning…";
+
+  try {
+    await _loadTesseract();
+  } catch (e) {
+    scanBtn.disabled = false;
+    scanBtn.textContent = "Scan";
+    alert("Couldn't load OCR engine. Check your internet connection.");
+    return;
+  }
+
+  const dataUrl = canvas.toDataURL("image/png");
+  let words;
+  try {
+    const { data } = await Tesseract.recognize(dataUrl, "eng", { logger: () => {} });
+    words = data.words || [];
+  } catch (e) {
+    scanBtn.disabled = false;
+    scanBtn.textContent = "Scan";
+    alert("OCR failed: " + e.message);
+    return;
+  }
+
+  const detections = [];
+  const usedWords = new Set();
+
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const text = w.text.trim();
+    if (!text || usedWords.has(w)) continue;
+
+    for (const { type, re } of MARKER_PATTERNS) {
+      if (!re.test(text)) continue;
+
+      usedWords.add(w);
+      const lineWords = _wordsOnSameLine(words, w).filter((lw) => !usedWords.has(lw));
+      lineWords.forEach((lw) => usedWords.add(lw));
+
+      let content = lineWords.map((lw) => lw.text).join(" ").trim();
+      // For bill and person markers the marker itself is part of the content
+      if (type === "bill" || type === "person") {
+        content = (text + " " + content).trim();
+      }
+
+      detections.push({ type, text: content, confirmed: true });
+      break;
+    }
+  }
+
+  _intakeDetections = detections;
+  _renderReviewQueue();
+  scanBtn.disabled = false;
+  scanBtn.textContent = "Re-scan";
+}
+
+function _renderReviewQueue() {
+  const queueEl = $("#intake-review-queue");
+  const itemsEl = $("#review-queue-items");
+  const summaryEl = $("#review-queue-summary");
+
+  if (_intakeDetections.length === 0) {
+    queueEl.classList.add("hidden");
+    summaryEl.textContent = "";
+    itemsEl.innerHTML = "";
+    return;
+  }
+
+  // Summary counts
+  const counts = {};
+  for (const d of _intakeDetections) {
+    if (d.confirmed) counts[d.type] = (counts[d.type] || 0) + 1;
+  }
+  const parts = Object.entries(counts).map(([t, n]) => `${n} ${MARKER_LABELS[t] || t}${n > 1 ? "s" : ""}`);
+  summaryEl.textContent = parts.join(" · ") || "No items detected";
+
+  itemsEl.innerHTML = _intakeDetections.map((d, i) => `
+    <div class="review-item" data-index="${i}" ${d.confirmed ? "" : 'style="opacity:0.4"'}>
+      <span class="review-item-icon">${MARKER_ICONS[d.type] || "·"}</span>
+      <span class="review-item-type">${MARKER_LABELS[d.type] || d.type}</span>
+      <input type="text" value="${escapeHtml(d.text)}" placeholder="(empty)" data-index="${i}"
+             style="${d.confirmed ? "" : "text-decoration:line-through"}"
+             ${d.confirmed ? "" : "disabled"}>
+      <button class="review-item-reject" data-index="${i}" title="${d.confirmed ? "Remove" : "Restore"}">${d.confirmed ? "×" : "↩"}</button>
+    </div>
+  `).join("");
+
+  queueEl.classList.remove("hidden");
+
+  // Wire up events
+  itemsEl.querySelectorAll("input[data-index]").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      const idx = +e.target.dataset.index;
+      _intakeDetections[idx].text = e.target.value;
+    });
+  });
+  itemsEl.querySelectorAll(".review-item-reject").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const idx = +e.target.dataset.index;
+      _intakeDetections[idx].confirmed = !_intakeDetections[idx].confirmed;
+      _renderReviewQueue();
+    });
+  });
+}
+
 function openIntakeModal() {
-  // Lock body scroll so resting palm doesn't move the page behind the modal
   document.body.style.overflow = "hidden";
   document.body.style.touchAction = "none";
   $("#intake-modal-backdrop").classList.remove("hidden");
@@ -1241,40 +1542,55 @@ function openIntakeModal() {
   $("#intake-reminders").value = "";
   $("#intake-modal-submit").disabled = false;
   $("#intake-modal-submit").textContent = "Save notes";
-  // Populate group datalist from known facets
+  // Populate group datalist
   const dl = $("#intake-group-list");
   dl.innerHTML = "";
-  const groups = state.facets?.groups || [];
-  groups.forEach((g) => {
+  (state.facets?.groups || []).forEach((g) => {
     const opt = document.createElement("option");
     opt.value = g;
     dl.appendChild(opt);
   });
-  requestAnimationFrame(() => $("#intake-scribble").focus());
+  // Reset to canvas mode
+  _intakeSetMode("canvas");
+  _intakeDetections = [];
+  $("#intake-review-queue").classList.add("hidden");
+  requestAnimationFrame(() => _initIntakeCanvas());
 }
 
 function closeIntakeModal() {
   $("#intake-modal-backdrop").classList.add("hidden");
   $("#intake-modal-backdrop").classList.remove("intake-open");
-  // Restore body scroll
   document.body.style.overflow = "";
   document.body.style.touchAction = "";
 }
 
-
 async function _intakeSaveNotes() {
-  const body = $("#intake-scribble").value.trim();
+  const isCanvas = _intakeCanvasMode;
+  const confirmedItems = _intakeDetections.filter((d) => d.confirmed && d.text.trim());
+  const body = isCanvas ? "" : $("#intake-scribble").value.trim();
   const actionItems = $("#intake-action-items").value.trim();
   const reminders = $("#intake-reminders").value.trim();
-  if (!body && !actionItems && !reminders) {
-    alert("Nothing to save — add some notes or tasks first.");
+
+  const hasCanvasContent = isCanvas && _intakeStrokes.length > 0;
+  const hasTextContent = body || actionItems || reminders;
+  const hasDetections = confirmedItems.length > 0;
+
+  if (!hasCanvasContent && !hasTextContent && !hasDetections) {
+    alert("Nothing to save — draw some notes or add tasks first.");
     return;
   }
+
+  let canvasImage = null;
+  if (isCanvas && hasCanvasContent) {
+    canvasImage = _intakeCanvasEl().toDataURL("image/png");
+  }
+
   const btn = $("#intake-modal-submit");
   btn.disabled = true;
   btn.textContent = "Saving…";
   const resultEl = $("#intake-result");
   resultEl.className = "intake-result hidden";
+
   try {
     const res = await fetch("/api/notes/intake", {
       method: "POST",
@@ -1287,6 +1603,8 @@ async function _intakeSaveNotes() {
         body,
         action_items: actionItems,
         reminders,
+        canvas_image: canvasImage,
+        confirmed_items: hasDetections ? confirmedItems.map((d) => ({ type: d.type, text: d.text.trim() })) : null,
       }),
     });
     const data = await res.json();
@@ -2362,6 +2680,31 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#intake-modal-cancel").addEventListener("click", closeIntakeModal);
   // No backdrop-tap-to-close: too easy to accidentally dismiss with a resting palm on iPad
   $("#intake-modal-submit").addEventListener("click", submitIntake);
+
+  // Canvas toolbar
+  $("#intake-tool-pen").addEventListener("click", () => _intakeSetTool("pen"));
+  $("#intake-tool-eraser").addEventListener("click", () => _intakeSetTool("eraser"));
+  $("#intake-undo").addEventListener("click", _intakeUndo);
+  $("#intake-clear").addEventListener("click", _intakeClearCanvas);
+  $("#intake-scan").addEventListener("click", _intakeScan);
+
+  // Mode tabs
+  $("#intake-mode-canvas").addEventListener("click", () => _intakeSetMode("canvas"));
+  $("#intake-mode-text").addEventListener("click", () => _intakeSetMode("text"));
+
+  // Review queue clear-all
+  $("#review-queue-clear").addEventListener("click", () => {
+    _intakeDetections = [];
+    _renderReviewQueue();
+  });
+
+  // Canvas pointer events (attached via delegation to survive re-init)
+  const intakeCanvas = $("#intake-canvas");
+  intakeCanvas.addEventListener("pointerdown", _intakePointerDown);
+  intakeCanvas.addEventListener("pointermove", _intakePointerMove);
+  intakeCanvas.addEventListener("pointerup", _intakePointerUp);
+  intakeCanvas.addEventListener("pointercancel", _intakePointerUp);
+  intakeCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
   // Import modal
   $("#import-modal-close").addEventListener("click",  closeImportModal);
   $("#import-modal-cancel").addEventListener("click", closeImportModal);
