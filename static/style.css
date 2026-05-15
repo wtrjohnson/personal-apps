@@ -3052,7 +3052,7 @@ table.groups tr:last-child td { border-bottom: none; }
   border: 1px solid var(--border);
   margin-bottom: 16px;
   display: block;
-  cursor: zoom-in;
+  cursor: pointer;
 }
 
 /* Fullscreen canvas overlay */

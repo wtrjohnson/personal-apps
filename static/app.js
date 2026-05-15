@@ -998,6 +998,8 @@ function renderDetail(m) {
     </div>
     <div class="body">${m.body_html}</div>
   `;
+  const ci = $("#detail .canvas-note-image");
+  if (ci) ci.addEventListener("click", () => _openCanvasFullscreen(ci.src));
 }
 
 // Delete note handler (delegated from #detail)
@@ -2811,7 +2813,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 // --- Canvas fullscreen ---
-(function () {
+const _openCanvasFullscreen = (function () {
   const overlay = $("#canvas-fullscreen-overlay");
   const img = $("#canvas-fullscreen-img");
 
@@ -2825,11 +2827,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     img.src = "";
     document.body.style.overflow = "";
   }
-
-  document.addEventListener("click", (e) => {
-    const ci = e.target.closest(".canvas-note-image");
-    if (ci) openFullscreen(ci.src);
-  });
 
   $("#canvas-fullscreen-close").addEventListener("click", closeFullscreen);
 
@@ -2845,4 +2842,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !overlay.classList.contains("hidden")) closeFullscreen();
   });
+
+  return openFullscreen;
 })();
