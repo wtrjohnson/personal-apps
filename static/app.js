@@ -1365,22 +1365,37 @@ function _intakeSetSize(size) {
 
 function _extractCallouts(text) {
   const items = [];
+  const _hasDue = (s) => /\bdue[:\s]/i.test(s) || /\bdeadline[:\s]/i.test(s);
+
   for (const rawLine of text.split("\n")) {
     const line = rawLine.trim();
     if (!line) continue;
-    if (/^(\[\s*[xX ]?\s*\]|□|☐)\s*/.test(line)) {
-      items.push({ type: "task", text: line.replace(/^(\[\s*[xX ]?\s*\]|□|☐)\s*/, "").trim() });
-    } else if (/^!+\s+/.test(line)) {
-      items.push({ type: "important", text: line.replace(/^!+\s+/, "").trim() });
-    } else if (/^\?\s+/.test(line)) {
-      items.push({ type: "followup", text: line.replace(/^\?\s+/, "").trim() });
-    } else if (/\bdue[:\s]/i.test(line) || /\bdeadline[:\s]/i.test(line)) {
+
+    if (/^(\[.*?\]|□|☐)\s*/.test(line)) {
+      const t = line.replace(/^(\[.*?\]|□|☐)\s*/, "").trim();
+      if (t) {
+        items.push({ type: "task", text: t });
+        if (_hasDue(t)) items.push({ type: "deadline", text: t });
+      }
+    } else if (/^!+\s*\S/.test(line)) {
+      const t = line.replace(/^!+\s*/, "").trim();
+      if (t) {
+        items.push({ type: "important", text: t });
+        if (_hasDue(t)) items.push({ type: "deadline", text: t });
+      }
+    } else if (/^\?+\s*\S/.test(line)) {
+      const t = line.replace(/^\?+\s*/, "").trim();
+      if (t) {
+        items.push({ type: "followup", text: t });
+        if (_hasDue(t)) items.push({ type: "deadline", text: t });
+      }
+    } else if (_hasDue(line)) {
       items.push({ type: "deadline", text: line });
     } else if (/^@([A-Za-z]\w*)/.test(line)) {
       items.push({ type: "person", text: line.replace(/^@/, "").trim() });
     }
   }
-  return items.filter((i) => i.text);
+  return items;
 }
 
 async function _intakeScan() {
@@ -1478,8 +1493,6 @@ function openIntakeModal() {
   }
   $("#intake-result").className = "intake-result hidden";
   $("#intake-result").innerHTML = "";
-  $("#intake-action-items").value = "";
-  $("#intake-reminders").value = "";
   $("#intake-modal-submit").disabled = false;
   $("#intake-modal-submit").textContent = "Save notes";
   // Populate group datalist
@@ -1507,12 +1520,10 @@ function closeIntakeModal() {
 
 async function _intakeSaveNotes() {
   const transcription = (_intakeScanResult?.text || "").trim();
-  const actionItems = $("#intake-action-items").value.trim();
-  const reminders = $("#intake-reminders").value.trim();
 
   const hasCanvasContent = _intakeStrokes.length > 0;
 
-  if (!hasCanvasContent && !transcription && !actionItems && !reminders) {
+  if (!hasCanvasContent && !transcription && !_intakeScanResult) {
     alert("Nothing to save — draw some notes or add tasks first.");
     return;
   }
@@ -1538,8 +1549,8 @@ async function _intakeSaveNotes() {
         date: $("#intake-date").value,
         attendees: $("#intake-attendees").value.trim(),
         body: transcription,
-        action_items: actionItems,
-        reminders,
+        action_items: "",
+        reminders: "",
         canvas_image: canvasImage,
         confirmed_items: _intakeScanResult
           ? _intakeScanResult.items.filter((i) => i.accepted).map((i) => ({ type: i.type, text: i.text }))
