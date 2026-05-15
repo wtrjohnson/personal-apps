@@ -1536,21 +1536,83 @@ function _renderScanResults() {
 }
 
 // --- Business card scanning ---
-function _extractCardFields(text) {
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  const emailRe = /[\w.+-]+@[\w.-]+\.[a-z]{2,}/i;
-  const phoneRe = /(\+?[\d][\d\s().+-]{7,}\d)/;
-  const urlRe = /https?:\/\/[^\s]+|www\.[^\s]+/i;
+function _extractCardFields(rawText) {
+  // Strip label prefixes like "Tel:", "Email:", "Mobile:", etc. from a line
+  function stripLabel(line) {
+    return line.replace(/^\s*(?:tel|telephone|phone|mobile|cell|fax|e-?mail|email|e|web|url|website)[\s:.-]+/i, "").trim();
+  }
 
-  const email = (text.match(emailRe) || [])[0] || "";
-  const phone = (text.match(phoneRe) || [])[0] || "";
+  const EMAIL_RE = /[\w.+-]+@[\w.-]+\.[a-z]{2,}/i;
+  // Handles US (555-123-4567, (555) 123 4567), intl (+44 20 1234 5678), etc.
+  const PHONE_RE = /(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}|\+\d[\d\s().+-]{6,}\d|\b\d{5,}[\d\s().+-]{2,}\d/;
+  const URL_RE = /https?:\/\/[^\s]+|www\.[^\s]+/i;
+  const TITLE_KW = /\b(director|manager|engineer|developer|designer|analyst|consultant|president|vice[\s-]president|vp|ceo|cto|cfo|coo|chief|officer|associate|senior|junior|lead|head|principal|founder|owner|partner|coordinator|specialist|advisor|executive|architect|scientist|researcher|professor|dr\.?)\b/i;
+  const COMPANY_KW = /\b(inc\.?|llc\.?|corp\.?|ltd\.?|co\.|company|group|associates|solutions|services|systems|technologies|tech|labs?|studios?|agency|consulting|enterprises|holdings|ventures|partners|international|global)\b/i;
+  // Name: 2+ capitalized words, only letters/hyphens/apostrophes/spaces, optional middle initial
+  const NAME_RE = /^[A-ZÀ-Ö][a-zA-ZÀ-ÿ'-]+(?:\s+[A-Z]\.)?(?:\s+[A-ZÀ-Ö][a-zA-ZÀ-ÿ'-]+)+$/;
 
-  const remaining = lines.filter((l) =>
-    !emailRe.test(l) && !phoneRe.test(l) && !urlRe.test(l) && l.length > 1
-  );
-  const name = remaining[0] || "";
-  const company = remaining[1] || "";
-  const title = remaining[2] || "";
+  const lines = rawText.split("\n").map((l) => l.trim()).filter((l) => l.length > 1);
+  const skip = new Set();
+  let email = "", phone = "";
+
+  // Email: any line containing a valid email address (@ with domain)
+  for (let i = 0; i < lines.length; i++) {
+    const m = stripLabel(lines[i]).match(EMAIL_RE);
+    if (m && !email) { email = m[0]; skip.add(i); }
+  }
+  // Fallback: any token with @ (catches malformed OCR output)
+  if (!email) {
+    for (let i = 0; i < lines.length; i++) {
+      if (!skip.has(i) && lines[i].includes("@") && !lines[i].startsWith("@")) {
+        email = stripLabel(lines[i]); skip.add(i); break;
+      }
+    }
+  }
+
+  // Phone: structured phone pattern; also catches lines with label prefix
+  for (let i = 0; i < lines.length; i++) {
+    if (skip.has(i)) continue;
+    const m = stripLabel(lines[i]).match(PHONE_RE);
+    if (m && !phone) { phone = m[0].trim(); skip.add(i); }
+  }
+
+  // Skip URLs and very short fragments
+  for (let i = 0; i < lines.length; i++) {
+    if (!skip.has(i) && (URL_RE.test(lines[i]) || lines[i].length < 2)) skip.add(i);
+  }
+
+  const rest = lines.filter((_, i) => !skip.has(i));
+  let name = "", company = "", title = "";
+
+  // Name: looks like a person's name (capitalized words, no job keywords)
+  for (const line of rest) {
+    if (!name && NAME_RE.test(line) && !TITLE_KW.test(line) && !COMPANY_KW.test(line)) {
+      name = line; break;
+    }
+  }
+
+  // Title: line containing job title keywords
+  for (const line of rest) {
+    if (line === name) continue;
+    if (!title && TITLE_KW.test(line)) { title = line; break; }
+  }
+
+  // Company: has company-type keywords, or is all-caps short line (common for brand names)
+  for (const line of rest) {
+    if (line === name || line === title) continue;
+    if (!company && (COMPANY_KW.test(line) || /^[A-Z\s&.,+'-]{3,}$/.test(line))) {
+      company = line; break;
+    }
+  }
+
+  // Fallbacks: fill any still-empty fields with leftover lines, in order
+  for (const line of rest) {
+    if (line === name || line === title || line === company) continue;
+    if (!name) { name = line; continue; }
+    if (!company) { company = line; continue; }
+    if (!title) { title = line; }
+  }
+
   return { name, company, title, email, phone: phone.replace(/\s+/g, " ").trim() };
 }
 
