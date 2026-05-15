@@ -739,13 +739,15 @@
           </div>
           <canvas id="intake-canvas" class="intake-canvas"></canvas>
         </div>
-        <!-- Scan review queue -->
+        <!-- Scan result -->
         <div id="intake-review-queue" class="hidden">
-          <div class="review-queue-header">
-            <span id="review-queue-summary" class="review-queue-summary"></span>
-            <button id="review-queue-clear" class="secondary-btn-sm">Clear all</button>
+          <div class="ocr-result-header">
+            <span class="ocr-result-label">Recognized text — edit before saving</span>
+            <button id="review-queue-clear" class="secondary-btn-sm">Clear</button>
           </div>
-          <div id="review-queue-items"></div>
+          <textarea id="intake-ocr-text" class="intake-textarea ocr-textarea" rows="4"
+            placeholder="Scan results appear here…"
+            autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
         </div>
         <!-- Action items and reminders -->
         <div id="intake-review" class="intake-review-section">
