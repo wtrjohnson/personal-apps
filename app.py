@@ -893,6 +893,16 @@ def api_meeting(mid: str):
     return jsonify(m.full())
 
 
+@app.route("/api/meetings/<mid>", methods=["DELETE"])
+def api_meeting_delete(mid: str):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM meetings WHERE id = %s", (mid,))
+            if cur.rowcount == 0:
+                return jsonify({"ok": False, "error": "Not found"}), 404
+    return jsonify({"ok": True})
+
+
 @app.route("/api/groups")
 def api_groups():
     by_group: Dict[str, List[Meeting]] = {}
