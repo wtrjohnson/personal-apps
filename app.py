@@ -1598,7 +1598,59 @@ def api_import_notes():
 
 
 # --------------------------------------------------
-# HANDWRITING INTAKE (local Tesseract OCR via frontend, text assembly backend)
+# CLAUDE VISION TRANSCRIPTION
+# --------------------------------------------------
+
+@app.route("/api/notes/transcribe", methods=["POST"])
+def api_notes_transcribe():
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return jsonify({"ok": False, "error": "Transcription not configured"}), 503
+
+    data = request.get_json(force=True, silent=True) or {}
+    image_data = data.get("image", "")
+    if not image_data:
+        return jsonify({"ok": False, "error": "image required"}), 400
+
+    if "," in image_data:
+        image_data = image_data.split(",", 1)[1]
+
+    prompt = (
+        "Transcribe all handwritten text from this image exactly as written. "
+        "Preserve line breaks — output one line of text per line of handwriting. "
+        "Return only the transcribed text, nothing else."
+    )
+
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_data,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        text = message.content[0].text.strip()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Transcription failed: {e}"}), 500
+
+    return jsonify({"ok": True, "text": text})
+
+
+# --------------------------------------------------
+# HANDWRITING INTAKE (canvas image + confirmed items → meeting note)
 # --------------------------------------------------
 
 @app.route("/api/notes/intake", methods=["POST"])

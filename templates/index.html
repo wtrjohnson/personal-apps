@@ -741,13 +741,15 @@
         </div>
         <!-- Scan result -->
         <div id="intake-review-queue" class="hidden">
-          <div class="ocr-result-header">
-            <span class="ocr-result-label">Recognized text — edit before saving</span>
+          <div class="scan-result-header">
+            <span class="scan-result-summary" id="scan-result-summary"></span>
             <button id="review-queue-clear" class="secondary-btn-sm">Clear</button>
           </div>
-          <textarea id="intake-ocr-text" class="intake-textarea ocr-textarea" rows="4"
-            placeholder="Scan results appear here…"
-            autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+          <div id="scan-result-items"></div>
+          <details class="scan-transcription-details" id="scan-transcription-details">
+            <summary>Show full transcription</summary>
+            <pre id="scan-transcription-text"></pre>
+          </details>
         </div>
         <!-- Action items and reminders -->
         <div id="intake-review" class="intake-review-section">
