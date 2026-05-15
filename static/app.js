@@ -1230,7 +1230,8 @@ async function submitImport() {
 let _intakeStrokes = [];         // [{color, width, points: [{x,y}]}]
 let _intakeCurrentStroke = null;
 let _intakeTool = "pen";
-let _intakeCanvasMode = true;    // true = canvas, false = text
+let _intakePenColor = "#111111";
+let _intakePenSize = 3;
 let _intakeDetections = [];      // [{type, text, confirmed}]
 
 function _intakeCanvasEl() { return $("#intake-canvas"); }
@@ -1286,11 +1287,12 @@ function _intakePointerPos(e) {
 
 function _intakePointerDown(e) {
   e.preventDefault();
+  _intakeCanvasEl().setPointerCapture(e.pointerId);
   const pos = _intakePointerPos(e);
   const isPen = _intakeTool === "pen";
   _intakeCurrentStroke = {
-    color: isPen ? "#111111" : "#ffffff",
-    width: isPen ? (e.pointerType === "pen" ? Math.max(1.5, e.pressure * 4) : 2) : 18,
+    color: isPen ? _intakePenColor : "#ffffff",
+    width: isPen ? _intakePenSize : 24,
     points: [pos],
   };
   const ctx = _intakeCtx();
@@ -1347,15 +1349,18 @@ function _intakeSetTool(tool) {
   $("#intake-tool-eraser").classList.toggle("active", tool === "eraser");
 }
 
-function _intakeSetMode(mode) {
-  _intakeCanvasMode = mode === "canvas";
-  $("#intake-mode-canvas").classList.toggle("active", _intakeCanvasMode);
-  $("#intake-mode-text").classList.toggle("active", !_intakeCanvasMode);
-  $("#intake-canvas-mode").classList.toggle("hidden", !_intakeCanvasMode);
-  $("#intake-text-mode").classList.toggle("hidden", _intakeCanvasMode);
-  if (!_intakeCanvasMode) {
-    requestAnimationFrame(() => $("#intake-scribble").focus());
-  }
+function _intakeSetColor(color) {
+  _intakePenColor = color;
+  document.querySelectorAll(".color-swatch-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.color === color);
+  });
+}
+
+function _intakeSetSize(size) {
+  _intakePenSize = parseFloat(size);
+  document.querySelectorAll(".pen-size-btn").forEach((btn) => {
+    btn.classList.toggle("active", parseFloat(btn.dataset.size) === _intakePenSize);
+  });
 }
 
 // --- Tesseract lazy loader ---
@@ -1474,7 +1479,14 @@ async function _intakeScan() {
   _intakeDetections = detections;
   _renderReviewQueue();
   scanBtn.disabled = false;
-  scanBtn.textContent = "Re-scan";
+  if (detections.length === 0) {
+    scanBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> ' + (words.length > 0 ? "Nothing detected" : "No text found");
+    setTimeout(() => {
+      scanBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Scan';
+    }, 3000);
+  } else {
+    scanBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Re-scan';
+  }
 }
 
 function _renderReviewQueue() {
@@ -1537,7 +1549,6 @@ function openIntakeModal() {
   }
   $("#intake-result").className = "intake-result hidden";
   $("#intake-result").innerHTML = "";
-  $("#intake-scribble").value = "";
   $("#intake-action-items").value = "";
   $("#intake-reminders").value = "";
   $("#intake-modal-submit").disabled = false;
@@ -1550,8 +1561,7 @@ function openIntakeModal() {
     opt.value = g;
     dl.appendChild(opt);
   });
-  // Reset to canvas mode
-  _intakeSetMode("canvas");
+  _intakeSetTool("pen");
   _intakeDetections = [];
   $("#intake-review-queue").classList.add("hidden");
   requestAnimationFrame(() => _initIntakeCanvas());
@@ -1565,23 +1575,19 @@ function closeIntakeModal() {
 }
 
 async function _intakeSaveNotes() {
-  const isCanvas = _intakeCanvasMode;
   const confirmedItems = _intakeDetections.filter((d) => d.confirmed && d.text.trim());
-  const body = isCanvas ? "" : $("#intake-scribble").value.trim();
   const actionItems = $("#intake-action-items").value.trim();
   const reminders = $("#intake-reminders").value.trim();
 
-  const hasCanvasContent = isCanvas && _intakeStrokes.length > 0;
-  const hasTextContent = body || actionItems || reminders;
-  const hasDetections = confirmedItems.length > 0;
+  const hasCanvasContent = _intakeStrokes.length > 0;
 
-  if (!hasCanvasContent && !hasTextContent && !hasDetections) {
+  if (!hasCanvasContent && !actionItems && !reminders && confirmedItems.length === 0) {
     alert("Nothing to save — draw some notes or add tasks first.");
     return;
   }
 
   let canvasImage = null;
-  if (isCanvas && hasCanvasContent) {
+  if (hasCanvasContent) {
     canvasImage = _intakeCanvasEl().toDataURL("image/png");
   }
 
@@ -1600,11 +1606,11 @@ async function _intakeSaveNotes() {
         topic: $("#intake-topic").value.trim(),
         date: $("#intake-date").value,
         attendees: $("#intake-attendees").value.trim(),
-        body,
+        body: "",
         action_items: actionItems,
         reminders,
         canvas_image: canvasImage,
-        confirmed_items: hasDetections ? confirmedItems.map((d) => ({ type: d.type, text: d.text.trim() })) : null,
+        confirmed_items: confirmedItems.length > 0 ? confirmedItems.map((d) => ({ type: d.type, text: d.text.trim() })) : null,
       }),
     });
     const data = await res.json();
@@ -2687,10 +2693,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#intake-undo").addEventListener("click", _intakeUndo);
   $("#intake-clear").addEventListener("click", _intakeClearCanvas);
   $("#intake-scan").addEventListener("click", _intakeScan);
-
-  // Mode tabs
-  $("#intake-mode-canvas").addEventListener("click", () => _intakeSetMode("canvas"));
-  $("#intake-mode-text").addEventListener("click", () => _intakeSetMode("text"));
+  document.querySelectorAll(".pen-size-btn").forEach((btn) => {
+    btn.addEventListener("click", () => _intakeSetSize(btn.dataset.size));
+  });
+  document.querySelectorAll(".color-swatch-btn").forEach((btn) => {
+    btn.addEventListener("click", () => _intakeSetColor(btn.dataset.color));
+  });
 
   // Review queue clear-all
   $("#review-queue-clear").addEventListener("click", () => {
@@ -2704,6 +2712,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   intakeCanvas.addEventListener("pointermove", _intakePointerMove);
   intakeCanvas.addEventListener("pointerup", _intakePointerUp);
   intakeCanvas.addEventListener("pointercancel", _intakePointerUp);
+  intakeCanvas.addEventListener("lostpointercapture", _intakePointerUp);
   intakeCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
   // Import modal
   $("#import-modal-close").addEventListener("click",  closeImportModal);

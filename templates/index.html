@@ -692,35 +692,52 @@
             <input id="intake-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off" inputmode="text">
           </div>
         </div>
-        <!-- Mode toggle -->
-        <div class="intake-mode-toggle">
-          <button class="mode-tab active" id="intake-mode-canvas">Canvas</button>
-          <button class="mode-tab" id="intake-mode-text">Text</button>
-        </div>
-        <!-- Canvas mode -->
+        <!-- Canvas -->
         <div id="intake-canvas-mode">
           <div class="intake-toolbar">
-            <button id="intake-tool-pen" class="tool-btn active" title="Pen">Pen</button>
-            <button id="intake-tool-eraser" class="tool-btn" title="Eraser">Erase</button>
-            <button id="intake-undo" class="tool-btn" title="Undo">Undo</button>
-            <button id="intake-clear" class="tool-btn" title="Clear">Clear</button>
+            <!-- Tool -->
+            <div class="toolbar-group">
+              <button id="intake-tool-pen" class="tool-icon-btn active" title="Pen">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+              </button>
+              <button id="intake-tool-eraser" class="tool-icon-btn" title="Eraser">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>
+              </button>
+            </div>
+            <div class="toolbar-divider"></div>
+            <!-- Size -->
+            <div class="toolbar-group" id="intake-size-btns">
+              <button class="pen-size-btn" data-size="1.5" title="Fine"><span class="pen-size-dot" style="width:4px;height:4px"></span></button>
+              <button class="pen-size-btn active" data-size="3" title="Medium"><span class="pen-size-dot" style="width:7px;height:7px"></span></button>
+              <button class="pen-size-btn" data-size="6" title="Thick"><span class="pen-size-dot" style="width:11px;height:11px"></span></button>
+              <button class="pen-size-btn" data-size="14" title="Brush"><span class="pen-size-dot" style="width:17px;height:17px"></span></button>
+            </div>
+            <div class="toolbar-divider"></div>
+            <!-- Color -->
+            <div class="toolbar-group" id="intake-color-btns">
+              <button class="color-swatch-btn active" data-color="#111111" title="Black" style="background:#111111"></button>
+              <button class="color-swatch-btn" data-color="#1a4fa0" title="Blue" style="background:#1a4fa0"></button>
+              <button class="color-swatch-btn" data-color="#d92b2b" title="Red" style="background:#d92b2b"></button>
+              <button class="color-swatch-btn" data-color="#1a8a3a" title="Green" style="background:#1a8a3a"></button>
+              <button class="color-swatch-btn" data-color="#d96c00" title="Orange" style="background:#d96c00"></button>
+              <button class="color-swatch-btn" data-color="#7c2fa0" title="Purple" style="background:#7c2fa0"></button>
+            </div>
             <span class="toolbar-spacer"></span>
-            <button id="intake-scan" class="primary-btn-sm">Scan</button>
+            <!-- Actions -->
+            <div class="toolbar-group">
+              <button id="intake-undo" class="tool-icon-btn" title="Undo">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+              </button>
+              <button id="intake-clear" class="tool-icon-btn" title="Clear canvas">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              </button>
+              <button id="intake-scan" class="scan-action-btn">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                Scan
+              </button>
+            </div>
           </div>
           <canvas id="intake-canvas" class="intake-canvas"></canvas>
-        </div>
-        <!-- Text mode (fallback for desktop / keyboard) -->
-        <div id="intake-text-mode" class="hidden intake-scribble-wrap">
-          <textarea
-            id="intake-scribble"
-            class="intake-scribble"
-            placeholder="Write your notes here — use Apple Pencil with Scribble, or type…"
-            autocomplete="off"
-            autocorrect="on"
-            autocapitalize="sentences"
-            spellcheck="true"
-            rows="8"
-          ></textarea>
         </div>
         <!-- Scan review queue -->
         <div id="intake-review-queue" class="hidden">
