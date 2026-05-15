@@ -1232,7 +1232,7 @@ let _intakeCurrentStroke = null;
 let _intakeTool = "pen";
 let _intakePenColor = "#111111";
 let _intakePenSize = 3;
-let _intakeOcrText = "";
+let _intakeScanResult = null; // {text, items: [{type, text, accepted}]}
 
 function _intakeCanvasEl() { return $("#intake-canvas"); }
 function _intakeCtx() { return _intakeCanvasEl().getContext("2d"); }
@@ -1338,7 +1338,7 @@ function _intakeUndo() {
 
 function _intakeClearCanvas() {
   _intakeStrokes = [];
-  _intakeOcrText = "";
+  _intakeScanResult = null;
   _intakeRedraw();
   $("#intake-review-queue").classList.add("hidden");
 }
@@ -1363,16 +1363,24 @@ function _intakeSetSize(size) {
   });
 }
 
-// --- Tesseract lazy loader ---
-async function _loadTesseract() {
-  if (window.Tesseract) return;
-  await new Promise((resolve, reject) => {
-    const s = document.createElement("script");
-    s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js";
-    s.onload = resolve;
-    s.onerror = () => reject(new Error("Failed to load Tesseract.js"));
-    document.head.appendChild(s);
-  });
+function _extractCallouts(text) {
+  const items = [];
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (/^(\[\s*[xX ]?\s*\]|□|☐)\s*/.test(line)) {
+      items.push({ type: "task", text: line.replace(/^(\[\s*[xX ]?\s*\]|□|☐)\s*/, "").trim() });
+    } else if (/^!+\s+/.test(line)) {
+      items.push({ type: "important", text: line.replace(/^!+\s+/, "").trim() });
+    } else if (/^\?\s+/.test(line)) {
+      items.push({ type: "followup", text: line.replace(/^\?\s+/, "").trim() });
+    } else if (/\bdue[:\s]/i.test(line) || /\bdeadline[:\s]/i.test(line)) {
+      items.push({ type: "deadline", text: line });
+    } else if (/^@([A-Za-z]\w*)/.test(line)) {
+      items.push({ type: "person", text: line.replace(/^@/, "").trim() });
+    }
+  }
+  return items.filter((i) => i.text);
 }
 
 async function _intakeScan() {
@@ -1386,51 +1394,74 @@ async function _intakeScan() {
   }
 
   scanBtn.disabled = true;
-  scanBtn.innerHTML = `${scanSvg} Scanning…`;
+  scanBtn.innerHTML = `${scanSvg} Transcribing…`;
 
   try {
-    await _loadTesseract();
-  } catch (e) {
+    const res = await fetch("/api/notes/transcribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: canvas.toDataURL("image/png") }),
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      scanBtn.innerHTML = `${scanSvg} ${escapeHtml(data.error || "Failed")}`;
+      setTimeout(() => { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Scan`; }, 3000);
+      return;
+    }
+
+    const items = _extractCallouts(data.text || "").map((item) => ({ ...item, accepted: true }));
+    _intakeScanResult = { text: data.text || "", items };
+    _renderScanResults();
     scanBtn.disabled = false;
-    scanBtn.innerHTML = `${scanSvg} Scan`;
-    alert("Couldn't load OCR engine. Check your internet connection.");
-    return;
-  }
-
-  const dataUrl = canvas.toDataURL("image/png");
-  let data;
-  try {
-    ({ data } = await Tesseract.recognize(dataUrl, "eng", { logger: () => {} }));
-  } catch (e) {
-    scanBtn.disabled = false;
-    scanBtn.innerHTML = `${scanSvg} Scan`;
-    alert("OCR failed: " + e.message);
-    return;
-  }
-
-  // Reconstruct lines from Tesseract line segments, sorted top-to-bottom
-  const lines = (data.lines || [])
-    .filter((l) => l.text.trim())
-    .sort((a, b) => a.bbox.y0 - b.bbox.y0);
-  _intakeOcrText = lines.map((l) => l.text.trim()).join("\n");
-
-  _renderOcrResult();
-  scanBtn.disabled = false;
-  if (_intakeOcrText) {
     scanBtn.innerHTML = `${scanSvg} Re-scan`;
-  } else {
-    scanBtn.innerHTML = `${scanSvg} No text found`;
-    setTimeout(() => { scanBtn.innerHTML = `${scanSvg} Scan`; }, 3000);
+  } catch (err) {
+    scanBtn.innerHTML = `${scanSvg} Error`;
+    setTimeout(() => { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Scan`; }, 3000);
   }
 }
 
-function _renderOcrResult() {
+const _SCAN_ICONS = {
+  task:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>',
+  important: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  followup:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  deadline:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+  person:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+};
+const _SCAN_LABELS = { task: "Task", important: "Important", followup: "Follow-up", deadline: "Deadline", person: "Person" };
+
+function _renderScanResults() {
   const queueEl = $("#intake-review-queue");
-  if (!_intakeOcrText) {
-    queueEl.classList.add("hidden");
-    return;
-  }
-  $("#intake-ocr-text").value = _intakeOcrText;
+  if (!_intakeScanResult) { queueEl.classList.add("hidden"); return; }
+
+  const { text, items } = _intakeScanResult;
+  const active = items.filter((i) => i.accepted);
+
+  $("#scan-result-summary").textContent = items.length === 0
+    ? "Transcribed — no callouts detected"
+    : `${active.length} of ${items.length} item${items.length !== 1 ? "s" : ""} kept`;
+
+  $("#scan-result-items").innerHTML = items.map((item, idx) => `
+    <div class="scan-item ${item.accepted ? "scan-item--accepted" : "scan-item--dismissed"}">
+      <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
+      <div class="scan-item-body">
+        <div class="scan-item-type">${escapeHtml(_SCAN_LABELS[item.type] || item.type)}</div>
+        <div class="scan-item-text">${escapeHtml(item.text)}</div>
+      </div>
+      <button class="scan-item-dismiss" data-idx="${idx}" title="${item.accepted ? "Remove" : "Restore"}">
+        ${item.accepted ? "×" : "↩"}
+      </button>
+    </div>`).join("");
+
+  $("#scan-result-items").querySelectorAll(".scan-item-dismiss").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = +btn.dataset.idx;
+      _intakeScanResult.items[idx].accepted = !_intakeScanResult.items[idx].accepted;
+      _renderScanResults();
+    });
+  });
+
+  $("#scan-transcription-text").textContent = text || "(empty)";
   queueEl.classList.remove("hidden");
 }
 
@@ -1460,7 +1491,7 @@ function openIntakeModal() {
     dl.appendChild(opt);
   });
   _intakeSetTool("pen");
-  _intakeOcrText = "";
+  _intakeScanResult = null;
   $("#intake-review-queue").classList.add("hidden");
   requestAnimationFrame(() => _initIntakeCanvas());
 }
@@ -1475,13 +1506,13 @@ function closeIntakeModal() {
 }
 
 async function _intakeSaveNotes() {
-  const ocrText = ($("#intake-ocr-text")?.value || "").trim();
+  const transcription = (_intakeScanResult?.text || "").trim();
   const actionItems = $("#intake-action-items").value.trim();
   const reminders = $("#intake-reminders").value.trim();
 
   const hasCanvasContent = _intakeStrokes.length > 0;
 
-  if (!hasCanvasContent && !ocrText && !actionItems && !reminders) {
+  if (!hasCanvasContent && !transcription && !actionItems && !reminders) {
     alert("Nothing to save — draw some notes or add tasks first.");
     return;
   }
@@ -1506,11 +1537,13 @@ async function _intakeSaveNotes() {
         topic: $("#intake-topic").value.trim(),
         date: $("#intake-date").value,
         attendees: $("#intake-attendees").value.trim(),
-        body: ocrText,
+        body: transcription,
         action_items: actionItems,
         reminders,
         canvas_image: canvasImage,
-        confirmed_items: null,
+        confirmed_items: _intakeScanResult
+          ? _intakeScanResult.items.filter((i) => i.accepted).map((i) => ({ type: i.type, text: i.text }))
+          : null,
       }),
     });
     const data = await res.json();
@@ -2600,10 +2633,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     btn.addEventListener("click", () => _intakeSetColor(btn.dataset.color));
   });
 
-  // OCR result clear
+  // Scan result clear
   $("#review-queue-clear").addEventListener("click", () => {
-    _intakeOcrText = "";
-    _renderOcrResult();
+    _intakeScanResult = null;
+    _renderScanResults();
   });
 
   // Canvas pointer + touch events
