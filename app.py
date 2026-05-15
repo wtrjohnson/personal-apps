@@ -1705,12 +1705,12 @@ def api_notes_intake():
 
     action_lines = [l.strip() for l in action_items_raw.splitlines() if l.strip()]
     if action_lines:
-        body_parts.append("\n## Action Items\n")
+        body_parts.append("\nAction Items:")
         body_parts.extend(f"- [ ] {line}" for line in action_lines)
 
     reminder_lines = [l.strip() for l in reminders_raw.splitlines() if l.strip()]
     if reminder_lines:
-        body_parts.append("\n## Reminders/Important\n")
+        body_parts.append("\nReminders/Important:")
         body_parts.extend(f"- [ ] {line}" for line in reminder_lines)
 
     body = "\n".join(body_parts)
