@@ -5,6 +5,7 @@
   <title>Notes</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
   <div class="app" id="app">
@@ -691,6 +692,29 @@
             <label for="intake-attendees">Attendees</label>
             <input id="intake-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off" inputmode="text">
           </div>
+        </div>
+        <!-- Business card scanner -->
+        <div id="card-scan-section">
+          <input type="file" id="card-photo-input" accept="image/*" capture="environment" style="display:none">
+          <button type="button" id="card-scan-btn" class="secondary-btn-sm">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            Scan Business Card
+          </button>
+          <div id="card-preview" class="hidden">
+            <div class="card-preview-header">
+              <span class="card-preview-label">Review extracted details</span>
+              <button type="button" id="card-preview-dismiss" class="card-preview-dismiss">✕</button>
+            </div>
+            <div class="card-fields">
+              <input id="card-field-name"    class="card-field" placeholder="Name" autocomplete="off">
+              <input id="card-field-company" class="card-field" placeholder="Company" autocomplete="off">
+              <input id="card-field-title"   class="card-field" placeholder="Title" autocomplete="off">
+              <input id="card-field-email"   class="card-field" placeholder="Email" autocomplete="off" type="email">
+              <input id="card-field-phone"   class="card-field" placeholder="Phone" autocomplete="off" type="tel">
+            </div>
+            <button type="button" id="card-save-btn" class="primary-btn-sm">Save Contact</button>
+          </div>
+          <div id="card-saved-contacts"></div>
         </div>
         <!-- Canvas -->
         <div id="intake-canvas-mode">
