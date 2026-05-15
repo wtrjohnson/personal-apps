@@ -1245,7 +1245,7 @@ const INTAKE_MAX_UNDO = 30;
 function _enterIntakeFocusMode() {
   _intakeFocusMode = true;
   $("#intake-modal-backdrop").classList.add("canvas-focus-mode");
-  requestAnimationFrame(() => _initIntakeCanvas());
+  requestAnimationFrame(() => _resizeIntakeCanvas());
 }
 
 function _exitIntakeFocusMode() {
@@ -1254,7 +1254,7 @@ function _exitIntakeFocusMode() {
   clearTimeout(_intakeFocusTapTimer);
   _intakeFocusTapTimer = null;
   $("#intake-modal-backdrop").classList.remove("canvas-focus-mode");
-  requestAnimationFrame(() => _initIntakeCanvas());
+  requestAnimationFrame(() => _resizeIntakeCanvas());
 }
 
 function openIntakeModal() {
@@ -1317,28 +1317,60 @@ function closeIntakeModal() {
   document.body.style.touchAction = "";
 }
 
-function _initIntakeCanvas() {
+function _intakeCanvasSize() {
   const canvas = $("#intake-canvas");
   const wrap = canvas.parentElement;
   const dpr = window.devicePixelRatio || 1;
   const w = wrap.clientWidth;
   let h;
   if (_intakeFocusMode) {
-    // Fill the flex-grown wrap; fall back to viewport minus toolbar if layout not resolved
     h = Math.max(280, wrap.clientHeight || window.innerHeight - 56);
   } else {
     const vh = window.innerHeight;
     h = Math.round(Math.max(280, Math.min(vh * 0.52, 700)));
   }
+  return { w, h, dpr };
+}
+
+function _initIntakeCanvas() {
+  const canvas = $("#intake-canvas");
+  const { w, h, dpr } = _intakeCanvasSize();
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
   canvas.style.width = w + "px";
   canvas.style.height = h + "px";
+  canvas.style.webkitUserSelect = "none";
+  canvas.style.userSelect = "none";
+  canvas.style.webkitTouchCallout = "none";
   const ctx = canvas.getContext("2d");
   ctx.scale(dpr, dpr);
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, w, h);
   _intakeUndoStack = [];
+}
+
+function _resizeIntakeCanvas() {
+  const canvas = $("#intake-canvas");
+  // Capture current drawing before resize clears it
+  const savedUrl = (canvas.width > 0 && canvas.height > 0) ? canvas.toDataURL() : null;
+  const { w, h, dpr } = _intakeCanvasSize();
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  canvas.style.webkitUserSelect = "none";
+  canvas.style.userSelect = "none";
+  canvas.style.webkitTouchCallout = "none";
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+  _intakeUndoStack = [];
+  if (savedUrl) {
+    const img = new Image();
+    img.onload = () => ctx.drawImage(img, 0, 0, w, h);
+    img.src = savedUrl;
+  }
 }
 
 function _intakeSaveUndo() {
@@ -1394,11 +1426,20 @@ function _intakeApplyStyle(ctx) {
 function _setupIntakeCanvasEvents() {
   const canvas = $("#intake-canvas");
 
-  // Prevent context menu on long-press (iOS long-press callout)
+  // Prevent context menu everywhere in the modal, not just on the canvas
+  $("#intake-modal-backdrop").addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  // Prevent iOS text selection callout on rapid Pencil strokes
+  canvas.addEventListener("selectstart", (e) => e.preventDefault());
+
+  // Prevent iOS touch events that can trigger callouts; Pencil uses pointer events and is unaffected
+  canvas.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
 
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    // Clear any browser selection immediately so iOS won't show callout
+    if (window.getSelection) window.getSelection().removeAllRanges();
     // Palm rejection: only draw with Pencil (pen) or mouse, ignore finger/palm (touch)
     if (e.pointerType === "touch") return;
 
