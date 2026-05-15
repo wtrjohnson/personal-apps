@@ -54,6 +54,9 @@ ALTER TABLE tasks
 ALTER TABLE tasks
   ADD COLUMN IF NOT EXISTS recurrence_rule JSONB DEFAULT NULL;
 
+ALTER TABLE meetings
+  ADD COLUMN IF NOT EXISTS canvas_image TEXT;
+
 -- Group alias map: raw group name → canonical display name.
 -- raw_name is stored lowercase-trimmed to match lookup behaviour.
 CREATE TABLE IF NOT EXISTS groups_map (

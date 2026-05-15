@@ -692,8 +692,25 @@
             <input id="intake-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off" inputmode="text">
           </div>
         </div>
-        <!-- Scribble writing area -->
-        <div class="intake-scribble-wrap">
+        <!-- Mode toggle -->
+        <div class="intake-mode-toggle">
+          <button class="mode-tab active" id="intake-mode-canvas">Canvas</button>
+          <button class="mode-tab" id="intake-mode-text">Text</button>
+        </div>
+        <!-- Canvas mode -->
+        <div id="intake-canvas-mode">
+          <div class="intake-toolbar">
+            <button id="intake-tool-pen" class="tool-btn active" title="Pen">Pen</button>
+            <button id="intake-tool-eraser" class="tool-btn" title="Eraser">Erase</button>
+            <button id="intake-undo" class="tool-btn" title="Undo">Undo</button>
+            <button id="intake-clear" class="tool-btn" title="Clear">Clear</button>
+            <span class="toolbar-spacer"></span>
+            <button id="intake-scan" class="primary-btn-sm">Scan</button>
+          </div>
+          <canvas id="intake-canvas" class="intake-canvas"></canvas>
+        </div>
+        <!-- Text mode (fallback for desktop / keyboard) -->
+        <div id="intake-text-mode" class="hidden intake-scribble-wrap">
           <textarea
             id="intake-scribble"
             class="intake-scribble"
@@ -704,6 +721,14 @@
             spellcheck="true"
             rows="8"
           ></textarea>
+        </div>
+        <!-- Scan review queue -->
+        <div id="intake-review-queue" class="hidden">
+          <div class="review-queue-header">
+            <span id="review-queue-summary" class="review-queue-summary"></span>
+            <button id="review-queue-clear" class="secondary-btn-sm">Clear all</button>
+          </div>
+          <div id="review-queue-items"></div>
         </div>
         <!-- Action items and reminders -->
         <div id="intake-review" class="intake-review-section">
