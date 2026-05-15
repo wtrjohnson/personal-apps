@@ -1232,7 +1232,7 @@ let _intakeCurrentStroke = null;
 let _intakeTool = "pen";
 let _intakePenColor = "#111111";
 let _intakePenSize = 3;
-let _intakeDetections = [];      // [{type, text, confirmed}]
+let _intakeOcrText = "";
 
 function _intakeCanvasEl() { return $("#intake-canvas"); }
 function _intakeCtx() { return _intakeCanvasEl().getContext("2d"); }
@@ -1338,7 +1338,7 @@ function _intakeUndo() {
 
 function _intakeClearCanvas() {
   _intakeStrokes = [];
-  _intakeDetections = [];
+  _intakeOcrText = "";
   _intakeRedraw();
   $("#intake-review-queue").classList.add("hidden");
 }
@@ -1375,51 +1375,10 @@ async function _loadTesseract() {
   });
 }
 
-// --- Marker patterns ---
-const MARKER_PATTERNS = [
-  { type: "task",      re: /^\[[\s_xX]*\]$|^□$|^☐$/ },
-  { type: "important", re: /^[!i][!1]$|^!!!*$/ },
-  { type: "followup",  re: /^\?$/ },
-  { type: "bill",      re: /^#[A-Za-z]{1,4}\d+/ },
-  { type: "person",    re: /^@[A-Za-z]/ },
-  { type: "deadline",  re: /^due[:\s]/i },
-];
-
-const MARKER_ICONS = {
-  task: "☐",
-  important: "!!",
-  followup: "?",
-  bill: "#",
-  person: "@",
-  deadline: "⏰",
-};
-
-const MARKER_LABELS = {
-  task: "Task",
-  important: "Note",
-  followup: "Follow-up",
-  bill: "Bill",
-  person: "Person",
-  deadline: "Deadline",
-};
-
-function _wordsOnSameLine(allWords, markerWord) {
-  const { x1: mx1, y0: my0, y1: my1 } = markerWord.bbox;
-  const mh = Math.max(1, my1 - my0);
-  return allWords
-    .filter((w) => {
-      if (w === markerWord) return false;
-      if (w.bbox.x0 <= mx1) return false;
-      const overlap = Math.min(my1, w.bbox.y1) - Math.max(my0, w.bbox.y0);
-      return overlap > mh * 0.35;
-    })
-    .sort((a, b) => a.bbox.x0 - b.bbox.x0);
-}
-
 async function _intakeScan() {
   const canvas = _intakeCanvasEl();
   const scanBtn = $("#intake-scan");
-  const queueEl = $("#intake-review-queue");
+  const scanSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>';
 
   if (_intakeStrokes.length === 0) {
     alert("Draw something on the canvas first, then tap Scan.");
@@ -1427,120 +1386,59 @@ async function _intakeScan() {
   }
 
   scanBtn.disabled = true;
-  scanBtn.textContent = "Scanning…";
+  scanBtn.innerHTML = `${scanSvg} Scanning…`;
 
   try {
     await _loadTesseract();
   } catch (e) {
     scanBtn.disabled = false;
-    scanBtn.textContent = "Scan";
+    scanBtn.innerHTML = `${scanSvg} Scan`;
     alert("Couldn't load OCR engine. Check your internet connection.");
     return;
   }
 
   const dataUrl = canvas.toDataURL("image/png");
-  let words;
+  let data;
   try {
-    const { data } = await Tesseract.recognize(dataUrl, "eng", { logger: () => {} });
-    words = data.words || [];
+    ({ data } = await Tesseract.recognize(dataUrl, "eng", { logger: () => {} }));
   } catch (e) {
     scanBtn.disabled = false;
-    scanBtn.textContent = "Scan";
+    scanBtn.innerHTML = `${scanSvg} Scan`;
     alert("OCR failed: " + e.message);
     return;
   }
 
-  const detections = [];
-  const usedWords = new Set();
+  // Reconstruct lines from Tesseract line segments, sorted top-to-bottom
+  const lines = (data.lines || [])
+    .filter((l) => l.text.trim())
+    .sort((a, b) => a.bbox.y0 - b.bbox.y0);
+  _intakeOcrText = lines.map((l) => l.text.trim()).join("\n");
 
-  for (let i = 0; i < words.length; i++) {
-    const w = words[i];
-    const text = w.text.trim();
-    if (!text || usedWords.has(w)) continue;
-
-    for (const { type, re } of MARKER_PATTERNS) {
-      if (!re.test(text)) continue;
-
-      usedWords.add(w);
-      const lineWords = _wordsOnSameLine(words, w).filter((lw) => !usedWords.has(lw));
-      lineWords.forEach((lw) => usedWords.add(lw));
-
-      let content = lineWords.map((lw) => lw.text).join(" ").trim();
-      // For bill and person markers the marker itself is part of the content
-      if (type === "bill" || type === "person") {
-        content = (text + " " + content).trim();
-      }
-
-      detections.push({ type, text: content, confirmed: true });
-      break;
-    }
-  }
-
-  _intakeDetections = detections;
-  _renderReviewQueue();
+  _renderOcrResult();
   scanBtn.disabled = false;
-  if (detections.length === 0) {
-    scanBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> ' + (words.length > 0 ? "Nothing detected" : "No text found");
-    setTimeout(() => {
-      scanBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Scan';
-    }, 3000);
+  if (_intakeOcrText) {
+    scanBtn.innerHTML = `${scanSvg} Re-scan`;
   } else {
-    scanBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Re-scan';
+    scanBtn.innerHTML = `${scanSvg} No text found`;
+    setTimeout(() => { scanBtn.innerHTML = `${scanSvg} Scan`; }, 3000);
   }
 }
 
-function _renderReviewQueue() {
+function _renderOcrResult() {
   const queueEl = $("#intake-review-queue");
-  const itemsEl = $("#review-queue-items");
-  const summaryEl = $("#review-queue-summary");
-
-  if (_intakeDetections.length === 0) {
+  if (!_intakeOcrText) {
     queueEl.classList.add("hidden");
-    summaryEl.textContent = "";
-    itemsEl.innerHTML = "";
     return;
   }
-
-  // Summary counts
-  const counts = {};
-  for (const d of _intakeDetections) {
-    if (d.confirmed) counts[d.type] = (counts[d.type] || 0) + 1;
-  }
-  const parts = Object.entries(counts).map(([t, n]) => `${n} ${MARKER_LABELS[t] || t}${n > 1 ? "s" : ""}`);
-  summaryEl.textContent = parts.join(" · ") || "No items detected";
-
-  itemsEl.innerHTML = _intakeDetections.map((d, i) => `
-    <div class="review-item" data-index="${i}" ${d.confirmed ? "" : 'style="opacity:0.4"'}>
-      <span class="review-item-icon">${MARKER_ICONS[d.type] || "·"}</span>
-      <span class="review-item-type">${MARKER_LABELS[d.type] || d.type}</span>
-      <input type="text" value="${escapeHtml(d.text)}" placeholder="(empty)" data-index="${i}"
-             style="${d.confirmed ? "" : "text-decoration:line-through"}"
-             ${d.confirmed ? "" : "disabled"}>
-      <button class="review-item-reject" data-index="${i}" title="${d.confirmed ? "Remove" : "Restore"}">${d.confirmed ? "×" : "↩"}</button>
-    </div>
-  `).join("");
-
+  $("#intake-ocr-text").value = _intakeOcrText;
   queueEl.classList.remove("hidden");
-
-  // Wire up events
-  itemsEl.querySelectorAll("input[data-index]").forEach((inp) => {
-    inp.addEventListener("input", (e) => {
-      const idx = +e.target.dataset.index;
-      _intakeDetections[idx].text = e.target.value;
-    });
-  });
-  itemsEl.querySelectorAll(".review-item-reject").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      const idx = +e.target.dataset.index;
-      _intakeDetections[idx].confirmed = !_intakeDetections[idx].confirmed;
-      _renderReviewQueue();
-    });
-  });
 }
 
 function openIntakeModal() {
   document.body.style.overflow = "hidden";
   document.body.style.touchAction = "none";
+  document.body.style.webkitUserSelect = "none";
+  document.body.style.userSelect = "none";
   $("#intake-modal-backdrop").classList.remove("hidden");
   $("#intake-modal-backdrop").classList.add("intake-open");
   const dateInput = $("#intake-date");
@@ -1562,7 +1460,7 @@ function openIntakeModal() {
     dl.appendChild(opt);
   });
   _intakeSetTool("pen");
-  _intakeDetections = [];
+  _intakeOcrText = "";
   $("#intake-review-queue").classList.add("hidden");
   requestAnimationFrame(() => _initIntakeCanvas());
 }
@@ -1572,16 +1470,18 @@ function closeIntakeModal() {
   $("#intake-modal-backdrop").classList.remove("intake-open");
   document.body.style.overflow = "";
   document.body.style.touchAction = "";
+  document.body.style.webkitUserSelect = "";
+  document.body.style.userSelect = "";
 }
 
 async function _intakeSaveNotes() {
-  const confirmedItems = _intakeDetections.filter((d) => d.confirmed && d.text.trim());
+  const ocrText = ($("#intake-ocr-text")?.value || "").trim();
   const actionItems = $("#intake-action-items").value.trim();
   const reminders = $("#intake-reminders").value.trim();
 
   const hasCanvasContent = _intakeStrokes.length > 0;
 
-  if (!hasCanvasContent && !actionItems && !reminders && confirmedItems.length === 0) {
+  if (!hasCanvasContent && !ocrText && !actionItems && !reminders) {
     alert("Nothing to save — draw some notes or add tasks first.");
     return;
   }
@@ -1606,11 +1506,11 @@ async function _intakeSaveNotes() {
         topic: $("#intake-topic").value.trim(),
         date: $("#intake-date").value,
         attendees: $("#intake-attendees").value.trim(),
-        body: "",
+        body: ocrText,
         action_items: actionItems,
         reminders,
         canvas_image: canvasImage,
-        confirmed_items: confirmedItems.length > 0 ? confirmedItems.map((d) => ({ type: d.type, text: d.text.trim() })) : null,
+        confirmed_items: null,
       }),
     });
     const data = await res.json();
@@ -2700,13 +2600,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     btn.addEventListener("click", () => _intakeSetColor(btn.dataset.color));
   });
 
-  // Review queue clear-all
+  // OCR result clear
   $("#review-queue-clear").addEventListener("click", () => {
-    _intakeDetections = [];
-    _renderReviewQueue();
+    _intakeOcrText = "";
+    _renderOcrResult();
   });
 
-  // Canvas pointer events (attached via delegation to survive re-init)
+  // Canvas pointer + touch events
   const intakeCanvas = $("#intake-canvas");
   intakeCanvas.addEventListener("pointerdown", _intakePointerDown);
   intakeCanvas.addEventListener("pointermove", _intakePointerMove);
@@ -2714,6 +2614,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   intakeCanvas.addEventListener("pointercancel", _intakePointerUp);
   intakeCanvas.addEventListener("lostpointercapture", _intakePointerUp);
   intakeCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  intakeCanvas.addEventListener("selectstart", (e) => e.preventDefault());
+  // Native touch prevention stops iOS from opening the selection loupe mid-stroke
+  intakeCanvas.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+  intakeCanvas.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+  intakeCanvas.addEventListener("touchend", (e) => e.preventDefault(), { passive: false });
   // Import modal
   $("#import-modal-close").addEventListener("click",  closeImportModal);
   $("#import-modal-cancel").addEventListener("click", closeImportModal);
