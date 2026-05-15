@@ -692,41 +692,21 @@
             <input id="intake-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off" inputmode="text">
           </div>
         </div>
-        <!-- Toolbar -->
-        <div class="intake-toolbar">
-          <div class="intake-tool-group">
-            <button class="intake-tool-btn active" id="intake-btn-pen" title="Pen">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-            </button>
-            <button class="intake-tool-btn" id="intake-btn-eraser" title="Eraser">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20H7L3 16l10-10 7 7-3.5 3.5"/><path d="M6.0 11.0 13 18"/></svg>
-            </button>
-          </div>
-          <div class="intake-tool-group intake-size-group">
-            <button class="intake-size-btn" data-size="2" title="Thin">S</button>
-            <button class="intake-size-btn active" data-size="4" title="Medium">M</button>
-            <button class="intake-size-btn" data-size="8" title="Thick">L</button>
-          </div>
-          <div class="intake-tool-group">
-            <button class="intake-tool-btn" id="intake-btn-undo" title="Undo">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3 13A9 9 0 1 0 6 6.7L3 9"/></svg>
-            </button>
-            <button class="intake-tool-btn" id="intake-btn-clear" title="Clear canvas">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
-            </button>
-          </div>
+        <!-- Scribble writing area -->
+        <div class="intake-scribble-wrap">
+          <textarea
+            id="intake-scribble"
+            class="intake-scribble"
+            placeholder="Write your notes here — use Apple Pencil with Scribble, or type…"
+            autocomplete="off"
+            autocorrect="on"
+            autocapitalize="sentences"
+            spellcheck="true"
+            rows="8"
+          ></textarea>
         </div>
-        <!-- Canvas -->
-        <div class="intake-canvas-wrap">
-          <canvas id="intake-canvas" class="intake-canvas" draggable="false"></canvas>
-          <button id="intake-focus-exit" class="intake-focus-exit" aria-label="Exit focus mode">✕</button>
-        </div>
-        <!-- Review section — shown after OCR -->
-        <div id="intake-review" class="intake-review-section hidden">
-          <div class="intake-review-field">
-            <label for="intake-transcription">Transcription <span class="intake-label-hint">— edit to correct OCR errors</span></label>
-            <textarea id="intake-transcription" class="intake-textarea" rows="4" placeholder="OCR text will appear here…" inputmode="text"></textarea>
-          </div>
+        <!-- Action items and reminders -->
+        <div id="intake-review" class="intake-review-section">
           <div class="intake-review-field">
             <label for="intake-action-items">Action Items <span class="intake-label-hint">— one per line</span></label>
             <textarea id="intake-action-items" class="intake-textarea" rows="3" placeholder="Deploy fix&#10;Review PR&#10;Send update to Alice" inputmode="text"></textarea>
@@ -741,12 +721,11 @@
       </div>
       <div class="modal-footer">
         <button class="secondary-btn" id="intake-modal-cancel">Cancel</button>
-        <button class="primary-btn" id="intake-modal-submit">Extract text</button>
+        <button class="primary-btn" id="intake-modal-submit">Save notes</button>
       </div>
     </div>
   </div>
 
-  <script src="https://unpkg.com/tesseract.js@4/dist/tesseract.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

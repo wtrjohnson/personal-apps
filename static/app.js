@@ -1224,73 +1224,23 @@ async function submitImport() {
 
 // ===== Handwriting Intake =====
 
-let _intakeIsDrawing = false;
-let _intakeTool = "pen";
-let _intakePenSize = 4;
-let _intakeUndoStack = [];
-let _intakeLastX = 0;
-let _intakeLastY = 0;
-let _intakeLastMidX = 0;
-let _intakeLastMidY = 0;
-let _intakeLastPressure = 0.5;
-let _intakePhase = "extract"; // "extract" | "save"
-let _intakeFocusMode = false;
-let _intakeFocusTapCount = 0;
-let _intakeFocusTapTimer = null;
-let _intakeFocusTapX = 0;
-let _intakeFocusTapY = 0;
-let _intakeFocusDidDrag = false;
-const INTAKE_MAX_UNDO = 30;
-
-function _enterIntakeFocusMode() {
-  _intakeFocusMode = true;
-  $("#intake-modal-backdrop").classList.add("canvas-focus-mode");
-  requestAnimationFrame(() => _resizeIntakeCanvas());
-}
-
-function _exitIntakeFocusMode() {
-  _intakeFocusMode = false;
-  _intakeFocusTapCount = 0;
-  clearTimeout(_intakeFocusTapTimer);
-  _intakeFocusTapTimer = null;
-  $("#intake-modal-backdrop").classList.remove("canvas-focus-mode");
-  requestAnimationFrame(() => _resizeIntakeCanvas());
-}
-
 function openIntakeModal() {
   // Lock body scroll so resting palm doesn't move the page behind the modal
   document.body.style.overflow = "hidden";
   document.body.style.touchAction = "none";
   $("#intake-modal-backdrop").classList.remove("hidden");
   $("#intake-modal-backdrop").classList.add("intake-open");
-  // Reset focus mode state
-  _intakeFocusMode = false;
-  _intakeFocusTapCount = 0;
-  clearTimeout(_intakeFocusTapTimer);
-  _intakeFocusTapTimer = null;
-  $("#intake-modal-backdrop").classList.remove("canvas-focus-mode");
   const dateInput = $("#intake-date");
   if (!dateInput.value) {
     dateInput.value = new Date().toISOString().split("T")[0];
   }
-  // Reset phase and UI state
-  _intakePhase = "extract";
   $("#intake-result").className = "intake-result hidden";
   $("#intake-result").innerHTML = "";
-  $("#intake-review").classList.add("hidden");
-  $("#intake-transcription").value = "";
+  $("#intake-scribble").value = "";
   $("#intake-action-items").value = "";
   $("#intake-reminders").value = "";
   $("#intake-modal-submit").disabled = false;
-  $("#intake-modal-submit").textContent = "Extract text";
-  // Reset drawing tools
-  _intakeTool = "pen";
-  _intakePenSize = 4;
-  $("#intake-btn-pen").classList.add("active");
-  $("#intake-btn-eraser").classList.remove("active");
-  document.querySelectorAll(".intake-size-btn").forEach((b) => {
-    b.classList.toggle("active", Number(b.dataset.size) === 4);
-  });
+  $("#intake-modal-submit").textContent = "Save notes";
   // Populate group datalist from known facets
   const dl = $("#intake-group-list");
   dl.innerHTML = "";
@@ -1300,274 +1250,20 @@ function openIntakeModal() {
     opt.value = g;
     dl.appendChild(opt);
   });
-  // Init canvas after layout is visible
-  requestAnimationFrame(() => _initIntakeCanvas());
+  requestAnimationFrame(() => $("#intake-scribble").focus());
 }
 
 function closeIntakeModal() {
-  _intakeFocusMode = false;
-  _intakeFocusTapCount = 0;
-  clearTimeout(_intakeFocusTapTimer);
-  _intakeFocusTapTimer = null;
   $("#intake-modal-backdrop").classList.add("hidden");
   $("#intake-modal-backdrop").classList.remove("intake-open");
-  $("#intake-modal-backdrop").classList.remove("canvas-focus-mode");
   // Restore body scroll
   document.body.style.overflow = "";
   document.body.style.touchAction = "";
 }
 
-function _intakeCanvasSize() {
-  const canvas = $("#intake-canvas");
-  const wrap = canvas.parentElement;
-  const dpr = window.devicePixelRatio || 1;
-  const w = wrap.clientWidth;
-  let h;
-  if (_intakeFocusMode) {
-    h = Math.max(280, wrap.clientHeight || window.innerHeight - 56);
-  } else {
-    const vh = window.innerHeight;
-    h = Math.round(Math.max(280, Math.min(vh * 0.52, 700)));
-  }
-  return { w, h, dpr };
-}
-
-function _initIntakeCanvas() {
-  const canvas = $("#intake-canvas");
-  const { w, h, dpr } = _intakeCanvasSize();
-  canvas.width = Math.round(w * dpr);
-  canvas.height = Math.round(h * dpr);
-  canvas.style.width = w + "px";
-  canvas.style.height = h + "px";
-  canvas.style.webkitUserSelect = "none";
-  canvas.style.userSelect = "none";
-  canvas.style.webkitTouchCallout = "none";
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, w, h);
-  _intakeUndoStack = [];
-}
-
-function _resizeIntakeCanvas() {
-  const canvas = $("#intake-canvas");
-  // Capture current drawing before resize clears it
-  const savedUrl = (canvas.width > 0 && canvas.height > 0) ? canvas.toDataURL() : null;
-  const { w, h, dpr } = _intakeCanvasSize();
-  canvas.width = Math.round(w * dpr);
-  canvas.height = Math.round(h * dpr);
-  canvas.style.width = w + "px";
-  canvas.style.height = h + "px";
-  canvas.style.webkitUserSelect = "none";
-  canvas.style.userSelect = "none";
-  canvas.style.webkitTouchCallout = "none";
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, w, h);
-  _intakeUndoStack = [];
-  if (savedUrl) {
-    const img = new Image();
-    img.onload = () => ctx.drawImage(img, 0, 0, w, h);
-    img.src = savedUrl;
-  }
-}
-
-function _intakeSaveUndo() {
-  const canvas = $("#intake-canvas");
-  const ctx = canvas.getContext("2d");
-  if (_intakeUndoStack.length >= INTAKE_MAX_UNDO) _intakeUndoStack.shift();
-  _intakeUndoStack.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
-}
-
-function _intakeUndo() {
-  if (!_intakeUndoStack.length) return;
-  const canvas = $("#intake-canvas");
-  const ctx = canvas.getContext("2d");
-  ctx.putImageData(_intakeUndoStack.pop(), 0, 0);
-}
-
-function _intakeClearCanvas() {
-  const canvas = $("#intake-canvas");
-  const ctx = canvas.getContext("2d");
-  _intakeSaveUndo();
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.width / dpr;
-  const h = canvas.height / dpr;
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, w, h);
-}
-
-function _intakeGetPos(canvas, e) {
-  const rect = canvas.getBoundingClientRect();
-  return {
-    x: e.clientX - rect.left,
-    y: e.clientY - rect.top,
-  };
-}
-
-function _intakeApplyStyle(ctx) {
-  ctx.globalCompositeOperation = "source-over";
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  if (_intakeTool === "eraser") {
-    ctx.strokeStyle = "#ffffff";
-    ctx.fillStyle = "#ffffff";
-    // Eraser keeps fixed width (pressure not relevant)
-    ctx.lineWidth = _intakePenSize * 5;
-  } else {
-    ctx.strokeStyle = "#111111";
-    ctx.fillStyle = "#111111";
-    // lineWidth set dynamically per-segment in pointermove for pressure sensitivity
-    ctx.lineWidth = _intakePenSize;
-  }
-}
-
-function _setupIntakeCanvasEvents() {
-  const canvas = $("#intake-canvas");
-
-  // Prevent context menu everywhere in the modal, not just on the canvas
-  $("#intake-modal-backdrop").addEventListener("contextmenu", (e) => e.preventDefault());
-  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-
-  // Prevent iOS text selection callout on rapid Pencil strokes
-  canvas.addEventListener("selectstart", (e) => e.preventDefault());
-
-  // Prevent iOS touch events that can trigger callouts; Pencil uses pointer events and is unaffected
-  canvas.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
-
-  canvas.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    // Clear any browser selection immediately so iOS won't show callout
-    if (window.getSelection) window.getSelection().removeAllRanges();
-    // Palm rejection: only draw with Pencil (pen) or mouse, ignore finger/palm (touch)
-    if (e.pointerType === "touch") return;
-
-    // Enter focus mode on first interaction; don't draw on the activating tap
-    if (!_intakeFocusMode) {
-      _enterIntakeFocusMode();
-      return;
-    }
-
-    // Track position for triple-tap drag detection
-    const pos = _intakeGetPos(canvas, e);
-    _intakeFocusTapX = pos.x;
-    _intakeFocusTapY = pos.y;
-    _intakeFocusDidDrag = false;
-
-    _intakeSaveUndo();
-    _intakeIsDrawing = true;
-    canvas.setPointerCapture(e.pointerId);
-    _intakeLastX = pos.x;
-    _intakeLastY = pos.y;
-    _intakeLastMidX = pos.x;
-    _intakeLastMidY = pos.y;
-    _intakeLastPressure = e.pressure || 0.5;
-    const ctx = canvas.getContext("2d");
-    _intakeApplyStyle(ctx);
-    // Draw pressure-sized initial dot
-    const pressure = e.pressure || 0.5;
-    const dotR = Math.max(0.5, (_intakePenSize * (0.4 + pressure * 1.0)) / 2);
-    ctx.beginPath();
-    ctx.arc(pos.x, pos.y, dotR, 0, Math.PI * 2);
-    ctx.fill();
-  });
-
-  canvas.addEventListener("pointermove", (e) => {
-    e.preventDefault(); // always prevent scroll, even for touch (don't draw though)
-    if (!_intakeIsDrawing) return;
-    if (e.pointerType === "touch") return; // palm rejection
-    const ctx = canvas.getContext("2d");
-    _intakeApplyStyle(ctx);
-    // Use coalesced events for finer-grained intermediate positions
-    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-    for (const ce of events) {
-      const pos = _intakeGetPos(canvas, ce);
-      // Mark as dragged so pointerup won't count this as a triple-tap tap
-      const ddx = pos.x - _intakeFocusTapX;
-      const ddy = pos.y - _intakeFocusTapY;
-      if (ddx * ddx + ddy * ddy > 64) _intakeFocusDidDrag = true;
-      const pressure = ce.pressure || 0.5;
-      const midX = (_intakeLastX + pos.x) / 2;
-      const midY = (_intakeLastY + pos.y) / 2;
-      // Pressure-modulated width: varies ±50% around base pen size
-      const avgPressure = (_intakeLastPressure + pressure) / 2;
-      if (_intakeTool !== "eraser") {
-        ctx.lineWidth = Math.max(0.5, _intakePenSize * (0.4 + avgPressure * 1.2));
-      }
-      // Quadratic bezier from last midpoint to new midpoint via the last point (control)
-      ctx.beginPath();
-      ctx.moveTo(_intakeLastMidX, _intakeLastMidY);
-      ctx.quadraticCurveTo(_intakeLastX, _intakeLastY, midX, midY);
-      ctx.stroke();
-      _intakeLastMidX = midX;
-      _intakeLastMidY = midY;
-      _intakeLastX = pos.x;
-      _intakeLastY = pos.y;
-      _intakeLastPressure = pressure;
-    }
-  });
-
-  canvas.addEventListener("pointerup", (e) => {
-    _intakeIsDrawing = false;
-    if (e.pointerType === "touch") return;
-    // Count quick taps (no drag) for triple-tap exit gesture
-    if (_intakeFocusMode && !_intakeFocusDidDrag) {
-      _intakeFocusTapCount++;
-      clearTimeout(_intakeFocusTapTimer);
-      if (_intakeFocusTapCount >= 3) {
-        _exitIntakeFocusMode();
-        return;
-      }
-      _intakeFocusTapTimer = setTimeout(() => { _intakeFocusTapCount = 0; }, 800);
-    }
-  });
-  canvas.addEventListener("pointercancel", () => { _intakeIsDrawing = false; });
-
-  // Exit button
-  $("#intake-focus-exit").addEventListener("click", _exitIntakeFocusMode);
-  $("#intake-focus-exit").addEventListener("pointerdown", (e) => e.stopPropagation());
-}
-
-function _intakeHasCanvasContent() {
-  const canvas = $("#intake-canvas");
-  const ctx = canvas.getContext("2d");
-  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-  for (let i = 0; i < pixels.length; i += 4) {
-    if (pixels[i] < 240 || pixels[i + 1] < 240 || pixels[i + 2] < 240) return true;
-  }
-  return false;
-}
-
-async function _intakeExtractText() {
-  if (!_intakeHasCanvasContent()) {
-    alert("Please write something on the canvas first.");
-    return;
-  }
-  const btn = $("#intake-modal-submit");
-  btn.disabled = true;
-  btn.textContent = "Extracting…";
-  try {
-    const canvas = $("#intake-canvas");
-    const result = await Tesseract.recognize(canvas, "eng");
-    const text = (result.data.text || "").trim();
-    $("#intake-transcription").value = text;
-    $("#intake-review").classList.remove("hidden");
-    _intakePhase = "save";
-    btn.disabled = false;
-    btn.textContent = "Save notes";
-  } catch (err) {
-    const resultEl = $("#intake-result");
-    resultEl.classList.remove("hidden");
-    resultEl.className = "intake-result intake-result-err";
-    resultEl.innerHTML = `<strong>OCR error:</strong> ${escapeHtml(err.message)}`;
-    btn.disabled = false;
-    btn.textContent = "Extract text";
-  }
-}
 
 async function _intakeSaveNotes() {
-  const body = $("#intake-transcription").value.trim();
+  const body = $("#intake-scribble").value.trim();
   const actionItems = $("#intake-action-items").value.trim();
   const reminders = $("#intake-reminders").value.trim();
   if (!body && !actionItems && !reminders) {
@@ -1631,11 +1327,7 @@ async function _intakeSaveNotes() {
 }
 
 async function submitIntake() {
-  if (_intakePhase === "extract") {
-    await _intakeExtractText();
-  } else {
-    await _intakeSaveNotes();
-  }
+  await _intakeSaveNotes();
 }
 
 // ---------- Data fetches ----------
@@ -2670,27 +2362,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#intake-modal-cancel").addEventListener("click", closeIntakeModal);
   // No backdrop-tap-to-close: too easy to accidentally dismiss with a resting palm on iPad
   $("#intake-modal-submit").addEventListener("click", submitIntake);
-  $("#intake-btn-pen").addEventListener("click", () => {
-    _intakeTool = "pen";
-    $("#intake-btn-pen").classList.add("active");
-    $("#intake-btn-eraser").classList.remove("active");
-  });
-  $("#intake-btn-eraser").addEventListener("click", () => {
-    _intakeTool = "eraser";
-    $("#intake-btn-eraser").classList.add("active");
-    $("#intake-btn-pen").classList.remove("active");
-  });
-  $("#intake-btn-undo").addEventListener("click", _intakeUndo);
-  $("#intake-btn-clear").addEventListener("click", _intakeClearCanvas);
-  document.querySelectorAll(".intake-size-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      _intakePenSize = Number(btn.dataset.size);
-      document.querySelectorAll(".intake-size-btn").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-    });
-  });
-  _setupIntakeCanvasEvents();
-
   // Import modal
   $("#import-modal-close").addEventListener("click",  closeImportModal);
   $("#import-modal-cancel").addEventListener("click", closeImportModal);

@@ -2731,79 +2731,32 @@ table.groups tr:last-child td { border-bottom: none; }
 }
 
 /* Toolbar */
-.intake-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 10px;
-  flex-wrap: wrap;
-}
-
-.intake-tool-group {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  background: var(--card-soft);
-  border-radius: var(--r-sm);
-  padding: 3px;
-}
-
-.intake-tool-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 28px;
-  border: none;
-  background: transparent;
-  border-radius: 5px;
-  cursor: pointer;
-  color: var(--muted);
-  transition: background 0.12s, color 0.12s;
-  touch-action: manipulation; /* snappy tap, no double-tap zoom */
-}
-
-.intake-tool-btn:hover { background: var(--border); color: var(--ink); }
-.intake-tool-btn.active { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
-
-.intake-size-group { gap: 3px; }
-
-.intake-size-btn {
-  width: 26px;
-  height: 26px;
-  border: none;
-  background: transparent;
-  border-radius: 5px;
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
-  transition: background 0.12s, color 0.12s;
-  font-family: inherit;
-  touch-action: manipulation; /* snappy tap, no double-tap zoom */
-}
-
-.intake-size-btn:hover { background: var(--border); color: var(--ink); }
-.intake-size-btn.active { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
-
-/* Canvas */
-.intake-canvas-wrap {
-  border: 1.5px solid var(--border-strong);
-  border-radius: var(--r-sm);
-  overflow: hidden;
-  background: #ffffff;
+/* Scribble writing area */
+.intake-scribble-wrap {
+  margin-top: 12px;
   margin-bottom: 12px;
-  cursor: crosshair;
-  /* Belt-and-suspenders: also block callouts at wrapper level */
-  touch-action: none;
-  -webkit-touch-callout: none;
 }
 
-.intake-canvas {
+.intake-scribble {
   display: block;
   width: 100%;
-  touch-action: none;
-  -webkit-touch-callout: none;
+  min-height: 200px;
+  padding: 14px;
+  font-size: 17px;
+  line-height: 1.6;
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  resize: vertical;
+  font-family: inherit;
+  background: #ffffff;
+  color: #111;
+  box-sizing: border-box;
+}
+
+.intake-scribble:focus {
+  outline: none;
+  border-color: var(--accent, #4f6ef7);
+  box-shadow: 0 0 0 3px rgba(79, 110, 247, 0.12);
 }
 
 /* Context row */
@@ -3010,83 +2963,3 @@ table.groups tr:last-child td { border-bottom: none; }
   }
 }
 
-/* ===== Canvas focus mode — immersive full-screen drawing ===== */
-
-.modal-backdrop.canvas-focus-mode {
-  padding: 0;
-  align-items: stretch;
-}
-
-.modal-backdrop.canvas-focus-mode .modal-intake {
-  max-width: 100%;
-  width: 100%;
-  height: 100%;
-  max-height: 100%;
-  border-radius: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.modal-backdrop.canvas-focus-mode .modal-header,
-.modal-backdrop.canvas-focus-mode .modal-footer,
-.modal-backdrop.canvas-focus-mode .intake-context-row,
-.modal-backdrop.canvas-focus-mode .intake-review-section {
-  display: none !important;
-}
-
-.modal-backdrop.canvas-focus-mode .intake-modal-body {
-  flex: 1;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-.modal-backdrop.canvas-focus-mode .intake-toolbar {
-  flex-shrink: 0;
-  border-radius: 0;
-  border-left: none;
-  border-right: none;
-  border-top: none;
-}
-
-.modal-backdrop.canvas-focus-mode .intake-canvas-wrap {
-  flex: 1;
-  margin-bottom: 0;
-  border-radius: 0;
-  border: none;
-  position: relative;
-}
-
-/* Focus-mode exit button — bottom-right corner of canvas */
-.intake-focus-exit {
-  position: absolute;
-  bottom: 16px;
-  right: 16px;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.22);
-  color: #fff;
-  border: none;
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  touch-action: manipulation;
-  -webkit-touch-callout: none;
-  user-select: none;
-  -webkit-user-select: none;
-  z-index: 10;
-  transition: background 0.15s;
-}
-
-.intake-focus-exit:hover,
-.intake-focus-exit:active {
-  background: rgba(0, 0, 0, 0.5);
-}
-
-.modal-backdrop.canvas-focus-mode .intake-focus-exit {
-  display: flex;
-}
