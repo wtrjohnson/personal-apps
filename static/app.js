@@ -980,10 +980,16 @@ function renderDetail(m) {
 
   $("#detail").innerHTML = `
     <header>
-      <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
+      <div class="detail-header-row">
+        <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
+        <button class="detail-delete-btn" data-mid="${escapeHtml(m.id)}" title="Delete note">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+          Delete
+        </button>
+      </div>
       <div class="meta">${meta.join("")}</div>
     </header>
-    ${m.canvas_image ? `<img class="canvas-note-image" src="${m.canvas_image}" alt="Handwritten note">` : ""}
+    ${m.canvas_image ? `<img class="canvas-note-image" src="${m.canvas_image}" alt="Handwritten note" title="Tap to expand">` : ""}
     <div class="tasks-panel">
       <h3>Open Action Items</h3>
       ${listOrNone(m.action_items_open)}
@@ -993,6 +999,27 @@ function renderDetail(m) {
     <div class="body">${m.body_html}</div>
   `;
 }
+
+// Delete note handler (delegated from #detail)
+$("#detail").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".detail-delete-btn");
+  if (!btn) return;
+  const mid = btn.dataset.mid;
+  if (!confirm("Delete this note? This also removes all its tasks.")) return;
+  btn.disabled = true;
+  btn.textContent = "Deleting…";
+  try {
+    const res = await fetch(`/api/meetings/${mid}`, { method: "DELETE" });
+    const data = await res.json();
+    if (!data.ok) { alert(data.error || "Delete failed"); btn.disabled = false; return; }
+    state.selectedMeetingId = null;
+    renderDetail(null);
+    await loadMeetings();
+  } catch {
+    alert("Delete failed");
+    btn.disabled = false;
+  }
+});
 
 function renderGroupsTable(groups) {
   const tbody = $("#groups-body");
@@ -2782,3 +2809,40 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadFacets();
   switchTab("home");
 });
+
+// --- Canvas fullscreen ---
+(function () {
+  const overlay = $("#canvas-fullscreen-overlay");
+  const img = $("#canvas-fullscreen-img");
+
+  function openFullscreen(src) {
+    img.src = src;
+    overlay.classList.remove("hidden");
+    document.body.style.overflow = "hidden";
+  }
+  function closeFullscreen() {
+    overlay.classList.add("hidden");
+    img.src = "";
+    document.body.style.overflow = "";
+  }
+
+  document.addEventListener("click", (e) => {
+    const ci = e.target.closest(".canvas-note-image");
+    if (ci) openFullscreen(ci.src);
+  });
+
+  $("#canvas-fullscreen-close").addEventListener("click", closeFullscreen);
+
+  let _tapCount = 0, _tapTimer = null;
+  overlay.addEventListener("click", (e) => {
+    if (e.target === $("#canvas-fullscreen-close")) return;
+    _tapCount++;
+    clearTimeout(_tapTimer);
+    if (_tapCount >= 3) { _tapCount = 0; closeFullscreen(); return; }
+    _tapTimer = setTimeout(() => { _tapCount = 0; }, 500);
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !overlay.classList.contains("hidden")) closeFullscreen();
+  });
+})();
