@@ -286,20 +286,40 @@
 
       <!-- GROUPS -->
       <section class="view" id="view-groups">
-        <div class="groups-wrap">
-          <table class="groups">
-            <thead>
-              <tr>
-                <th>Group</th>
-                <th class="num">Meetings</th>
-                <th>Last contact</th>
-                <th class="num">Open actions</th>
-                <th class="num">Open reminders</th>
-                <th>Variants</th>
-              </tr>
-            </thead>
-            <tbody id="groups-body"></tbody>
-          </table>
+        <div class="groups-subtabs-bar">
+          <button class="groups-subtab active" data-subtab="groups">Groups</button>
+          <button class="groups-subtab" data-subtab="bills">Bills</button>
+        </div>
+        <div class="groups-panel" id="groups-panel-groups">
+          <div class="groups-wrap">
+            <table class="groups">
+              <thead>
+                <tr>
+                  <th>Group</th>
+                  <th class="num">Meetings</th>
+                  <th>Last contact</th>
+                  <th class="num">Open actions</th>
+                  <th class="num">Open reminders</th>
+                  <th>Variants</th>
+                </tr>
+              </thead>
+              <tbody id="groups-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="groups-panel hidden" id="groups-panel-bills">
+          <div class="groups-wrap">
+            <table class="bills-table">
+              <thead>
+                <tr>
+                  <th>Bill</th>
+                  <th>Meetings Referenced</th>
+                  <th>Last Seen</th>
+                </tr>
+              </thead>
+              <tbody id="bills-body"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -665,13 +685,13 @@
 
   <!-- Handwriting Intake modal -->
   <div id="intake-modal-backdrop" class="modal-backdrop hidden">
-    <div class="modal modal-intake" role="dialog" aria-modal="true">
+    <div class="modal modal-intake" data-phase="1" role="dialog" aria-modal="true">
       <div class="modal-header">
-        <h2>Write notes</h2>
+        <h2 id="intake-modal-title">Write notes</h2>
         <button class="modal-close" id="intake-modal-close" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body intake-modal-body">
-        <!-- Metadata fields -->
+        <!-- Metadata fields — always visible -->
         <div class="intake-context-row">
           <div class="intake-context-field" style="flex:2">
             <label for="intake-group">Group / Project</label>
@@ -693,30 +713,13 @@
             <input id="intake-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off" inputmode="text">
           </div>
         </div>
-        <!-- Business card scanner -->
-        <div id="card-scan-section">
-          <input type="file" id="card-photo-input" accept="image/*" capture="environment" style="display:none">
-          <button type="button" id="card-scan-btn" class="secondary-btn-sm">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-            Scan Business Card
-          </button>
-          <div id="card-preview" class="hidden">
-            <div class="card-preview-header">
-              <span class="card-preview-label">Review extracted details</span>
-              <button type="button" id="card-preview-dismiss" class="card-preview-dismiss">✕</button>
-            </div>
-            <div class="card-fields">
-              <input id="card-field-name"    class="card-field" placeholder="Name" autocomplete="off">
-              <input id="card-field-company" class="card-field" placeholder="Company" autocomplete="off">
-              <input id="card-field-title"   class="card-field" placeholder="Title" autocomplete="off">
-              <input id="card-field-email"   class="card-field" placeholder="Email" autocomplete="off" type="email">
-              <input id="card-field-phone"   class="card-field" placeholder="Phone" autocomplete="off" type="tel">
-            </div>
-            <button type="button" id="card-save-btn" class="primary-btn-sm">Save Contact</button>
+        <!-- Phase 2 only: transcription status -->
+        <div id="intake-transcription-status" class="intake-transcription-status">
+          <div id="intake-transcription-loading" class="intake-transcription-loading hidden">
+            <span class="intake-spinner"></span> Transcribing handwriting…
           </div>
-          <div id="card-saved-contacts"></div>
         </div>
-        <!-- Canvas -->
+        <!-- Canvas — always visible, sizing differs per phase -->
         <div id="intake-canvas-mode">
           <div class="intake-toolbar">
             <!-- Tool -->
@@ -755,15 +758,55 @@
               <button id="intake-clear" class="tool-icon-btn" title="Clear canvas">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
               </button>
-              <button id="intake-scan" class="scan-action-btn">
+              <button id="intake-fullscreen-btn" class="tool-icon-btn" title="Fullscreen canvas (Esc to exit)">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+              </button>
+              <button id="intake-rescan-btn" class="scan-action-btn intake-phase2-only">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                Scan
+                Re-scan
               </button>
             </div>
           </div>
-          <canvas id="intake-canvas" class="intake-canvas"></canvas>
+          <div class="intake-canvas-scroll">
+            <canvas id="intake-canvas" class="intake-canvas"></canvas>
+          </div>
         </div>
-        <!-- Scan result -->
+        <!-- Phase 2 only: business card scanner -->
+        <div id="card-scan-section">
+          <input type="file" id="card-photo-input" accept="image/*" capture="environment" style="display:none">
+          <button type="button" id="card-scan-btn" class="secondary-btn-sm">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            Scan Business Card
+          </button>
+          <div id="card-preview" class="hidden">
+            <div class="card-preview-header">
+              <span class="card-preview-label">Review extracted details</span>
+              <button type="button" id="card-preview-dismiss" class="card-preview-dismiss">✕</button>
+            </div>
+            <div class="card-fields">
+              <input id="card-field-name"    class="card-field" placeholder="Name" autocomplete="off">
+              <input id="card-field-company" class="card-field" placeholder="Company" autocomplete="off">
+              <input id="card-field-title"   class="card-field" placeholder="Title" autocomplete="off">
+              <input id="card-field-email"   class="card-field" placeholder="Email" autocomplete="off" type="email">
+              <input id="card-field-phone"   class="card-field" placeholder="Phone" autocomplete="off" type="tel">
+            </div>
+            <button type="button" id="card-save-btn" class="primary-btn-sm">Save Contact</button>
+          </div>
+          <div id="card-saved-contacts"></div>
+        </div>
+        <!-- Phase 2 only: callout legend -->
+        <details id="intake-callout-legend" class="intake-callout-legend">
+          <summary>Callout markers</summary>
+          <div class="callout-legend-grid">
+            <span class="callout-legend-marker">[ ]</span><span class="callout-legend-label">Task — action item</span>
+            <span class="callout-legend-marker">!!</span><span class="callout-legend-label">Important — high-priority note</span>
+            <span class="callout-legend-marker">??</span><span class="callout-legend-label">Follow-up — needs follow-up</span>
+            <span class="callout-legend-marker">@name</span><span class="callout-legend-label">Person — someone mentioned</span>
+            <span class="callout-legend-marker">due:</span><span class="callout-legend-label">Deadline — date-bound item</span>
+            <span class="callout-legend-marker">H.R. / S.</span><span class="callout-legend-label">Bill — legislative reference (e.g. H.R. 1094)</span>
+          </div>
+        </details>
+        <!-- Phase 2 only: scan results -->
         <div id="intake-review-queue" class="hidden">
           <div class="scan-result-header">
             <span class="scan-result-summary" id="scan-result-summary"></span>
@@ -780,7 +823,7 @@
       </div>
       <div class="modal-footer">
         <button class="secondary-btn" id="intake-modal-cancel">Cancel</button>
-        <button class="primary-btn" id="intake-modal-submit">Save notes</button>
+        <button class="primary-btn" id="intake-modal-submit">Finalize Notes</button>
       </div>
     </div>
   </div>
