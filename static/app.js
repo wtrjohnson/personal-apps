@@ -1041,7 +1041,8 @@ $("#detail").addEventListener("click", async (e) => {
     if (!data.ok) { alert(data.error || "Delete failed"); btn.disabled = false; return; }
     state.selectedMeetingId = null;
     renderDetail(null);
-    await loadMeetings();
+    await refreshMeetings();
+    await loadFacets();
   } catch {
     alert("Delete failed");
     btn.disabled = false;
