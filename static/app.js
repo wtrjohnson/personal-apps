@@ -1311,6 +1311,36 @@ function _initIntakeCanvas() {
   _intakeCurrentStroke = null;
 }
 
+function _intakeResizeCanvas() {
+  const canvasMode = $("#intake-canvas-mode");
+  const isFullscreen = canvasMode.classList.contains("intake-canvas-fullscreen-active");
+  const canvas = _intakeCanvasEl();
+  const dpr = window.devicePixelRatio || 1;
+  const wrap = canvas.parentElement; // .intake-canvas-scroll
+  const w = wrap.clientWidth || 680;
+  if (isFullscreen) {
+    // Canvas fills remaining height after toolbar (~56px)
+    _intakeCanvasLogicalHeight = Math.max(window.innerHeight - 56, 400);
+  }
+  canvas.width = w * dpr;
+  canvas.height = _intakeCanvasLogicalHeight * dpr;
+  canvas.style.width = w + "px";
+  canvas.style.height = _intakeCanvasLogicalHeight + "px";
+  const ctx = _intakeCtx();
+  ctx.scale(dpr, dpr);
+  _intakeRedraw();
+}
+
+function _intakeToggleFullscreen() {
+  const canvasMode = $("#intake-canvas-mode");
+  const isNowFullscreen = canvasMode.classList.toggle("intake-canvas-fullscreen-active");
+  if (!isNowFullscreen) {
+    // Restore height to logical height (keep what was drawn)
+    _intakeCanvasLogicalHeight = Math.max(_intakeCanvasLogicalHeight, 600);
+  }
+  requestAnimationFrame(_intakeResizeCanvas);
+}
+
 function _intakeGrowCanvas() {
   const canvas = _intakeCanvasEl();
   const dpr = window.devicePixelRatio || 1;
@@ -1769,6 +1799,8 @@ function openIntakeModal() {
 }
 
 function closeIntakeModal() {
+  // Exit fullscreen first if active
+  $("#intake-canvas-mode").classList.remove("intake-canvas-fullscreen-active");
   $("#intake-modal-backdrop").classList.add("hidden");
   $("#intake-modal-backdrop").classList.remove("intake-open");
   document.body.style.overflow = "";
@@ -2380,41 +2412,52 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Dock nav
   $$(".dock-btn[data-tab]").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
-  // Safe-triangle dock submenu
+  // Safe-triangle dock submenus — handles all .dock-btn-wrap elements
   (function () {
-    const wrap = document.querySelector(".dock-btn-wrap");
-    if (!wrap) return;
-    const btn = wrap.querySelector(".dock-btn");
-    const sub = wrap.querySelector(".dock-submenu");
-    let closeTimer = null;
-    let exitPt = null;
-
-    function open() { clearTimeout(closeTimer); sub.classList.add("open"); }
-    function close() { sub.classList.remove("open"); exitPt = null; }
-    function scheduleClose() { clearTimeout(closeTimer); closeTimer = setTimeout(close, 80); }
-
     function inTriangle(px, py, ax, ay, bx, by, cx, cy) {
       const s = (x1, y1, x2, y2, x3, y3) => (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3);
       const d1 = s(px,py,ax,ay,bx,by), d2 = s(px,py,bx,by,cx,cy), d3 = s(px,py,cx,cy,ax,ay);
       return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
     }
 
-    btn.addEventListener("mouseenter", open);
-    btn.addEventListener("mouseleave", (e) => { exitPt = { x: e.clientX, y: e.clientY }; scheduleClose(); });
-    sub.addEventListener("mouseenter", () => clearTimeout(closeTimer));
-    sub.addEventListener("mouseleave", scheduleClose);
+    document.querySelectorAll(".dock-btn-wrap").forEach((wrap) => {
+      const btn = wrap.querySelector(".dock-btn");
+      const sub = wrap.querySelector(".dock-submenu");
+      if (!btn || !sub) return;
+      let closeTimer = null;
+      let exitPt = null;
 
-    document.addEventListener("mousemove", (e) => {
-      if (!sub.classList.contains("open") || !exitPt) return;
-      if (e.target.closest(".dock-btn-wrap")) { clearTimeout(closeTimer); return; }
-      const r = sub.getBoundingClientRect();
-      if (inTriangle(e.clientX, e.clientY, exitPt.x, exitPt.y, r.left, r.top - 4, r.left, r.bottom + 4)) {
-        clearTimeout(closeTimer);
-      } else {
-        close();
-      }
+      function open() { clearTimeout(closeTimer); sub.classList.add("open"); }
+      function close() { sub.classList.remove("open"); exitPt = null; }
+      function scheduleClose() { clearTimeout(closeTimer); closeTimer = setTimeout(close, 80); }
+
+      btn.addEventListener("mouseenter", open);
+      btn.addEventListener("mouseleave", (e) => { exitPt = { x: e.clientX, y: e.clientY }; scheduleClose(); });
+      sub.addEventListener("mouseenter", () => clearTimeout(closeTimer));
+      sub.addEventListener("mouseleave", scheduleClose);
+
+      document.addEventListener("mousemove", (e) => {
+        if (!sub.classList.contains("open") || !exitPt) return;
+        if (e.target.closest(".dock-btn-wrap") === wrap) { clearTimeout(closeTimer); return; }
+        const r = sub.getBoundingClientRect();
+        if (inTriangle(e.clientX, e.clientY, exitPt.x, exitPt.y, r.left, r.top - 4, r.left, r.bottom + 4)) {
+          clearTimeout(closeTimer);
+        } else {
+          close();
+        }
+      });
     });
   })();
+
+  // Bills shortcut from Groups submenu
+  $("#dock-sub-bills").addEventListener("click", () => {
+    switchTab("groups");
+    // Activate the Bills sub-tab
+    document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+    document.querySelector(".groups-subtab[data-subtab='bills']").classList.add("active");
+    document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
+    $("#groups-panel-bills").classList.remove("hidden");
+  });
 
   // Search overlay
   $("#dock-search-btn").addEventListener("click", openSearchOverlay);
@@ -3016,27 +3059,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#intake-clear").addEventListener("click", _intakeClearCanvas);
   $("#intake-rescan-btn").addEventListener("click", _intakeScan);
 
-  // Fullscreen canvas toggle
-  $("#intake-fullscreen-btn").addEventListener("click", () => {
-    const backdrop = $("#intake-modal-backdrop");
-    const isFullscreen = backdrop.classList.toggle("intake-fullscreen");
-    requestAnimationFrame(() => {
-      _intakeCanvasLogicalHeight = isFullscreen
-        ? Math.floor(window.innerHeight - 180)
-        : Math.max(_intakeCanvasLogicalHeight, 600);
-      const canvas = _intakeCanvasEl();
-      const dpr = window.devicePixelRatio || 1;
-      const wrap = canvas.parentElement;
-      const w = wrap.clientWidth || 680;
-      canvas.width = w * dpr;
-      canvas.height = _intakeCanvasLogicalHeight * dpr;
-      canvas.style.width = w + "px";
-      canvas.style.height = _intakeCanvasLogicalHeight + "px";
-      const ctx = _intakeCtx();
-      ctx.scale(dpr, dpr);
-      _intakeRedraw();
-    });
-  });
+  // Fullscreen canvas toggle — only #intake-canvas-mode fills the screen
+  $("#intake-fullscreen-btn").addEventListener("click", _intakeToggleFullscreen);
 
   document.querySelectorAll(".pen-size-btn").forEach((btn) => {
     btn.addEventListener("click", () => _intakeSetSize(btn.dataset.size));
@@ -3123,22 +3147,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!$("#blocker-modal-backdrop").classList.contains("hidden")) { closeBlockerModal(); return; }
       if ($("#search-overlay").classList.contains("open")) { closeSearchOverlay(); return; }
       if (!$("#intake-modal-backdrop").classList.contains("hidden")) {
-        const backdrop = $("#intake-modal-backdrop");
-        if (backdrop.classList.contains("intake-fullscreen")) {
-          backdrop.classList.remove("intake-fullscreen");
-          requestAnimationFrame(() => {
-            _intakeCanvasLogicalHeight = Math.max(_intakeCanvasLogicalHeight, 600);
-            const canvas = _intakeCanvasEl();
-            const dpr = window.devicePixelRatio || 1;
-            const wrap = canvas.parentElement;
-            canvas.width = (wrap.clientWidth || 680) * dpr;
-            canvas.height = _intakeCanvasLogicalHeight * dpr;
-            canvas.style.width = (wrap.clientWidth || 680) + "px";
-            canvas.style.height = _intakeCanvasLogicalHeight + "px";
-            const ctx = _intakeCtx();
-            ctx.scale(dpr, dpr);
-            _intakeRedraw();
-          });
+        if ($("#intake-canvas-mode").classList.contains("intake-canvas-fullscreen-active")) {
+          _intakeToggleFullscreen();
         } else {
           closeIntakeModal();
         }
