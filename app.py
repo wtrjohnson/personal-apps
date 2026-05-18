@@ -206,6 +206,14 @@ def init_db() -> None:
                     contact_id TEXT REFERENCES contacts(id) ON DELETE CASCADE,
                     PRIMARY KEY (meeting_id, contact_id)
                 );
+                CREATE TABLE IF NOT EXISTS bill_references (
+                    id          SERIAL PRIMARY KEY,
+                    meeting_id  TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                    bill_type   TEXT NOT NULL DEFAULT '',
+                    bill_number TEXT NOT NULL DEFAULT '',
+                    created_at  TIMESTAMP DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS bill_refs_meeting ON bill_references (meeting_id);
             """)
 
 
@@ -1032,6 +1040,32 @@ def api_groups():
     return jsonify(out)
 
 
+@app.route("/api/bills")
+def api_bills():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT br.bill_type, br.bill_number,
+                       json_agg(json_build_object(
+                           'meeting_id', m.id,
+                           'topic', COALESCE(NULLIF(m.topic, ''), m.filename),
+                           'date', to_char(m.file_date, 'YYYY-MM-DD')
+                       ) ORDER BY br.created_at DESC) AS meetings,
+                       max(br.created_at)::date AS last_seen
+                FROM bill_references br
+                JOIN meetings m ON br.meeting_id = m.id
+                GROUP BY br.bill_type, br.bill_number
+                ORDER BY max(br.created_at) DESC
+            """)
+            rows = cur.fetchall()
+    return jsonify([{
+        "bill_type": r["bill_type"],
+        "bill_number": r["bill_number"],
+        "meetings": r["meetings"],
+        "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
+    } for r in rows])
+
+
 @app.route("/api/facets")
 def api_facets():
     meetings = db_get_all_meetings()
@@ -1779,8 +1813,9 @@ def api_notes_intake():
     note_attendees = (data.get("attendees") or "").strip()
     canvas_image = data.get("canvas_image") or None
 
-    # confirmed_items from canvas scan: [{type, text}]
+    # confirmed_items from canvas scan: [{type, text, billType?, billNumber?}]
     confirmed_items: List[dict] = data.get("confirmed_items") or []
+    bill_items = [i for i in confirmed_items if i.get("type") == "bill"]
 
     note_body = (data.get("body") or "").strip()
     action_items_raw = (data.get("action_items") or "").strip()
@@ -1844,6 +1879,18 @@ def api_notes_intake():
 
     try:
         summary = import_meeting_from_content(filename, content, canvas_image=canvas_image)
+        if bill_items and summary.get("id"):
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    for bill in bill_items:
+                        bt = (bill.get("billType") or "").strip()
+                        bn = (bill.get("billNumber") or "").strip()
+                        if bt and bn:
+                            cur.execute(
+                                "INSERT INTO bill_references (meeting_id, bill_type, bill_number)"
+                                " VALUES (%s, %s, %s)",
+                                (summary["id"], bt, bn)
+                            )
         return jsonify({
             "ok": True,
             "meeting_id": summary["id"],

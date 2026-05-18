@@ -1288,6 +1288,7 @@ let _intakePenColor = "#111111";
 let _intakePenSize = 3;
 let _intakeScanResult = null; // {text, items: [{type, text, accepted}]}
 let _intakeLinkedContacts = []; // [{id, name, company, title, email, phone}]
+let _intakeCanvasLogicalHeight = 600; // grows as user writes near the bottom
 
 function _intakeCanvasEl() { return $("#intake-canvas"); }
 function _intakeCtx() { return _intakeCanvasEl().getContext("2d"); }
@@ -1295,10 +1296,9 @@ function _intakeCtx() { return _intakeCanvasEl().getContext("2d"); }
 function _initIntakeCanvas() {
   const canvas = _intakeCanvasEl();
   const wrap = canvas.parentElement;
-  // Set physical pixel dimensions matching CSS display size
   const dpr = window.devicePixelRatio || 1;
   const w = wrap.clientWidth || 680;
-  const h = 380;
+  const h = _intakeCanvasLogicalHeight;
   canvas.width = w * dpr;
   canvas.height = h * dpr;
   canvas.style.width = w + "px";
@@ -1309,6 +1309,19 @@ function _initIntakeCanvas() {
   ctx.fillRect(0, 0, w, h);
   _intakeStrokes = [];
   _intakeCurrentStroke = null;
+}
+
+function _intakeGrowCanvas() {
+  const canvas = _intakeCanvasEl();
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.width / dpr;
+  _intakeCanvasLogicalHeight += 400;
+  canvas.height = _intakeCanvasLogicalHeight * dpr;
+  canvas.style.height = _intakeCanvasLogicalHeight + "px";
+  _intakeRedraw();
+  // Scroll the wrapper to keep the pen near visible area
+  const scrollWrap = canvas.parentElement;
+  scrollWrap.scrollTop = scrollWrap.scrollHeight;
 }
 
 function _intakeRedraw() {
@@ -1381,6 +1394,10 @@ function _intakePointerUp(e) {
   e.preventDefault();
   if (_intakeCurrentStroke.points.length > 0) {
     _intakeStrokes.push(_intakeCurrentStroke);
+    const lastPt = _intakeCurrentStroke.points[_intakeCurrentStroke.points.length - 1];
+    if (lastPt && lastPt.y > _intakeCanvasLogicalHeight - 100) {
+      _intakeGrowCanvas();
+    }
   }
   _intakeCurrentStroke = null;
 }
@@ -1418,6 +1435,8 @@ function _intakeSetSize(size) {
   });
 }
 
+const _BILL_RE = /\b(H\.R\.|S\.|H\.Res\.|S\.Res\.|H\.Con\.Res\.|S\.Con\.Res\.|H\.J\.Res\.|S\.J\.Res\.)\s*(\d+)\b/gi;
+
 function _extractCallouts(text) {
   const items = [];
   const _hasDue = (s) => /\bdue[:\s]/i.test(s) || /\bdeadline[:\s]/i.test(s);
@@ -1449,22 +1468,29 @@ function _extractCallouts(text) {
     } else if (/^@([A-Za-z]\w*)/.test(line)) {
       items.push({ type: "person", text: line.replace(/^@/, "").trim() });
     }
+
+    // Bills can appear in any line regardless of other markers
+    _BILL_RE.lastIndex = 0;
+    let m;
+    while ((m = _BILL_RE.exec(line)) !== null) {
+      const billType = m[1].replace(/\s+$/, "");
+      const billNumber = m[2];
+      items.push({ type: "bill", billType, billNumber, text: `${billType} ${billNumber}` });
+    }
   }
   return items;
 }
 
 async function _intakeScan() {
   const canvas = _intakeCanvasEl();
-  const scanBtn = $("#intake-scan");
+  const scanBtn = $("#intake-rescan-btn");
   const scanSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>';
 
   if (_intakeStrokes.length === 0) {
-    alert("Draw something on the canvas first, then tap Scan.");
     return;
   }
 
-  scanBtn.disabled = true;
-  scanBtn.innerHTML = `${scanSvg} Transcribing…`;
+  if (scanBtn) { scanBtn.disabled = true; scanBtn.innerHTML = `${scanSvg} Transcribing…`; }
 
   try {
     const res = await fetch("/api/notes/transcribe", {
@@ -1475,19 +1501,22 @@ async function _intakeScan() {
     const data = await res.json();
 
     if (!data.ok) {
-      scanBtn.innerHTML = `${scanSvg} ${escapeHtml(data.error || "Failed")}`;
-      setTimeout(() => { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Scan`; }, 3000);
+      if (scanBtn) {
+        scanBtn.innerHTML = `${scanSvg} ${escapeHtml(data.error || "Failed")}`;
+        setTimeout(() => { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Re-scan`; }, 3000);
+      }
       return;
     }
 
     const items = _extractCallouts(data.text || "").map((item) => ({ ...item, accepted: true }));
     _intakeScanResult = { text: data.text || "", items };
     _renderScanResults();
-    scanBtn.disabled = false;
-    scanBtn.innerHTML = `${scanSvg} Re-scan`;
+    if (scanBtn) { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Re-scan`; }
   } catch (err) {
-    scanBtn.innerHTML = `${scanSvg} Error`;
-    setTimeout(() => { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Scan`; }, 3000);
+    if (scanBtn) {
+      scanBtn.innerHTML = `${scanSvg} Error`;
+      setTimeout(() => { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Re-scan`; }, 3000);
+    }
   }
 }
 
@@ -1497,8 +1526,9 @@ const _SCAN_ICONS = {
   followup:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
   deadline:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
   person:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+  bill:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
 };
-const _SCAN_LABELS = { task: "Task", important: "Important", followup: "Follow-up", deadline: "Deadline", person: "Person" };
+const _SCAN_LABELS = { task: "Task", important: "Important", followup: "Follow-up", deadline: "Deadline", person: "Person", bill: "Bill" };
 
 function _renderScanResults() {
   const queueEl = $("#intake-review-queue");
@@ -1700,16 +1730,26 @@ function openIntakeModal() {
   document.body.style.touchAction = "none";
   document.body.style.webkitUserSelect = "none";
   document.body.style.userSelect = "none";
-  $("#intake-modal-backdrop").classList.remove("hidden");
-  $("#intake-modal-backdrop").classList.add("intake-open");
+  const backdrop = $("#intake-modal-backdrop");
+  backdrop.classList.remove("hidden");
+  backdrop.classList.add("intake-open");
   const dateInput = $("#intake-date");
   if (!dateInput.value) {
     dateInput.value = new Date().toISOString().split("T")[0];
   }
   $("#intake-result").className = "intake-result hidden";
   $("#intake-result").innerHTML = "";
-  $("#intake-modal-submit").disabled = false;
-  $("#intake-modal-submit").textContent = "Save notes";
+  const submitBtn = $("#intake-modal-submit");
+  submitBtn.disabled = false;
+  submitBtn.textContent = "Finalize Notes";
+  const cancelBtn = $("#intake-modal-cancel");
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = "Cancel";
+  // Reset to phase 1
+  const modal = $(".modal-intake");
+  modal.dataset.phase = "1";
+  $("#intake-modal-title").textContent = "Write notes";
+  $("#intake-transcription-loading").classList.add("hidden");
   // Populate group datalist
   const dl = $("#intake-group-list");
   dl.innerHTML = "";
@@ -1721,6 +1761,7 @@ function openIntakeModal() {
   _intakeSetTool("pen");
   _intakeScanResult = null;
   _intakeLinkedContacts = [];
+  _intakeCanvasLogicalHeight = 600;
   $("#intake-review-queue").classList.add("hidden");
   $("#card-preview").classList.add("hidden");
   $("#card-saved-contacts").innerHTML = "";
@@ -1754,6 +1795,8 @@ async function _intakeSaveNotes() {
   const btn = $("#intake-modal-submit");
   btn.disabled = true;
   btn.textContent = "Saving…";
+  const cancelBtn = $("#intake-modal-cancel");
+  cancelBtn.disabled = true;
   const resultEl = $("#intake-result");
   resultEl.className = "intake-result hidden";
 
@@ -1771,7 +1814,12 @@ async function _intakeSaveNotes() {
         reminders: "",
         canvas_image: canvasImage,
         confirmed_items: _intakeScanResult
-          ? _intakeScanResult.items.filter((i) => i.accepted).map((i) => ({ type: i.type, text: i.text }))
+          ? _intakeScanResult.items.filter((i) => i.accepted).map((i) => {
+              const out = { type: i.type, text: i.text };
+              if (i.billType) out.billType = i.billType;
+              if (i.billNumber) out.billNumber = i.billNumber;
+              return out;
+            })
           : null,
       }),
     });
@@ -1803,27 +1851,77 @@ async function _intakeSaveNotes() {
       await refreshMeetings();
       await loadFacets();
       btn.textContent = "Done";
+      cancelBtn.disabled = false;
       setTimeout(() => {
         btn.disabled = false;
-        btn.textContent = "Save notes";
+        btn.textContent = "End Meeting";
       }, 4000);
     } else {
       resultEl.className = "intake-result intake-result-err";
       resultEl.innerHTML = `<strong>Error:</strong> ${escapeHtml(data.error || "Unknown error")}`;
       btn.disabled = false;
-      btn.textContent = "Save notes";
+      btn.textContent = "End Meeting";
+      cancelBtn.disabled = false;
     }
   } catch (err) {
     resultEl.classList.remove("hidden");
     resultEl.className = "intake-result intake-result-err";
     resultEl.innerHTML = `<strong>Error:</strong> ${escapeHtml(err.message)}`;
     btn.disabled = false;
-    btn.textContent = "Save notes";
+    btn.textContent = "End Meeting";
+    cancelBtn.disabled = false;
   }
 }
 
+// Phase 1 → Phase 2 transition: run transcription, then reveal review queue
+async function _intakeFinalizeNotes() {
+  const modal = $(".modal-intake");
+  modal.dataset.phase = "2";
+  $("#intake-modal-title").textContent = "Post-meeting";
+  const submitBtn = $("#intake-modal-submit");
+  submitBtn.textContent = "End Meeting";
+  const cancelBtn = $("#intake-modal-cancel");
+  cancelBtn.textContent = "← Back";
+
+  if (_intakeStrokes.length === 0) {
+    // No drawing — skip transcription, just reveal phase 2 UI
+    return;
+  }
+
+  const loadingEl = $("#intake-transcription-loading");
+  loadingEl.classList.remove("hidden");
+  submitBtn.disabled = true;
+
+  try {
+    const canvas = _intakeCanvasEl();
+    const res = await fetch("/api/notes/transcribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: canvas.toDataURL("image/png") }),
+    });
+    const data = await res.json();
+    loadingEl.classList.add("hidden");
+    if (data.ok) {
+      const items = _extractCallouts(data.text || "").map((item) => ({ ...item, accepted: true }));
+      _intakeScanResult = { text: data.text || "", items };
+      _renderScanResults();
+    } else {
+      _intakeScanResult = { text: "", items: [] };
+      _renderScanResults();
+    }
+  } catch (_err) {
+    loadingEl.classList.add("hidden");
+  }
+  submitBtn.disabled = false;
+}
+
 async function submitIntake() {
-  await _intakeSaveNotes();
+  const modal = $(".modal-intake");
+  if (modal.dataset.phase === "1") {
+    await _intakeFinalizeNotes();
+  } else {
+    await _intakeSaveNotes();
+  }
 }
 
 // ---------- Data fetches ----------
@@ -1844,9 +1942,37 @@ async function loadFacets() {
   state.facets = await api("/api/facets");
 }
 
+function renderBillsTable(bills) {
+  const tbody = $("#bills-body");
+  if (!bills.length) {
+    tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:30px;">No bills referenced yet.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = bills.map((b) => {
+    const meetingLinks = (b.meetings || []).map((m) =>
+      `<button class="bill-meeting-link" data-meeting-id="${escapeHtml(m.meeting_id)}">${escapeHtml(m.topic || m.date || "Meeting")}</button>`
+    ).join(" ");
+    return `<tr>
+      <td><strong>${escapeHtml(b.bill_type)}${escapeHtml(b.bill_number)}</strong></td>
+      <td class="bill-meetings-cell">${meetingLinks}</td>
+      <td>${escapeHtml(b.last_seen || "—")}</td>
+    </tr>`;
+  }).join("");
+  tbody.querySelectorAll(".bill-meeting-link").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      switchTab("meetings");
+      selectMeeting(btn.dataset.meetingId);
+    });
+  });
+}
+
 async function loadGroups() {
-  const groups = await api("/api/groups");
+  const [groups, bills] = await Promise.all([
+    api("/api/groups"),
+    api("/api/bills"),
+  ]);
   renderGroupsTable(groups);
+  renderBillsTable(bills);
 }
 
 async function selectMeeting(id) {
@@ -2853,9 +2979,33 @@ document.addEventListener("DOMContentLoaded", async () => {
     refreshMeetings();
   });
 
+  // Groups sub-tab toggle (Groups / Bills)
+  document.querySelectorAll(".groups-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      const subtab = btn.dataset.subtab;
+      document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
+      $(`#groups-panel-${subtab}`).classList.remove("hidden");
+    });
+  });
+
   // Intake modal
   $("#intake-modal-close").addEventListener("click", closeIntakeModal);
-  $("#intake-modal-cancel").addEventListener("click", closeIntakeModal);
+  $("#intake-modal-cancel").addEventListener("click", () => {
+    const modal = $(".modal-intake");
+    if (modal.dataset.phase === "2") {
+      // Go back to phase 1 instead of closing
+      modal.dataset.phase = "1";
+      $("#intake-modal-title").textContent = "Write notes";
+      $("#intake-modal-submit").textContent = "Finalize Notes";
+      $("#intake-modal-submit").disabled = false;
+      $("#intake-modal-cancel").textContent = "Cancel";
+      $("#intake-transcription-loading").classList.add("hidden");
+    } else {
+      closeIntakeModal();
+    }
+  });
   // No backdrop-tap-to-close: too easy to accidentally dismiss with a resting palm on iPad
   $("#intake-modal-submit").addEventListener("click", submitIntake);
 
@@ -2864,7 +3014,30 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#intake-tool-eraser").addEventListener("click", () => _intakeSetTool("eraser"));
   $("#intake-undo").addEventListener("click", _intakeUndo);
   $("#intake-clear").addEventListener("click", _intakeClearCanvas);
-  $("#intake-scan").addEventListener("click", _intakeScan);
+  $("#intake-rescan-btn").addEventListener("click", _intakeScan);
+
+  // Fullscreen canvas toggle
+  $("#intake-fullscreen-btn").addEventListener("click", () => {
+    const backdrop = $("#intake-modal-backdrop");
+    const isFullscreen = backdrop.classList.toggle("intake-fullscreen");
+    requestAnimationFrame(() => {
+      _intakeCanvasLogicalHeight = isFullscreen
+        ? Math.floor(window.innerHeight - 180)
+        : Math.max(_intakeCanvasLogicalHeight, 600);
+      const canvas = _intakeCanvasEl();
+      const dpr = window.devicePixelRatio || 1;
+      const wrap = canvas.parentElement;
+      const w = wrap.clientWidth || 680;
+      canvas.width = w * dpr;
+      canvas.height = _intakeCanvasLogicalHeight * dpr;
+      canvas.style.width = w + "px";
+      canvas.style.height = _intakeCanvasLogicalHeight + "px";
+      const ctx = _intakeCtx();
+      ctx.scale(dpr, dpr);
+      _intakeRedraw();
+    });
+  });
+
   document.querySelectorAll(".pen-size-btn").forEach((btn) => {
     btn.addEventListener("click", () => _intakeSetSize(btn.dataset.size));
   });
@@ -2949,7 +3122,28 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!$("#subtask-modal-backdrop").classList.contains("hidden")) { closeAddSubtaskModal(); return; }
       if (!$("#blocker-modal-backdrop").classList.contains("hidden")) { closeBlockerModal(); return; }
       if ($("#search-overlay").classList.contains("open")) { closeSearchOverlay(); return; }
-      if (!$("#intake-modal-backdrop").classList.contains("hidden")) { closeIntakeModal(); return; }
+      if (!$("#intake-modal-backdrop").classList.contains("hidden")) {
+        const backdrop = $("#intake-modal-backdrop");
+        if (backdrop.classList.contains("intake-fullscreen")) {
+          backdrop.classList.remove("intake-fullscreen");
+          requestAnimationFrame(() => {
+            _intakeCanvasLogicalHeight = Math.max(_intakeCanvasLogicalHeight, 600);
+            const canvas = _intakeCanvasEl();
+            const dpr = window.devicePixelRatio || 1;
+            const wrap = canvas.parentElement;
+            canvas.width = (wrap.clientWidth || 680) * dpr;
+            canvas.height = _intakeCanvasLogicalHeight * dpr;
+            canvas.style.width = (wrap.clientWidth || 680) + "px";
+            canvas.style.height = _intakeCanvasLogicalHeight + "px";
+            const ctx = _intakeCtx();
+            ctx.scale(dpr, dpr);
+            _intakeRedraw();
+          });
+        } else {
+          closeIntakeModal();
+        }
+        return;
+      }
       if (!$("#import-modal-backdrop").classList.contains("hidden"))  { closeImportModal(); return; }
       if (!$("#edit-modal-backdrop").classList.contains("hidden"))    { closeEditModal(); return; }
       if (!$("#nl-modal-backdrop").classList.contains("hidden"))       { closeNLModal(); return; }
