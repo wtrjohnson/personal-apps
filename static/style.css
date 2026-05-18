@@ -3074,27 +3074,40 @@ table.bills-table tr:last-child td { border-bottom: none; }
   -webkit-touch-callout: none;
 }
 
-/* Fullscreen canvas — covers entire viewport, only toolbar + canvas visible */
-#intake-canvas-mode.intake-canvas-fullscreen-active {
+/* Intake canvas fullscreen overlay (body-level, works on iOS Safari) */
+.intake-canvas-fs-overlay {
   position: fixed;
   inset: 0;
   z-index: 9999;
   background: #ffffff;
   display: flex;
   flex-direction: column;
-  border-radius: 0;
 }
-#intake-canvas-mode.intake-canvas-fullscreen-active .intake-canvas-scroll {
+.intake-canvas-fs-overlay.hidden { display: none; }
+.intake-canvas-fs-overlay #intake-canvas-mode {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.intake-canvas-fs-overlay .intake-toolbar {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  background: #fff;
+}
+.intake-canvas-fs-overlay .intake-canvas-scroll {
   flex: 1;
   max-height: none;
-  border-radius: 0;
   border-left: none;
   border-right: none;
   border-bottom: none;
+  border-radius: 0;
 }
-#intake-canvas-mode.intake-canvas-fullscreen-active .intake-toolbar {
-  border-bottom: 1px solid var(--border);
-  padding: 8px 12px;
+.intake-canvas-fs-overlay .intake-legend-strip {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
   background: #fff;
 }
 

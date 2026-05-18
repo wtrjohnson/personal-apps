@@ -1312,17 +1312,13 @@ function _initIntakeCanvas() {
   _intakeCurrentStroke = null;
 }
 
+let _intakeCanvasFsParent = null; // tracks original parent for restore
+
 function _intakeResizeCanvas() {
-  const canvasMode = $("#intake-canvas-mode");
-  const isFullscreen = canvasMode.classList.contains("intake-canvas-fullscreen-active");
   const canvas = _intakeCanvasEl();
   const dpr = window.devicePixelRatio || 1;
   const wrap = canvas.parentElement; // .intake-canvas-scroll
   const w = wrap.clientWidth || 680;
-  if (isFullscreen) {
-    // Canvas fills remaining height after toolbar (~56px)
-    _intakeCanvasLogicalHeight = Math.max(window.innerHeight - 56, 400);
-  }
   canvas.width = w * dpr;
   canvas.height = _intakeCanvasLogicalHeight * dpr;
   canvas.style.width = w + "px";
@@ -1333,13 +1329,25 @@ function _intakeResizeCanvas() {
 }
 
 function _intakeToggleFullscreen() {
+  const overlay = $("#intake-canvas-fs-overlay");
   const canvasMode = $("#intake-canvas-mode");
-  const isNowFullscreen = canvasMode.classList.toggle("intake-canvas-fullscreen-active");
-  if (!isNowFullscreen) {
-    // Restore height to logical height (keep what was drawn)
+  const isFullscreen = !overlay.classList.contains("hidden");
+
+  if (!isFullscreen) {
+    // Enter fullscreen: move canvas mode into body-level overlay
+    _intakeCanvasFsParent = canvasMode.parentElement;
+    overlay.appendChild(canvasMode);
+    overlay.classList.remove("hidden");
+    // Size canvas to fill screen minus toolbar + legend (~110px combined)
+    _intakeCanvasLogicalHeight = Math.max(window.visualViewport?.height ?? window.innerHeight - 110, 400);
+    requestAnimationFrame(_intakeResizeCanvas);
+  } else {
+    // Exit fullscreen: return canvas mode to modal
+    if (_intakeCanvasFsParent) _intakeCanvasFsParent.insertBefore(canvasMode, _intakeCanvasFsParent.querySelector("#card-scan-section"));
+    overlay.classList.add("hidden");
     _intakeCanvasLogicalHeight = Math.max(_intakeCanvasLogicalHeight, 600);
+    requestAnimationFrame(_intakeResizeCanvas);
   }
-  requestAnimationFrame(_intakeResizeCanvas);
 }
 
 function _intakeGrowCanvas() {
@@ -1801,7 +1809,7 @@ function openIntakeModal() {
 
 function closeIntakeModal() {
   // Exit fullscreen first if active
-  $("#intake-canvas-mode").classList.remove("intake-canvas-fullscreen-active");
+  if (!$("#intake-canvas-fs-overlay").classList.contains("hidden")) _intakeToggleFullscreen();
   $("#intake-modal-backdrop").classList.add("hidden");
   $("#intake-modal-backdrop").classList.remove("intake-open");
   document.body.style.overflow = "";
@@ -3147,8 +3155,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!$("#subtask-modal-backdrop").classList.contains("hidden")) { closeAddSubtaskModal(); return; }
       if (!$("#blocker-modal-backdrop").classList.contains("hidden")) { closeBlockerModal(); return; }
       if ($("#search-overlay").classList.contains("open")) { closeSearchOverlay(); return; }
-      if (!$("#intake-modal-backdrop").classList.contains("hidden")) {
-        if ($("#intake-canvas-mode").classList.contains("intake-canvas-fullscreen-active")) {
+      if (!$("#intake-modal-backdrop").classList.contains("hidden") || !$("#intake-canvas-fs-overlay").classList.contains("hidden")) {
+        if (!$("#intake-canvas-fs-overlay").classList.contains("hidden")) {
           _intakeToggleFullscreen();
         } else {
           closeIntakeModal();
