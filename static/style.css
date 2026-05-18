@@ -2955,7 +2955,8 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .modal-intake[data-phase="1"] #intake-result,
 .modal-intake[data-phase="1"] .intake-phase2-only { display: none !important; }
 
-/* Phase 2: compact canvas */
+/* Phase 2: hide metadata, compact canvas */
+.modal-intake[data-phase="2"] .intake-phase1-only { display: none !important; }
 .modal-intake[data-phase="2"] .intake-canvas-scroll { max-height: 220px; }
 
 /* Transcription status */
@@ -2978,7 +2979,7 @@ table.bills-table tr:last-child td { border-bottom: none; }
 }
 @keyframes intake-spin { to { transform: rotate(360deg); } }
 
-/* Callout legend */
+/* Phase 2 callout legend — collapsible, above review queue */
 .intake-callout-legend {
   margin: 8px 0 6px;
   border-top: 1px solid var(--border);
@@ -3013,6 +3014,35 @@ table.bills-table tr:last-child td { border-bottom: none; }
   color: var(--muted);
 }
 
+/* Phase 1 legend strip — always visible below canvas */
+.intake-legend-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 6px 2px 2px;
+}
+.intake-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.intake-legend-sym {
+  font-family: var(--mono, monospace);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--ink);
+  background: var(--card-soft);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+/* Phase 2: compact card section */
+#card-scan-section { margin: 10px 0 6px; }
+
 /* Bill callout icon */
 .scan-item-icon--bill { background: #f0f9ff; color: #0369a1; }
 
@@ -3044,40 +3074,32 @@ table.bills-table tr:last-child td { border-bottom: none; }
   -webkit-touch-callout: none;
 }
 
-/* Fullscreen intake canvas */
-.modal-backdrop.intake-fullscreen {
-  padding: 0;
-  align-items: stretch;
-}
-.modal-backdrop.intake-fullscreen .modal-intake {
-  max-width: 100%;
-  width: 100%;
-  height: 100%;
-  max-height: 100%;
+/* Fullscreen canvas — covers entire viewport, only toolbar + canvas visible */
+#intake-canvas-mode.intake-canvas-fullscreen-active {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
   border-radius: 0;
-  display: flex;
-  flex-direction: column;
 }
-.modal-backdrop.intake-fullscreen .modal-header { flex-shrink: 0; }
-.modal-backdrop.intake-fullscreen .intake-modal-body {
-  flex: 1;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
-  display: flex;
-  flex-direction: column;
-}
-.modal-backdrop.intake-fullscreen #intake-canvas-mode {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-.modal-backdrop.intake-fullscreen .intake-canvas-scroll {
+#intake-canvas-mode.intake-canvas-fullscreen-active .intake-canvas-scroll {
   flex: 1;
   max-height: none;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
 }
-.modal-backdrop.intake-fullscreen .modal-footer { flex-shrink: 0; }
+#intake-canvas-mode.intake-canvas-fullscreen-active .intake-legend-strip {
+  display: none;
+}
+#intake-canvas-mode.intake-canvas-fullscreen-active .intake-toolbar {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  background: #fff;
+}
 
 /* Scribble writing area (text mode) */
 .intake-scribble-wrap {
@@ -3361,22 +3383,20 @@ table.bills-table tr:last-child td { border-bottom: none; }
   font-size: 12px; padding: 5px 12px;
 }
 #card-preview {
-  margin-top: 8px; border: 1px solid var(--border); border-radius: var(--r-sm);
-  padding: 10px 12px; background: var(--card);
+  margin-top: 6px; border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 8px 10px; background: var(--card);
 }
-.card-preview-header {
-  display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
-}
-.card-preview-label { font-size: 11px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .05em; }
-.card-preview-dismiss { background: none; border: none; cursor: pointer; color: var(--muted); font-size: 16px; padding: 0 2px; }
+.card-fields--compact { display: flex; flex-direction: column; gap: 5px; margin-bottom: 6px; }
+.card-preview-actions { display: flex; gap: 6px; align-items: center; }
 .card-fields { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
 .card-field {
   width: 100%; box-sizing: border-box; padding: 6px 10px; font: inherit; font-size: 14px;
   border: 1px solid var(--border-strong); border-radius: var(--r-sm); background: var(--surface); color: var(--ink);
 }
 .card-field:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-softer); }
+.card-field--extra.hidden { display: none; }
 #card-save-btn { font-size: 12px; padding: 5px 14px; }
-#card-saved-contacts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+#card-saved-contacts { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 6px; }
 .saved-contact-chip {
   display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px 3px 10px;
   background: var(--accent-softer); border: 1px solid var(--accent); border-radius: var(--r-pill);
