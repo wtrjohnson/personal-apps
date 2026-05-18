@@ -5,6 +5,7 @@
   <title>Notes</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
   <div class="app" id="app">
@@ -285,20 +286,40 @@
 
       <!-- GROUPS -->
       <section class="view" id="view-groups">
-        <div class="groups-wrap">
-          <table class="groups">
-            <thead>
-              <tr>
-                <th>Group</th>
-                <th class="num">Meetings</th>
-                <th>Last contact</th>
-                <th class="num">Open actions</th>
-                <th class="num">Open reminders</th>
-                <th>Variants</th>
-              </tr>
-            </thead>
-            <tbody id="groups-body"></tbody>
-          </table>
+        <div class="groups-subtabs-bar">
+          <button class="groups-subtab active" data-subtab="groups">Groups</button>
+          <button class="groups-subtab" data-subtab="bills">Bills</button>
+        </div>
+        <div class="groups-panel" id="groups-panel-groups">
+          <div class="groups-wrap">
+            <table class="groups">
+              <thead>
+                <tr>
+                  <th>Group</th>
+                  <th class="num">Meetings</th>
+                  <th>Last contact</th>
+                  <th class="num">Open actions</th>
+                  <th class="num">Open reminders</th>
+                  <th>Variants</th>
+                </tr>
+              </thead>
+              <tbody id="groups-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="groups-panel hidden" id="groups-panel-bills">
+          <div class="groups-wrap">
+            <table class="bills-table">
+              <thead>
+                <tr>
+                  <th>Bill</th>
+                  <th>Meetings Referenced</th>
+                  <th>Last Seen</th>
+                </tr>
+              </thead>
+              <tbody id="bills-body"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -645,9 +666,14 @@
     <button class="dock-btn" data-tab="meetings" title="Meetings (3)">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17"/><path d="M8 3v4M16 3v4"/></svg>
     </button>
-    <button class="dock-btn" data-tab="groups" title="Groups (4)">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.2"/><path d="M2.8 19.5c.8-3.2 3.3-5 6.2-5s5.4 1.8 6.2 5"/><circle cx="17" cy="8" r="2.5"/><path d="M15 13.5c2.5 0 4.4 1.3 5.2 4"/></svg>
-    </button>
+    <div class="dock-btn-wrap">
+      <button class="dock-btn" data-tab="groups" title="Groups (4)">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.2"/><path d="M2.8 19.5c.8-3.2 3.3-5 6.2-5s5.4 1.8 6.2 5"/><circle cx="17" cy="8" r="2.5"/><path d="M15 13.5c2.5 0 4.4 1.3 5.2 4"/></svg>
+      </button>
+      <div class="dock-submenu">
+        <button class="dock-sub-item" id="dock-sub-bills">Bills</button>
+      </div>
+    </div>
     <button class="dock-btn" data-tab="smart" title="Smart Views (5)">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
     </button>
@@ -664,14 +690,14 @@
 
   <!-- Handwriting Intake modal -->
   <div id="intake-modal-backdrop" class="modal-backdrop hidden">
-    <div class="modal modal-intake" role="dialog" aria-modal="true">
+    <div class="modal modal-intake" data-phase="1" role="dialog" aria-modal="true">
       <div class="modal-header">
-        <h2>Write notes</h2>
+        <h2 id="intake-modal-title">Write notes</h2>
         <button class="modal-close" id="intake-modal-close" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body intake-modal-body">
-        <!-- Metadata fields -->
-        <div class="intake-context-row">
+        <!-- Metadata fields — phase 1 only -->
+        <div class="intake-context-row intake-phase1-only">
           <div class="intake-context-field" style="flex:2">
             <label for="intake-group">Group / Project</label>
             <input id="intake-group" type="text" list="intake-group-list" placeholder="e.g. Work, Personal…" autocomplete="off" inputmode="text">
@@ -682,7 +708,7 @@
             <input id="intake-date" type="date">
           </div>
         </div>
-        <div class="intake-context-row" style="margin-top:8px">
+        <div class="intake-context-row intake-phase1-only" style="margin-top:8px">
           <div class="intake-context-field" style="flex:2">
             <label for="intake-topic">Topic</label>
             <input id="intake-topic" type="text" placeholder="Meeting topic or title…" autocomplete="off" inputmode="text">
@@ -692,7 +718,13 @@
             <input id="intake-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off" inputmode="text">
           </div>
         </div>
-        <!-- Canvas -->
+        <!-- Phase 2 only: transcription status -->
+        <div id="intake-transcription-status" class="intake-transcription-status">
+          <div id="intake-transcription-loading" class="intake-transcription-loading hidden">
+            <span class="intake-spinner"></span> Transcribing handwriting…
+          </div>
+        </div>
+        <!-- Canvas — always visible, sizing differs per phase -->
         <div id="intake-canvas-mode">
           <div class="intake-toolbar">
             <!-- Tool -->
@@ -731,43 +763,88 @@
               <button id="intake-clear" class="tool-icon-btn" title="Clear canvas">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
               </button>
-              <button id="intake-scan" class="scan-action-btn">
+              <button id="intake-fullscreen-btn" class="tool-icon-btn" title="Fullscreen canvas (Esc to exit)">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+              </button>
+              <button id="intake-rescan-btn" class="scan-action-btn intake-phase2-only">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                Scan
+                Re-scan
               </button>
             </div>
           </div>
-          <canvas id="intake-canvas" class="intake-canvas"></canvas>
+          <div class="intake-canvas-scroll">
+            <canvas id="intake-canvas" class="intake-canvas"></canvas>
+          </div>
+          <!-- Always-visible callout key, hidden in fullscreen -->
+          <div class="intake-legend-strip">
+            <span class="intake-legend-item"><span class="intake-legend-sym">[ ]</span> Task</span>
+            <span class="intake-legend-item"><span class="intake-legend-sym">!!</span> Important</span>
+            <span class="intake-legend-item"><span class="intake-legend-sym">??</span> Follow-up</span>
+            <span class="intake-legend-item"><span class="intake-legend-sym">@name</span> Person</span>
+            <span class="intake-legend-item"><span class="intake-legend-sym">due:</span> Deadline</span>
+            <span class="intake-legend-item"><span class="intake-legend-sym">H.R./S.</span> Bill</span>
+          </div>
         </div>
-        <!-- Scan result -->
+        <!-- Phase 2 only: business card scanner -->
+        <div id="card-scan-section">
+          <input type="file" id="card-photo-input" accept="image/*" capture="environment" style="display:none">
+          <div id="card-saved-contacts"></div>
+          <button type="button" id="card-scan-btn" class="secondary-btn-sm">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            Scan Business Card
+          </button>
+          <div id="card-preview" class="hidden">
+            <div class="card-fields card-fields--compact">
+              <input id="card-field-name"    class="card-field" placeholder="Name" autocomplete="off">
+              <input id="card-field-company" class="card-field" placeholder="Company" autocomplete="off">
+              <input id="card-field-title"   class="card-field card-field--extra hidden" placeholder="Title" autocomplete="off">
+              <input id="card-field-email"   class="card-field card-field--extra hidden" placeholder="Email" autocomplete="off" type="email">
+              <input id="card-field-phone"   class="card-field card-field--extra hidden" placeholder="Phone" autocomplete="off" type="tel">
+            </div>
+            <div class="card-preview-actions">
+              <button type="button" id="card-save-btn" class="primary-btn-sm">Save</button>
+              <button type="button" id="card-preview-dismiss" class="secondary-btn-sm">Discard</button>
+            </div>
+          </div>
+        </div>
+        <!-- Phase 2 only: callout legend -->
+        <details id="intake-callout-legend" class="intake-callout-legend">
+          <summary>Callout markers</summary>
+          <div class="callout-legend-grid">
+            <span class="callout-legend-marker">[ ]</span><span class="callout-legend-label">Task — action item</span>
+            <span class="callout-legend-marker">!!</span><span class="callout-legend-label">Important — high-priority note</span>
+            <span class="callout-legend-marker">??</span><span class="callout-legend-label">Follow-up — needs follow-up</span>
+            <span class="callout-legend-marker">@name</span><span class="callout-legend-label">Person — someone mentioned</span>
+            <span class="callout-legend-marker">due:</span><span class="callout-legend-label">Deadline — date-bound item</span>
+            <span class="callout-legend-marker">H.R. / S.</span><span class="callout-legend-label">Bill — legislative reference (e.g. H.R. 1094)</span>
+          </div>
+        </details>
+        <!-- Phase 2 only: scan results -->
         <div id="intake-review-queue" class="hidden">
-          <div class="ocr-result-header">
-            <span class="ocr-result-label">Recognized text — edit before saving</span>
+          <div class="scan-result-header">
+            <span class="scan-result-summary" id="scan-result-summary"></span>
             <button id="review-queue-clear" class="secondary-btn-sm">Clear</button>
           </div>
-          <textarea id="intake-ocr-text" class="intake-textarea ocr-textarea" rows="4"
-            placeholder="Scan results appear here…"
-            autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
-        </div>
-        <!-- Action items and reminders -->
-        <div id="intake-review" class="intake-review-section">
-          <div class="intake-review-field">
-            <label for="intake-action-items">Action Items <span class="intake-label-hint">— one per line</span></label>
-            <textarea id="intake-action-items" class="intake-textarea" rows="3" placeholder="Deploy fix&#10;Review PR&#10;Send update to Alice" inputmode="text"></textarea>
-          </div>
-          <div class="intake-review-field">
-            <label for="intake-reminders">Reminders <span class="intake-label-hint">— one per line</span></label>
-            <textarea id="intake-reminders" class="intake-textarea" rows="2" placeholder="Check back next week&#10;Ask Bob about budget" inputmode="text"></textarea>
-          </div>
+          <div id="scan-result-items"></div>
+          <details class="scan-transcription-details" id="scan-transcription-details">
+            <summary>Show full transcription</summary>
+            <pre id="scan-transcription-text"></pre>
+          </details>
         </div>
         <!-- Result banner -->
         <div id="intake-result" class="intake-result hidden"></div>
       </div>
       <div class="modal-footer">
         <button class="secondary-btn" id="intake-modal-cancel">Cancel</button>
-        <button class="primary-btn" id="intake-modal-submit">Save notes</button>
+        <button class="primary-btn" id="intake-modal-submit">Finalize Notes</button>
       </div>
     </div>
+  </div>
+
+  <!-- Canvas fullscreen overlay -->
+  <div id="canvas-fullscreen-overlay" class="hidden" role="dialog" aria-modal="true">
+    <img id="canvas-fullscreen-img" src="" alt="Handwritten note fullscreen">
+    <button id="canvas-fullscreen-close" title="Close (or triple-tap)">✕</button>
   </div>
 
   <script src="/static/app.js"></script>

@@ -188,6 +188,33 @@ def init_db() -> None:
                     END IF;
                 END $$;
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS contacts (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL DEFAULT '',
+                    company TEXT DEFAULT '',
+                    title TEXT DEFAULT '',
+                    email TEXT DEFAULT '',
+                    phone TEXT DEFAULT '',
+                    notes TEXT DEFAULT '',
+                    card_image TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS meeting_contacts (
+                    meeting_id TEXT REFERENCES meetings(id) ON DELETE CASCADE,
+                    contact_id TEXT REFERENCES contacts(id) ON DELETE CASCADE,
+                    PRIMARY KEY (meeting_id, contact_id)
+                );
+                CREATE TABLE IF NOT EXISTS bill_references (
+                    id          SERIAL PRIMARY KEY,
+                    meeting_id  TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                    bill_type   TEXT NOT NULL DEFAULT '',
+                    bill_number TEXT NOT NULL DEFAULT '',
+                    created_at  TIMESTAMP DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS bill_refs_meeting ON bill_references (meeting_id);
+            """)
 
 
 if DATABASE_URL:
@@ -283,6 +310,7 @@ class Meeting:
             "body": self.body,
             "body_html": self.body_html,
             "canvas_image": self.canvas_image,
+            "contacts": getattr(self, "_contacts", []),
         }
 
 
@@ -621,7 +649,17 @@ def db_get_meeting(mid: str) -> Optional[Meeting]:
                 return None
             cur.execute("SELECT * FROM tasks WHERE meeting_id = %s", (mid,))
             task_rows = cur.fetchall()
-    return _row_to_meeting(dict(row), [dict(t) for t in task_rows])
+            cur.execute("""
+                SELECT c.id, c.name, c.company, c.title, c.email, c.phone
+                FROM contacts c
+                JOIN meeting_contacts mc ON mc.contact_id = c.id
+                WHERE mc.meeting_id = %s
+                ORDER BY c.name
+            """, (mid,))
+            contact_rows = [dict(r) for r in cur.fetchall()]
+    m = _row_to_meeting(dict(row), [dict(t) for t in task_rows])
+    m._contacts = contact_rows
+    return m
 
 
 _TASKS_SELECT = """
@@ -893,6 +931,92 @@ def api_meeting(mid: str):
     return jsonify(m.full())
 
 
+@app.route("/api/meetings/<mid>", methods=["DELETE"])
+def api_meeting_delete(mid: str):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM meetings WHERE id = %s", (mid,))
+            if cur.rowcount == 0:
+                return jsonify({"ok": False, "error": "Not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/contacts", methods=["GET"])
+def api_contacts_list():
+    q = request.args.get("q", "").lower()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT c.*, COUNT(mc.meeting_id) AS meeting_count
+                FROM contacts c
+                LEFT JOIN meeting_contacts mc ON mc.contact_id = c.id
+                GROUP BY c.id
+                ORDER BY c.name
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+    if q:
+        rows = [r for r in rows if q in (r.get("name") or "").lower()
+                or q in (r.get("company") or "").lower()
+                or q in (r.get("email") or "").lower()]
+    for r in rows:
+        r.pop("card_image", None)
+    return jsonify(rows)
+
+
+@app.route("/api/contacts", methods=["POST"])
+def api_contacts_upsert():
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    company = (data.get("company") or "").strip()
+    title = (data.get("title") or "").strip()
+    phone = (data.get("phone") or "").strip()
+    notes = (data.get("notes") or "").strip()
+    card_image = data.get("card_image") or None
+    if not name:
+        return jsonify({"ok": False, "error": "name required"}), 400
+    key = email if email else (name + company).lower()
+    cid = hashlib.sha1(key.encode()).hexdigest()[:16]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO contacts (id, name, company, title, email, phone, notes, card_image, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    name=EXCLUDED.name, company=EXCLUDED.company, title=EXCLUDED.title,
+                    email=EXCLUDED.email, phone=EXCLUDED.phone, notes=EXCLUDED.notes,
+                    card_image=COALESCE(EXCLUDED.card_image, contacts.card_image),
+                    updated_at=NOW()
+            """, (cid, name, company, title, email, phone, notes, card_image))
+    return jsonify({"ok": True, "id": cid, "name": name})
+
+
+@app.route("/api/meetings/<mid>/contacts", methods=["POST"])
+def api_meeting_link_contact(mid: str):
+    data = request.get_json(force=True, silent=True) or {}
+    cid = (data.get("contact_id") or "").strip()
+    if not cid:
+        return jsonify({"ok": False, "error": "contact_id required"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO meeting_contacts (meeting_id, contact_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                (mid, cid)
+            )
+    return jsonify({"ok": True})
+
+
+@app.route("/api/meetings/<mid>/contacts/<cid>", methods=["DELETE"])
+def api_meeting_unlink_contact(mid: str, cid: str):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM meeting_contacts WHERE meeting_id=%s AND contact_id=%s",
+                (mid, cid)
+            )
+    return jsonify({"ok": True})
+
+
 @app.route("/api/groups")
 def api_groups():
     by_group: Dict[str, List[Meeting]] = {}
@@ -914,6 +1038,32 @@ def api_groups():
         })
     out.sort(key=lambda x: (x["last_contact"] or ""), reverse=True)
     return jsonify(out)
+
+
+@app.route("/api/bills")
+def api_bills():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT br.bill_type, br.bill_number,
+                       json_agg(json_build_object(
+                           'meeting_id', m.id,
+                           'topic', COALESCE(NULLIF(m.topic, ''), m.filename),
+                           'date', to_char(m.file_date, 'YYYY-MM-DD')
+                       ) ORDER BY br.created_at DESC) AS meetings,
+                       max(br.created_at)::date AS last_seen
+                FROM bill_references br
+                JOIN meetings m ON br.meeting_id = m.id
+                GROUP BY br.bill_type, br.bill_number
+                ORDER BY max(br.created_at) DESC
+            """)
+            rows = cur.fetchall()
+    return jsonify([{
+        "bill_type": r["bill_type"],
+        "bill_number": r["bill_number"],
+        "meetings": r["meetings"],
+        "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
+    } for r in rows])
 
 
 @app.route("/api/facets")
@@ -1598,7 +1748,59 @@ def api_import_notes():
 
 
 # --------------------------------------------------
-# HANDWRITING INTAKE (local Tesseract OCR via frontend, text assembly backend)
+# CLAUDE VISION TRANSCRIPTION
+# --------------------------------------------------
+
+@app.route("/api/notes/transcribe", methods=["POST"])
+def api_notes_transcribe():
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return jsonify({"ok": False, "error": "Transcription not configured"}), 503
+
+    data = request.get_json(force=True, silent=True) or {}
+    image_data = data.get("image", "")
+    if not image_data:
+        return jsonify({"ok": False, "error": "image required"}), 400
+
+    if "," in image_data:
+        image_data = image_data.split(",", 1)[1]
+
+    prompt = (
+        "Transcribe all handwritten text from this image exactly as written. "
+        "Preserve line breaks — output one line of text per line of handwriting. "
+        "Return only the transcribed text, nothing else."
+    )
+
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_data,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        text = message.content[0].text.strip()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Transcription failed: {e}"}), 500
+
+    return jsonify({"ok": True, "text": text})
+
+
+# --------------------------------------------------
+# HANDWRITING INTAKE (canvas image + confirmed items → meeting note)
 # --------------------------------------------------
 
 @app.route("/api/notes/intake", methods=["POST"])
@@ -1611,8 +1813,9 @@ def api_notes_intake():
     note_attendees = (data.get("attendees") or "").strip()
     canvas_image = data.get("canvas_image") or None
 
-    # confirmed_items from canvas scan: [{type, text}]
+    # confirmed_items from canvas scan: [{type, text, billType?, billNumber?}]
     confirmed_items: List[dict] = data.get("confirmed_items") or []
+    bill_items = [i for i in confirmed_items if i.get("type") == "bill"]
 
     note_body = (data.get("body") or "").strip()
     action_items_raw = (data.get("action_items") or "").strip()
@@ -1653,12 +1856,12 @@ def api_notes_intake():
 
     action_lines = [l.strip() for l in action_items_raw.splitlines() if l.strip()]
     if action_lines:
-        body_parts.append("\n## Action Items\n")
+        body_parts.append("\nAction Items:")
         body_parts.extend(f"- [ ] {line}" for line in action_lines)
 
     reminder_lines = [l.strip() for l in reminders_raw.splitlines() if l.strip()]
     if reminder_lines:
-        body_parts.append("\n## Reminders/Important\n")
+        body_parts.append("\nReminders/Important:")
         body_parts.extend(f"- [ ] {line}" for line in reminder_lines)
 
     body = "\n".join(body_parts)
@@ -1676,6 +1879,18 @@ def api_notes_intake():
 
     try:
         summary = import_meeting_from_content(filename, content, canvas_image=canvas_image)
+        if bill_items and summary.get("id"):
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    for bill in bill_items:
+                        bt = (bill.get("billType") or "").strip()
+                        bn = (bill.get("billNumber") or "").strip()
+                        if bt and bn:
+                            cur.execute(
+                                "INSERT INTO bill_references (meeting_id, bill_type, bill_number)"
+                                " VALUES (%s, %s, %s)",
+                                (summary["id"], bt, bn)
+                            )
         return jsonify({
             "ok": True,
             "meeting_id": summary["id"],

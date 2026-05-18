@@ -101,3 +101,14 @@ CREATE INDEX IF NOT EXISTS completions_date    ON completions (completed_date);
 CREATE INDEX IF NOT EXISTS task_time_log_task  ON task_time_log (task_id);
 CREATE INDEX IF NOT EXISTS task_deps_task      ON task_dependencies (task_id);
 CREATE INDEX IF NOT EXISTS task_deps_depends   ON task_dependencies (depends_on_id);
+
+-- Legislative bill references captured during note intake
+CREATE TABLE IF NOT EXISTS bill_references (
+    id           SERIAL PRIMARY KEY,
+    meeting_id   TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    bill_type    TEXT NOT NULL DEFAULT '',
+    bill_number  TEXT NOT NULL DEFAULT '',
+    created_at   TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS bill_refs_meeting ON bill_references (meeting_id);

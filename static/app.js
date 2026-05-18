@@ -980,19 +980,74 @@ function renderDetail(m) {
 
   $("#detail").innerHTML = `
     <header>
-      <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
+      <div class="detail-header-row">
+        <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
+        <button class="detail-delete-btn" data-mid="${escapeHtml(m.id)}" title="Delete note">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+          Delete
+        </button>
+      </div>
       <div class="meta">${meta.join("")}</div>
     </header>
-    ${m.canvas_image ? `<img class="canvas-note-image" src="${m.canvas_image}" alt="Handwritten note">` : ""}
+    ${m.canvas_image ? `<img class="canvas-note-image" src="${m.canvas_image}" alt="Handwritten note" title="Tap to expand">` : ""}
     <div class="tasks-panel">
       <h3>Open Action Items</h3>
       ${listOrNone(m.action_items_open)}
       <h3>Open Reminders</h3>
       ${listOrNone(m.reminders_open)}
     </div>
+    ${(m.contacts || []).length ? `
+    <div class="detail-contacts">
+      <h3>Contacts</h3>
+      <div class="detail-contact-list">
+        ${(m.contacts || []).map((c) => `
+        <div class="detail-contact-card" data-cid="${escapeHtml(c.id)}" data-mid="${escapeHtml(m.id)}">
+          <div class="detail-contact-info">
+            <div class="detail-contact-name">${escapeHtml(c.name)}</div>
+            ${c.title || c.company ? `<div class="detail-contact-sub">${escapeHtml([c.title, c.company].filter(Boolean).join(" · "))}</div>` : ""}
+            ${c.email ? `<div class="detail-contact-meta">${escapeHtml(c.email)}</div>` : ""}
+            ${c.phone ? `<div class="detail-contact-meta">${escapeHtml(c.phone)}</div>` : ""}
+          </div>
+          <button class="detail-contact-unlink" title="Unlink contact">✕</button>
+        </div>`).join("")}
+      </div>
+    </div>` : ""}
     <div class="body">${m.body_html}</div>
   `;
+  const ci = $("#detail .canvas-note-image");
+  if (ci) ci.addEventListener("click", () => _openCanvasFullscreen(ci.src));
+
+  $("#detail").querySelectorAll(".detail-contact-unlink").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const card = btn.closest(".detail-contact-card");
+      const { cid, mid } = card.dataset;
+      await fetch(`/api/meetings/${mid}/contacts/${cid}`, { method: "DELETE" });
+      selectMeeting(mid);
+    });
+  });
 }
+
+// Delete note handler (delegated from #detail)
+$("#detail").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".detail-delete-btn");
+  if (!btn) return;
+  const mid = btn.dataset.mid;
+  if (!confirm("Delete this note? This also removes all its tasks.")) return;
+  btn.disabled = true;
+  btn.textContent = "Deleting…";
+  try {
+    const res = await fetch(`/api/meetings/${mid}`, { method: "DELETE" });
+    const data = await res.json();
+    if (!data.ok) { alert(data.error || "Delete failed"); btn.disabled = false; return; }
+    state.selectedMeetingId = null;
+    renderDetail(null);
+    await refreshMeetings();
+    await loadFacets();
+  } catch {
+    alert("Delete failed");
+    btn.disabled = false;
+  }
+});
 
 function renderGroupsTable(groups) {
   const tbody = $("#groups-body");
@@ -1232,7 +1287,9 @@ let _intakeCurrentStroke = null;
 let _intakeTool = "pen";
 let _intakePenColor = "#111111";
 let _intakePenSize = 3;
-let _intakeOcrText = "";
+let _intakeScanResult = null; // {text, items: [{type, text, accepted}]}
+let _intakeLinkedContacts = []; // [{id, name, company, title, email, phone}]
+let _intakeCanvasLogicalHeight = 600; // grows as user writes near the bottom
 
 function _intakeCanvasEl() { return $("#intake-canvas"); }
 function _intakeCtx() { return _intakeCanvasEl().getContext("2d"); }
@@ -1240,10 +1297,9 @@ function _intakeCtx() { return _intakeCanvasEl().getContext("2d"); }
 function _initIntakeCanvas() {
   const canvas = _intakeCanvasEl();
   const wrap = canvas.parentElement;
-  // Set physical pixel dimensions matching CSS display size
   const dpr = window.devicePixelRatio || 1;
   const w = wrap.clientWidth || 680;
-  const h = 380;
+  const h = _intakeCanvasLogicalHeight;
   canvas.width = w * dpr;
   canvas.height = h * dpr;
   canvas.style.width = w + "px";
@@ -1254,6 +1310,49 @@ function _initIntakeCanvas() {
   ctx.fillRect(0, 0, w, h);
   _intakeStrokes = [];
   _intakeCurrentStroke = null;
+}
+
+function _intakeResizeCanvas() {
+  const canvasMode = $("#intake-canvas-mode");
+  const isFullscreen = canvasMode.classList.contains("intake-canvas-fullscreen-active");
+  const canvas = _intakeCanvasEl();
+  const dpr = window.devicePixelRatio || 1;
+  const wrap = canvas.parentElement; // .intake-canvas-scroll
+  const w = wrap.clientWidth || 680;
+  if (isFullscreen) {
+    // Canvas fills remaining height after toolbar (~56px)
+    _intakeCanvasLogicalHeight = Math.max(window.innerHeight - 56, 400);
+  }
+  canvas.width = w * dpr;
+  canvas.height = _intakeCanvasLogicalHeight * dpr;
+  canvas.style.width = w + "px";
+  canvas.style.height = _intakeCanvasLogicalHeight + "px";
+  const ctx = _intakeCtx();
+  ctx.scale(dpr, dpr);
+  _intakeRedraw();
+}
+
+function _intakeToggleFullscreen() {
+  const canvasMode = $("#intake-canvas-mode");
+  const isNowFullscreen = canvasMode.classList.toggle("intake-canvas-fullscreen-active");
+  if (!isNowFullscreen) {
+    // Restore height to logical height (keep what was drawn)
+    _intakeCanvasLogicalHeight = Math.max(_intakeCanvasLogicalHeight, 600);
+  }
+  requestAnimationFrame(_intakeResizeCanvas);
+}
+
+function _intakeGrowCanvas() {
+  const canvas = _intakeCanvasEl();
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.width / dpr;
+  _intakeCanvasLogicalHeight += 400;
+  canvas.height = _intakeCanvasLogicalHeight * dpr;
+  canvas.style.height = _intakeCanvasLogicalHeight + "px";
+  _intakeRedraw();
+  // Scroll the wrapper to keep the pen near visible area
+  const scrollWrap = canvas.parentElement;
+  scrollWrap.scrollTop = scrollWrap.scrollHeight;
 }
 
 function _intakeRedraw() {
@@ -1326,6 +1425,10 @@ function _intakePointerUp(e) {
   e.preventDefault();
   if (_intakeCurrentStroke.points.length > 0) {
     _intakeStrokes.push(_intakeCurrentStroke);
+    const lastPt = _intakeCurrentStroke.points[_intakeCurrentStroke.points.length - 1];
+    if (lastPt && lastPt.y > _intakeCanvasLogicalHeight - 100) {
+      _intakeGrowCanvas();
+    }
   }
   _intakeCurrentStroke = null;
 }
@@ -1338,7 +1441,7 @@ function _intakeUndo() {
 
 function _intakeClearCanvas() {
   _intakeStrokes = [];
-  _intakeOcrText = "";
+  _intakeScanResult = null;
   _intakeRedraw();
   $("#intake-review-queue").classList.add("hidden");
 }
@@ -1363,94 +1466,321 @@ function _intakeSetSize(size) {
   });
 }
 
-// --- Tesseract lazy loader ---
-async function _loadTesseract() {
-  if (window.Tesseract) return;
-  await new Promise((resolve, reject) => {
-    const s = document.createElement("script");
-    s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js";
-    s.onload = resolve;
-    s.onerror = () => reject(new Error("Failed to load Tesseract.js"));
-    document.head.appendChild(s);
-  });
+const _BILL_RE = /\b(H\.R\.|S\.|H\.Res\.|S\.Res\.|H\.Con\.Res\.|S\.Con\.Res\.|H\.J\.Res\.|S\.J\.Res\.)\s*(\d+)\b/gi;
+
+function _extractCallouts(text) {
+  const items = [];
+  const _hasDue = (s) => /\bdue[:\s]/i.test(s) || /\bdeadline[:\s]/i.test(s);
+
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    if (/^(\[.*?\]|□|☐)\s*/.test(line)) {
+      const t = line.replace(/^(\[.*?\]|□|☐)\s*/, "").trim();
+      if (t) {
+        items.push({ type: "task", text: t });
+        if (_hasDue(t)) items.push({ type: "deadline", text: t });
+      }
+    } else if (/^!+\s*\S/.test(line)) {
+      const t = line.replace(/^!+\s*/, "").trim();
+      if (t) {
+        items.push({ type: "important", text: t });
+        if (_hasDue(t)) items.push({ type: "deadline", text: t });
+      }
+    } else if (/^\?+\s*\S/.test(line)) {
+      const t = line.replace(/^\?+\s*/, "").trim();
+      if (t) {
+        items.push({ type: "followup", text: t });
+        if (_hasDue(t)) items.push({ type: "deadline", text: t });
+      }
+    } else if (_hasDue(line)) {
+      items.push({ type: "deadline", text: line });
+    } else if (/^@([A-Za-z]\w*)/.test(line)) {
+      items.push({ type: "person", text: line.replace(/^@/, "").trim() });
+    }
+
+    // Bills can appear in any line regardless of other markers
+    _BILL_RE.lastIndex = 0;
+    let m;
+    while ((m = _BILL_RE.exec(line)) !== null) {
+      const billType = m[1].replace(/\s+$/, "");
+      const billNumber = m[2];
+      items.push({ type: "bill", billType, billNumber, text: `${billType} ${billNumber}` });
+    }
+  }
+  return items;
 }
 
 async function _intakeScan() {
   const canvas = _intakeCanvasEl();
-  const scanBtn = $("#intake-scan");
+  const scanBtn = $("#intake-rescan-btn");
   const scanSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>';
 
   if (_intakeStrokes.length === 0) {
-    alert("Draw something on the canvas first, then tap Scan.");
     return;
   }
 
-  scanBtn.disabled = true;
-  scanBtn.innerHTML = `${scanSvg} Scanning…`;
+  if (scanBtn) { scanBtn.disabled = true; scanBtn.innerHTML = `${scanSvg} Transcribing…`; }
 
   try {
-    await _loadTesseract();
-  } catch (e) {
-    scanBtn.disabled = false;
-    scanBtn.innerHTML = `${scanSvg} Scan`;
-    alert("Couldn't load OCR engine. Check your internet connection.");
-    return;
-  }
+    const res = await fetch("/api/notes/transcribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: canvas.toDataURL("image/png") }),
+    });
+    const data = await res.json();
 
-  const dataUrl = canvas.toDataURL("image/png");
-  let data;
-  try {
-    ({ data } = await Tesseract.recognize(dataUrl, "eng", { logger: () => {} }));
-  } catch (e) {
-    scanBtn.disabled = false;
-    scanBtn.innerHTML = `${scanSvg} Scan`;
-    alert("OCR failed: " + e.message);
-    return;
-  }
+    if (!data.ok) {
+      if (scanBtn) {
+        scanBtn.innerHTML = `${scanSvg} ${escapeHtml(data.error || "Failed")}`;
+        setTimeout(() => { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Re-scan`; }, 3000);
+      }
+      return;
+    }
 
-  // Reconstruct lines from Tesseract line segments, sorted top-to-bottom
-  const lines = (data.lines || [])
-    .filter((l) => l.text.trim())
-    .sort((a, b) => a.bbox.y0 - b.bbox.y0);
-  _intakeOcrText = lines.map((l) => l.text.trim()).join("\n");
-
-  _renderOcrResult();
-  scanBtn.disabled = false;
-  if (_intakeOcrText) {
-    scanBtn.innerHTML = `${scanSvg} Re-scan`;
-  } else {
-    scanBtn.innerHTML = `${scanSvg} No text found`;
-    setTimeout(() => { scanBtn.innerHTML = `${scanSvg} Scan`; }, 3000);
+    const items = _extractCallouts(data.text || "").map((item) => ({ ...item, accepted: true }));
+    _intakeScanResult = { text: data.text || "", items };
+    _renderScanResults();
+    if (scanBtn) { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Re-scan`; }
+  } catch (err) {
+    if (scanBtn) {
+      scanBtn.innerHTML = `${scanSvg} Error`;
+      setTimeout(() => { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Re-scan`; }, 3000);
+    }
   }
 }
 
-function _renderOcrResult() {
+const _SCAN_ICONS = {
+  task:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>',
+  important: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  followup:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+  deadline:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+  person:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+  bill:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+};
+const _SCAN_LABELS = { task: "Task", important: "Important", followup: "Follow-up", deadline: "Deadline", person: "Person", bill: "Bill" };
+
+function _renderScanResults() {
   const queueEl = $("#intake-review-queue");
-  if (!_intakeOcrText) {
-    queueEl.classList.add("hidden");
-    return;
-  }
-  $("#intake-ocr-text").value = _intakeOcrText;
+  if (!_intakeScanResult) { queueEl.classList.add("hidden"); return; }
+
+  const { text, items } = _intakeScanResult;
+  const active = items.filter((i) => i.accepted);
+
+  $("#scan-result-summary").textContent = items.length === 0
+    ? "Transcribed — no callouts detected"
+    : `${active.length} of ${items.length} item${items.length !== 1 ? "s" : ""} kept`;
+
+  $("#scan-result-items").innerHTML = items.map((item, idx) => `
+    <div class="scan-item ${item.accepted ? "scan-item--accepted" : "scan-item--dismissed"}">
+      <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
+      <div class="scan-item-body">
+        <div class="scan-item-type">${escapeHtml(_SCAN_LABELS[item.type] || item.type)}</div>
+        <div class="scan-item-text">${escapeHtml(item.text)}</div>
+      </div>
+      <button class="scan-item-dismiss" data-idx="${idx}" title="${item.accepted ? "Remove" : "Restore"}">
+        ${item.accepted ? "×" : "↩"}
+      </button>
+    </div>`).join("");
+
+  $("#scan-result-items").querySelectorAll(".scan-item-dismiss").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = +btn.dataset.idx;
+      _intakeScanResult.items[idx].accepted = !_intakeScanResult.items[idx].accepted;
+      _renderScanResults();
+    });
+  });
+
+  $("#scan-transcription-text").textContent = text || "(empty)";
   queueEl.classList.remove("hidden");
 }
+
+// --- Business card scanning ---
+function _extractCardFields(rawText) {
+  // Strip label prefixes like "Tel:", "Email:", "Mobile:", etc. from a line
+  function stripLabel(line) {
+    return line.replace(/^\s*(?:tel|telephone|phone|mobile|cell|fax|e-?mail|email|e|web|url|website)[\s:.-]+/i, "").trim();
+  }
+
+  const EMAIL_RE = /[\w.+-]+@[\w.-]+\.[a-z]{2,}/i;
+  // Handles US (555-123-4567, (555) 123 4567), intl (+44 20 1234 5678), etc.
+  const PHONE_RE = /(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}|\+\d[\d\s().+-]{6,}\d|\b\d{5,}[\d\s().+-]{2,}\d/;
+  const URL_RE = /https?:\/\/[^\s]+|www\.[^\s]+/i;
+  const TITLE_KW = /\b(director|manager|engineer|developer|designer|analyst|consultant|president|vice[\s-]president|vp|ceo|cto|cfo|coo|chief|officer|associate|senior|junior|lead|head|principal|founder|owner|partner|coordinator|specialist|advisor|executive|architect|scientist|researcher|professor|dr\.?)\b/i;
+  const COMPANY_KW = /\b(inc\.?|llc\.?|corp\.?|ltd\.?|co\.|company|group|associates|solutions|services|systems|technologies|tech|labs?|studios?|agency|consulting|enterprises|holdings|ventures|partners|international|global)\b/i;
+  // Name: 2+ capitalized words, only letters/hyphens/apostrophes/spaces, optional middle initial
+  const NAME_RE = /^[A-ZÀ-Ö][a-zA-ZÀ-ÿ'-]+(?:\s+[A-Z]\.)?(?:\s+[A-ZÀ-Ö][a-zA-ZÀ-ÿ'-]+)+$/;
+
+  const lines = rawText.split("\n").map((l) => l.trim()).filter((l) => l.length > 1);
+  const skip = new Set();
+  let email = "", phone = "";
+
+  // Email: any line containing a valid email address (@ with domain)
+  for (let i = 0; i < lines.length; i++) {
+    const m = stripLabel(lines[i]).match(EMAIL_RE);
+    if (m && !email) { email = m[0]; skip.add(i); }
+  }
+  // Fallback: any token with @ (catches malformed OCR output)
+  if (!email) {
+    for (let i = 0; i < lines.length; i++) {
+      if (!skip.has(i) && lines[i].includes("@") && !lines[i].startsWith("@")) {
+        email = stripLabel(lines[i]); skip.add(i); break;
+      }
+    }
+  }
+
+  // Phone: structured phone pattern; also catches lines with label prefix
+  for (let i = 0; i < lines.length; i++) {
+    if (skip.has(i)) continue;
+    const m = stripLabel(lines[i]).match(PHONE_RE);
+    if (m && !phone) { phone = m[0].trim(); skip.add(i); }
+  }
+
+  // Skip URLs and very short fragments
+  for (let i = 0; i < lines.length; i++) {
+    if (!skip.has(i) && (URL_RE.test(lines[i]) || lines[i].length < 2)) skip.add(i);
+  }
+
+  const rest = lines.filter((_, i) => !skip.has(i));
+  let name = "", company = "", title = "";
+
+  // Name: looks like a person's name (capitalized words, no job keywords)
+  for (const line of rest) {
+    if (!name && NAME_RE.test(line) && !TITLE_KW.test(line) && !COMPANY_KW.test(line)) {
+      name = line; break;
+    }
+  }
+
+  // Title: line containing job title keywords
+  for (const line of rest) {
+    if (line === name) continue;
+    if (!title && TITLE_KW.test(line)) { title = line; break; }
+  }
+
+  // Company: has company-type keywords, or is all-caps short line (common for brand names)
+  for (const line of rest) {
+    if (line === name || line === title) continue;
+    if (!company && (COMPANY_KW.test(line) || /^[A-Z\s&.,+'-]{3,}$/.test(line))) {
+      company = line; break;
+    }
+  }
+
+  // Fallbacks: fill any still-empty fields with leftover lines, in order
+  for (const line of rest) {
+    if (line === name || line === title || line === company) continue;
+    if (!name) { name = line; continue; }
+    if (!company) { company = line; continue; }
+    if (!title) { title = line; }
+  }
+
+  return { name, company, title, email, phone: phone.replace(/\s+/g, " ").trim() };
+}
+
+function _renderSavedCards() {
+  const el = $("#card-saved-contacts");
+  el.innerHTML = _intakeLinkedContacts.map((c, idx) => `
+    <div class="saved-contact-chip">
+      <span>${escapeHtml(c.name)}${c.company ? " · " + escapeHtml(c.company) : ""}</span>
+      <button class="saved-contact-remove" data-idx="${idx}">✕</button>
+    </div>`).join("");
+  el.querySelectorAll(".saved-contact-remove").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _intakeLinkedContacts.splice(+btn.dataset.idx, 1);
+      _renderSavedCards();
+    });
+  });
+}
+
+(function _initCardScanner() {
+  const fileInput = $("#card-photo-input");
+  const scanBtn = $("#card-scan-btn");
+  const preview = $("#card-preview");
+
+  scanBtn.addEventListener("click", () => fileInput.click());
+
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    fileInput.value = "";
+
+    scanBtn.disabled = true;
+    scanBtn.textContent = "Reading…";
+
+    try {
+      const { createWorker } = Tesseract;
+      const worker = await createWorker("eng");
+      const url = URL.createObjectURL(file);
+      const { data: { text } } = await worker.recognize(url);
+      await worker.terminate();
+      URL.revokeObjectURL(url);
+
+      const fields = _extractCardFields(text);
+      $("#card-field-name").value = fields.name;
+      $("#card-field-company").value = fields.company;
+      $("#card-field-title").value = fields.title;
+      $("#card-field-email").value = fields.email;
+      $("#card-field-phone").value = fields.phone;
+      preview.classList.remove("hidden");
+    } catch (err) {
+      alert("Card scan failed: " + err.message);
+    } finally {
+      scanBtn.disabled = false;
+      scanBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> Scan Business Card';
+    }
+  });
+
+  $("#card-preview-dismiss").addEventListener("click", () => preview.classList.add("hidden"));
+
+  $("#card-save-btn").addEventListener("click", async () => {
+    const contact = {
+      name: $("#card-field-name").value.trim(),
+      company: $("#card-field-company").value.trim(),
+      title: $("#card-field-title").value.trim(),
+      email: $("#card-field-email").value.trim(),
+      phone: $("#card-field-phone").value.trim(),
+    };
+    if (!contact.name) { alert("Name is required"); return; }
+
+    const res = await fetch("/api/contacts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(contact),
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(data.error || "Save failed"); return; }
+
+    _intakeLinkedContacts.push({ ...contact, id: data.id });
+    _renderSavedCards();
+    preview.classList.add("hidden");
+  });
+})();
 
 function openIntakeModal() {
   document.body.style.overflow = "hidden";
   document.body.style.touchAction = "none";
   document.body.style.webkitUserSelect = "none";
   document.body.style.userSelect = "none";
-  $("#intake-modal-backdrop").classList.remove("hidden");
-  $("#intake-modal-backdrop").classList.add("intake-open");
+  const backdrop = $("#intake-modal-backdrop");
+  backdrop.classList.remove("hidden");
+  backdrop.classList.add("intake-open");
   const dateInput = $("#intake-date");
   if (!dateInput.value) {
     dateInput.value = new Date().toISOString().split("T")[0];
   }
   $("#intake-result").className = "intake-result hidden";
   $("#intake-result").innerHTML = "";
-  $("#intake-action-items").value = "";
-  $("#intake-reminders").value = "";
-  $("#intake-modal-submit").disabled = false;
-  $("#intake-modal-submit").textContent = "Save notes";
+  const submitBtn = $("#intake-modal-submit");
+  submitBtn.disabled = false;
+  submitBtn.textContent = "Finalize Notes";
+  const cancelBtn = $("#intake-modal-cancel");
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = "Cancel";
+  // Reset to phase 1
+  const modal = $(".modal-intake");
+  modal.dataset.phase = "1";
+  $("#intake-modal-title").textContent = "Write notes";
+  $("#intake-transcription-loading").classList.add("hidden");
   // Populate group datalist
   const dl = $("#intake-group-list");
   dl.innerHTML = "";
@@ -1460,12 +1790,18 @@ function openIntakeModal() {
     dl.appendChild(opt);
   });
   _intakeSetTool("pen");
-  _intakeOcrText = "";
+  _intakeScanResult = null;
+  _intakeLinkedContacts = [];
+  _intakeCanvasLogicalHeight = 600;
   $("#intake-review-queue").classList.add("hidden");
+  $("#card-preview").classList.add("hidden");
+  $("#card-saved-contacts").innerHTML = "";
   requestAnimationFrame(() => _initIntakeCanvas());
 }
 
 function closeIntakeModal() {
+  // Exit fullscreen first if active
+  $("#intake-canvas-mode").classList.remove("intake-canvas-fullscreen-active");
   $("#intake-modal-backdrop").classList.add("hidden");
   $("#intake-modal-backdrop").classList.remove("intake-open");
   document.body.style.overflow = "";
@@ -1475,13 +1811,11 @@ function closeIntakeModal() {
 }
 
 async function _intakeSaveNotes() {
-  const ocrText = ($("#intake-ocr-text")?.value || "").trim();
-  const actionItems = $("#intake-action-items").value.trim();
-  const reminders = $("#intake-reminders").value.trim();
+  const transcription = (_intakeScanResult?.text || "").trim();
 
   const hasCanvasContent = _intakeStrokes.length > 0;
 
-  if (!hasCanvasContent && !ocrText && !actionItems && !reminders) {
+  if (!hasCanvasContent && !transcription && !_intakeScanResult) {
     alert("Nothing to save — draw some notes or add tasks first.");
     return;
   }
@@ -1494,6 +1828,8 @@ async function _intakeSaveNotes() {
   const btn = $("#intake-modal-submit");
   btn.disabled = true;
   btn.textContent = "Saving…";
+  const cancelBtn = $("#intake-modal-cancel");
+  cancelBtn.disabled = true;
   const resultEl = $("#intake-result");
   resultEl.className = "intake-result hidden";
 
@@ -1506,16 +1842,33 @@ async function _intakeSaveNotes() {
         topic: $("#intake-topic").value.trim(),
         date: $("#intake-date").value,
         attendees: $("#intake-attendees").value.trim(),
-        body: ocrText,
-        action_items: actionItems,
-        reminders,
+        body: transcription,
+        action_items: "",
+        reminders: "",
         canvas_image: canvasImage,
-        confirmed_items: null,
+        confirmed_items: _intakeScanResult
+          ? _intakeScanResult.items.filter((i) => i.accepted).map((i) => {
+              const out = { type: i.type, text: i.text };
+              if (i.billType) out.billType = i.billType;
+              if (i.billNumber) out.billNumber = i.billNumber;
+              return out;
+            })
+          : null,
       }),
     });
     const data = await res.json();
     resultEl.classList.remove("hidden");
     if (data.ok) {
+      // Link any scanned contacts to the saved meeting
+      if (_intakeLinkedContacts.length && data.meeting_id) {
+        await Promise.all(_intakeLinkedContacts.map((c) =>
+          fetch(`/api/meetings/${data.meeting_id}/contacts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ contact_id: c.id }),
+          })
+        ));
+      }
       resultEl.className = "intake-result intake-result-ok";
       const chips = [
         data.topic ? `<span class="intake-chip">${escapeHtml(data.topic)}</span>` : "",
@@ -1531,27 +1884,77 @@ async function _intakeSaveNotes() {
       await refreshMeetings();
       await loadFacets();
       btn.textContent = "Done";
+      cancelBtn.disabled = false;
       setTimeout(() => {
         btn.disabled = false;
-        btn.textContent = "Save notes";
+        btn.textContent = "End Meeting";
       }, 4000);
     } else {
       resultEl.className = "intake-result intake-result-err";
       resultEl.innerHTML = `<strong>Error:</strong> ${escapeHtml(data.error || "Unknown error")}`;
       btn.disabled = false;
-      btn.textContent = "Save notes";
+      btn.textContent = "End Meeting";
+      cancelBtn.disabled = false;
     }
   } catch (err) {
     resultEl.classList.remove("hidden");
     resultEl.className = "intake-result intake-result-err";
     resultEl.innerHTML = `<strong>Error:</strong> ${escapeHtml(err.message)}`;
     btn.disabled = false;
-    btn.textContent = "Save notes";
+    btn.textContent = "End Meeting";
+    cancelBtn.disabled = false;
   }
 }
 
+// Phase 1 → Phase 2 transition: run transcription, then reveal review queue
+async function _intakeFinalizeNotes() {
+  const modal = $(".modal-intake");
+  modal.dataset.phase = "2";
+  $("#intake-modal-title").textContent = "Post-meeting";
+  const submitBtn = $("#intake-modal-submit");
+  submitBtn.textContent = "End Meeting";
+  const cancelBtn = $("#intake-modal-cancel");
+  cancelBtn.textContent = "← Back";
+
+  if (_intakeStrokes.length === 0) {
+    // No drawing — skip transcription, just reveal phase 2 UI
+    return;
+  }
+
+  const loadingEl = $("#intake-transcription-loading");
+  loadingEl.classList.remove("hidden");
+  submitBtn.disabled = true;
+
+  try {
+    const canvas = _intakeCanvasEl();
+    const res = await fetch("/api/notes/transcribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: canvas.toDataURL("image/png") }),
+    });
+    const data = await res.json();
+    loadingEl.classList.add("hidden");
+    if (data.ok) {
+      const items = _extractCallouts(data.text || "").map((item) => ({ ...item, accepted: true }));
+      _intakeScanResult = { text: data.text || "", items };
+      _renderScanResults();
+    } else {
+      _intakeScanResult = { text: "", items: [] };
+      _renderScanResults();
+    }
+  } catch (_err) {
+    loadingEl.classList.add("hidden");
+  }
+  submitBtn.disabled = false;
+}
+
 async function submitIntake() {
-  await _intakeSaveNotes();
+  const modal = $(".modal-intake");
+  if (modal.dataset.phase === "1") {
+    await _intakeFinalizeNotes();
+  } else {
+    await _intakeSaveNotes();
+  }
 }
 
 // ---------- Data fetches ----------
@@ -1572,9 +1975,37 @@ async function loadFacets() {
   state.facets = await api("/api/facets");
 }
 
+function renderBillsTable(bills) {
+  const tbody = $("#bills-body");
+  if (!bills.length) {
+    tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:30px;">No bills referenced yet.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = bills.map((b) => {
+    const meetingLinks = (b.meetings || []).map((m) =>
+      `<button class="bill-meeting-link" data-meeting-id="${escapeHtml(m.meeting_id)}">${escapeHtml(m.topic || m.date || "Meeting")}</button>`
+    ).join(" ");
+    return `<tr>
+      <td><strong>${escapeHtml(b.bill_type)}${escapeHtml(b.bill_number)}</strong></td>
+      <td class="bill-meetings-cell">${meetingLinks}</td>
+      <td>${escapeHtml(b.last_seen || "—")}</td>
+    </tr>`;
+  }).join("");
+  tbody.querySelectorAll(".bill-meeting-link").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      switchTab("meetings");
+      selectMeeting(btn.dataset.meetingId);
+    });
+  });
+}
+
 async function loadGroups() {
-  const groups = await api("/api/groups");
+  const [groups, bills] = await Promise.all([
+    api("/api/groups"),
+    api("/api/bills"),
+  ]);
   renderGroupsTable(groups);
+  renderBillsTable(bills);
 }
 
 async function selectMeeting(id) {
@@ -1982,41 +2413,52 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Dock nav
   $$(".dock-btn[data-tab]").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
-  // Safe-triangle dock submenu
+  // Safe-triangle dock submenus — handles all .dock-btn-wrap elements
   (function () {
-    const wrap = document.querySelector(".dock-btn-wrap");
-    if (!wrap) return;
-    const btn = wrap.querySelector(".dock-btn");
-    const sub = wrap.querySelector(".dock-submenu");
-    let closeTimer = null;
-    let exitPt = null;
-
-    function open() { clearTimeout(closeTimer); sub.classList.add("open"); }
-    function close() { sub.classList.remove("open"); exitPt = null; }
-    function scheduleClose() { clearTimeout(closeTimer); closeTimer = setTimeout(close, 80); }
-
     function inTriangle(px, py, ax, ay, bx, by, cx, cy) {
       const s = (x1, y1, x2, y2, x3, y3) => (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3);
       const d1 = s(px,py,ax,ay,bx,by), d2 = s(px,py,bx,by,cx,cy), d3 = s(px,py,cx,cy,ax,ay);
       return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
     }
 
-    btn.addEventListener("mouseenter", open);
-    btn.addEventListener("mouseleave", (e) => { exitPt = { x: e.clientX, y: e.clientY }; scheduleClose(); });
-    sub.addEventListener("mouseenter", () => clearTimeout(closeTimer));
-    sub.addEventListener("mouseleave", scheduleClose);
+    document.querySelectorAll(".dock-btn-wrap").forEach((wrap) => {
+      const btn = wrap.querySelector(".dock-btn");
+      const sub = wrap.querySelector(".dock-submenu");
+      if (!btn || !sub) return;
+      let closeTimer = null;
+      let exitPt = null;
 
-    document.addEventListener("mousemove", (e) => {
-      if (!sub.classList.contains("open") || !exitPt) return;
-      if (e.target.closest(".dock-btn-wrap")) { clearTimeout(closeTimer); return; }
-      const r = sub.getBoundingClientRect();
-      if (inTriangle(e.clientX, e.clientY, exitPt.x, exitPt.y, r.left, r.top - 4, r.left, r.bottom + 4)) {
-        clearTimeout(closeTimer);
-      } else {
-        close();
-      }
+      function open() { clearTimeout(closeTimer); sub.classList.add("open"); }
+      function close() { sub.classList.remove("open"); exitPt = null; }
+      function scheduleClose() { clearTimeout(closeTimer); closeTimer = setTimeout(close, 80); }
+
+      btn.addEventListener("mouseenter", open);
+      btn.addEventListener("mouseleave", (e) => { exitPt = { x: e.clientX, y: e.clientY }; scheduleClose(); });
+      sub.addEventListener("mouseenter", () => clearTimeout(closeTimer));
+      sub.addEventListener("mouseleave", scheduleClose);
+
+      document.addEventListener("mousemove", (e) => {
+        if (!sub.classList.contains("open") || !exitPt) return;
+        if (e.target.closest(".dock-btn-wrap") === wrap) { clearTimeout(closeTimer); return; }
+        const r = sub.getBoundingClientRect();
+        if (inTriangle(e.clientX, e.clientY, exitPt.x, exitPt.y, r.left, r.top - 4, r.left, r.bottom + 4)) {
+          clearTimeout(closeTimer);
+        } else {
+          close();
+        }
+      });
     });
   })();
+
+  // Bills shortcut from Groups submenu
+  $("#dock-sub-bills").addEventListener("click", () => {
+    switchTab("groups");
+    // Activate the Bills sub-tab
+    document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+    document.querySelector(".groups-subtab[data-subtab='bills']").classList.add("active");
+    document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
+    $("#groups-panel-bills").classList.remove("hidden");
+  });
 
   // Search overlay
   $("#dock-search-btn").addEventListener("click", openSearchOverlay);
@@ -2581,9 +3023,33 @@ document.addEventListener("DOMContentLoaded", async () => {
     refreshMeetings();
   });
 
+  // Groups sub-tab toggle (Groups / Bills)
+  document.querySelectorAll(".groups-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      const subtab = btn.dataset.subtab;
+      document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
+      $(`#groups-panel-${subtab}`).classList.remove("hidden");
+    });
+  });
+
   // Intake modal
   $("#intake-modal-close").addEventListener("click", closeIntakeModal);
-  $("#intake-modal-cancel").addEventListener("click", closeIntakeModal);
+  $("#intake-modal-cancel").addEventListener("click", () => {
+    const modal = $(".modal-intake");
+    if (modal.dataset.phase === "2") {
+      // Go back to phase 1 instead of closing
+      modal.dataset.phase = "1";
+      $("#intake-modal-title").textContent = "Write notes";
+      $("#intake-modal-submit").textContent = "Finalize Notes";
+      $("#intake-modal-submit").disabled = false;
+      $("#intake-modal-cancel").textContent = "Cancel";
+      $("#intake-transcription-loading").classList.add("hidden");
+    } else {
+      closeIntakeModal();
+    }
+  });
   // No backdrop-tap-to-close: too easy to accidentally dismiss with a resting palm on iPad
   $("#intake-modal-submit").addEventListener("click", submitIntake);
 
@@ -2592,7 +3058,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#intake-tool-eraser").addEventListener("click", () => _intakeSetTool("eraser"));
   $("#intake-undo").addEventListener("click", _intakeUndo);
   $("#intake-clear").addEventListener("click", _intakeClearCanvas);
-  $("#intake-scan").addEventListener("click", _intakeScan);
+  $("#intake-rescan-btn").addEventListener("click", _intakeScan);
+
+  // Fullscreen canvas toggle — only #intake-canvas-mode fills the screen
+  $("#intake-fullscreen-btn").addEventListener("click", _intakeToggleFullscreen);
+
   document.querySelectorAll(".pen-size-btn").forEach((btn) => {
     btn.addEventListener("click", () => _intakeSetSize(btn.dataset.size));
   });
@@ -2600,10 +3070,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     btn.addEventListener("click", () => _intakeSetColor(btn.dataset.color));
   });
 
-  // OCR result clear
+  // Scan result clear
   $("#review-queue-clear").addEventListener("click", () => {
-    _intakeOcrText = "";
-    _renderOcrResult();
+    _intakeScanResult = null;
+    _renderScanResults();
   });
 
   // Canvas pointer + touch events
@@ -2677,7 +3147,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!$("#subtask-modal-backdrop").classList.contains("hidden")) { closeAddSubtaskModal(); return; }
       if (!$("#blocker-modal-backdrop").classList.contains("hidden")) { closeBlockerModal(); return; }
       if ($("#search-overlay").classList.contains("open")) { closeSearchOverlay(); return; }
-      if (!$("#intake-modal-backdrop").classList.contains("hidden")) { closeIntakeModal(); return; }
+      if (!$("#intake-modal-backdrop").classList.contains("hidden")) {
+        if ($("#intake-canvas-mode").classList.contains("intake-canvas-fullscreen-active")) {
+          _intakeToggleFullscreen();
+        } else {
+          closeIntakeModal();
+        }
+        return;
+      }
       if (!$("#import-modal-backdrop").classList.contains("hidden"))  { closeImportModal(); return; }
       if (!$("#edit-modal-backdrop").classList.contains("hidden"))    { closeEditModal(); return; }
       if (!$("#nl-modal-backdrop").classList.contains("hidden"))       { closeNLModal(); return; }
@@ -2738,3 +3215,37 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadFacets();
   switchTab("home");
 });
+
+// --- Canvas fullscreen ---
+const _openCanvasFullscreen = (function () {
+  const overlay = $("#canvas-fullscreen-overlay");
+  const img = $("#canvas-fullscreen-img");
+
+  function openFullscreen(src) {
+    img.src = src;
+    overlay.classList.remove("hidden");
+    document.body.style.overflow = "hidden";
+  }
+  function closeFullscreen() {
+    overlay.classList.add("hidden");
+    img.src = "";
+    document.body.style.overflow = "";
+  }
+
+  $("#canvas-fullscreen-close").addEventListener("click", closeFullscreen);
+
+  let _tapCount = 0, _tapTimer = null;
+  overlay.addEventListener("click", (e) => {
+    if (e.target === $("#canvas-fullscreen-close")) return;
+    _tapCount++;
+    clearTimeout(_tapTimer);
+    if (_tapCount >= 3) { _tapCount = 0; closeFullscreen(); return; }
+    _tapTimer = setTimeout(() => { _tapCount = 0; }, 500);
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !overlay.classList.contains("hidden")) closeFullscreen();
+  });
+
+  return openFullscreen;
+})();
