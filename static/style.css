@@ -3092,9 +3092,6 @@ table.bills-table tr:last-child td { border-bottom: none; }
   border-right: none;
   border-bottom: none;
 }
-#intake-canvas-mode.intake-canvas-fullscreen-active .intake-legend-strip {
-  display: none;
-}
 #intake-canvas-mode.intake-canvas-fullscreen-active .intake-toolbar {
   border-bottom: 1px solid var(--border);
   padding: 8px 12px;
