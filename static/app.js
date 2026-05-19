@@ -1290,6 +1290,9 @@ let _intakePenSize = 3;
 let _intakeScanResult = null; // {text, items: [{type, text, accepted}]}
 let _intakeLinkedContacts = []; // [{id, name, company, title, email, phone}]
 let _intakeCanvasLogicalHeight = 600; // grows as user writes near the bottom
+let _intakeActiveTouches = new Map(); // pointerId -> {x, y}
+let _intakeTouchScrollLast = null;    // {x, y} centroid for delta
+let _intakePenActiveUntil = 0;        // performance.now() ms (palm-rejection grace)
 
 function _intakeCanvasEl() { return $("#intake-canvas"); }
 function _intakeCtx() { return _intakeCanvasEl().getContext("2d"); }
@@ -1392,7 +1395,28 @@ function _intakePointerPos(e) {
   return { x: e.clientX - rect.left, y: e.clientY - rect.top };
 }
 
+function _intakePenIsActive() {
+  return _intakeCurrentStroke !== null || performance.now() < _intakePenActiveUntil;
+}
+
+function _intakeTouchCentroid() {
+  let sx = 0, sy = 0, n = 0;
+  for (const p of _intakeActiveTouches.values()) {
+    sx += p.x; sy += p.y; n++;
+  }
+  return n ? { x: sx / n, y: sy / n } : null;
+}
+
 function _intakePointerDown(e) {
+  if (e.pointerType === "touch") {
+    if (_intakePenIsActive()) return;
+    _intakeCanvasEl().setPointerCapture(e.pointerId);
+    _intakeActiveTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (_intakeActiveTouches.size >= 2) {
+      _intakeTouchScrollLast = _intakeTouchCentroid();
+    }
+    return;
+  }
   if (e.pointerType !== "pen") return;
   e.preventDefault();
   _intakeCanvasEl().setPointerCapture(e.pointerId);
@@ -1411,6 +1435,19 @@ function _intakePointerDown(e) {
 }
 
 function _intakePointerMove(e) {
+  if (e.pointerType === "touch") {
+    if (!_intakeActiveTouches.has(e.pointerId)) return;
+    _intakeActiveTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (_intakeActiveTouches.size >= 2 && _intakeTouchScrollLast) {
+      const cur = _intakeTouchCentroid();
+      const dy = _intakeTouchScrollLast.y - cur.y;
+      const wrap = _intakeCanvasEl().parentElement;
+      if (wrap) wrap.scrollTop += dy;
+      _intakeTouchScrollLast = cur;
+      e.preventDefault();
+    }
+    return;
+  }
   if (!_intakeCurrentStroke) return;
   e.preventDefault();
   const pos = _intakePointerPos(e);
@@ -1430,6 +1467,12 @@ function _intakePointerMove(e) {
 }
 
 function _intakePointerUp(e) {
+  if (e.pointerType === "touch") {
+    if (!_intakeActiveTouches.has(e.pointerId)) return;
+    _intakeActiveTouches.delete(e.pointerId);
+    if (_intakeActiveTouches.size < 2) _intakeTouchScrollLast = null;
+    return;
+  }
   if (!_intakeCurrentStroke) return;
   e.preventDefault();
   if (_intakeCurrentStroke.points.length > 0) {
@@ -1440,6 +1483,7 @@ function _intakePointerUp(e) {
     }
   }
   _intakeCurrentStroke = null;
+  _intakePenActiveUntil = performance.now() + 700;
 }
 
 function _intakeUndo() {
