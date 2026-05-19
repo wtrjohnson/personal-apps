@@ -1289,7 +1289,7 @@ let _intakePenColor = "#111111";
 let _intakePenSize = 3;
 let _intakeScanResult = null; // {text, items: [{type, text, accepted}]}
 let _intakeLinkedContacts = []; // [{id, name, company, title, email, phone}]
-let _intakeCanvasLogicalHeight = 600; // grows as user writes near the bottom
+let _intakeCanvasLogicalHeight = 1200; // grows as user writes near the bottom
 let _intakeActiveTouches = new Map(); // pointerId -> {x, y}
 let _intakeTouchScrollLast = null;    // {x, y} centroid for delta
 let _intakePenActiveUntil = 0;        // performance.now() ms (palm-rejection grace)
@@ -1341,8 +1341,9 @@ function _intakeToggleFullscreen() {
     _intakeCanvasFsParent = canvasMode.parentElement;
     overlay.appendChild(canvasMode);
     overlay.classList.remove("hidden");
-    // Size canvas to fill screen minus toolbar + legend (~110px combined)
-    _intakeCanvasLogicalHeight = Math.max(window.visualViewport?.height ?? window.innerHeight - 110, 400);
+    // Give 3 screens of canvas up front so two-finger scroll is immediately useful
+    const vh = window.visualViewport?.height ?? window.innerHeight - 110;
+    _intakeCanvasLogicalHeight = Math.max(vh * 3, _intakeCanvasLogicalHeight, 1800);
     requestAnimationFrame(_intakeResizeCanvas);
   } else {
     // Exit fullscreen: return canvas mode to modal
@@ -1357,7 +1358,7 @@ function _intakeGrowCanvas() {
   const canvas = _intakeCanvasEl();
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.width / dpr;
-  _intakeCanvasLogicalHeight += 400;
+  _intakeCanvasLogicalHeight += 800;
   canvas.height = _intakeCanvasLogicalHeight * dpr;
   canvas.style.height = _intakeCanvasLogicalHeight + "px";
   _intakeRedraw();
@@ -1478,7 +1479,7 @@ function _intakePointerUp(e) {
   if (_intakeCurrentStroke.points.length > 0) {
     _intakeStrokes.push(_intakeCurrentStroke);
     const lastPt = _intakeCurrentStroke.points[_intakeCurrentStroke.points.length - 1];
-    if (lastPt && lastPt.y > _intakeCanvasLogicalHeight - 100) {
+    if (lastPt && lastPt.y > _intakeCanvasLogicalHeight - 400) {
       _intakeGrowCanvas();
     }
   }
@@ -1845,7 +1846,7 @@ function openIntakeModal() {
   _intakeSetTool("pen");
   _intakeScanResult = null;
   _intakeLinkedContacts = [];
-  _intakeCanvasLogicalHeight = 600;
+  _intakeCanvasLogicalHeight = 1200;
   $("#intake-review-queue").classList.add("hidden");
   $("#card-preview").classList.add("hidden");
   $("#card-saved-contacts").innerHTML = "";
