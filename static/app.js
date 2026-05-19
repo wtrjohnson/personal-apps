@@ -1393,6 +1393,7 @@ function _intakePointerPos(e) {
 }
 
 function _intakePointerDown(e) {
+  if (e.pointerType !== "pen") return;
   e.preventDefault();
   _intakeCanvasEl().setPointerCapture(e.pointerId);
   const pos = _intakePointerPos(e);
@@ -3093,10 +3094,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   intakeCanvas.addEventListener("lostpointercapture", _intakePointerUp);
   intakeCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
   intakeCanvas.addEventListener("selectstart", (e) => e.preventDefault());
-  // Native touch prevention stops iOS from opening the selection loupe mid-stroke
-  intakeCanvas.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
-  intakeCanvas.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
-  intakeCanvas.addEventListener("touchend", (e) => e.preventDefault(), { passive: false });
   // Import modal
   $("#import-modal-close").addEventListener("click",  closeImportModal);
   $("#import-modal-cancel").addEventListener("click", closeImportModal);
