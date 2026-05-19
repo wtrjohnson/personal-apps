@@ -3066,7 +3066,7 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .intake-canvas {
   display: block;
   width: 100%;
-  touch-action: pan-y;
+  touch-action: none;
   cursor: crosshair;
   background: #ffffff;
   -webkit-user-select: none;
