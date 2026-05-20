@@ -1354,7 +1354,11 @@ function _intakeToggleFullscreen() {
     // Exit fullscreen: return canvas mode to modal
     if (_intakeCanvasFsParent) _intakeCanvasFsParent.insertBefore(canvasMode, _intakeCanvasFsParent.querySelector("#card-scan-section"));
     overlay.classList.add("hidden");
-    _intakeCanvasLogicalHeight = Math.max(_intakeCanvasLogicalHeight, 600);
+    // Shrink canvas back to content height — keeping the fullscreen size (vh*3) would leave
+    // a huge physical texture that tanks compositing performance even in the modal view.
+    let contentH = 0;
+    for (const s of _intakeStrokes) for (const p of s.points) if (p.y > contentH) contentH = p.y;
+    _intakeCanvasLogicalHeight = Math.max(contentH + 400, 1200);
     requestAnimationFrame(_intakeResizeCanvas);
   }
 }
