@@ -732,47 +732,45 @@
             </button>
           </div>
         </div>
-        <!-- Metadata fields — phase 1 only -->
-        <div class="intake-context-row intake-phase1-only">
-          <div class="intake-context-field" style="flex:2">
-            <label for="intake-group">Group / Project</label>
-            <input id="intake-group" type="text" list="intake-group-list" placeholder="e.g. Work, Personal…" autocomplete="off" inputmode="text">
-            <datalist id="intake-group-list"></datalist>
+        <!-- Phase 1: pre-meeting metadata form -->
+        <div id="intake-premeeting" class="intake-premeeting">
+          <div class="intake-context-row">
+            <div class="intake-context-field" style="flex:2">
+              <label for="intake-group" id="intake-group-label">Group / Project</label>
+              <input id="intake-group" type="text" list="intake-group-list" placeholder="e.g. Work, Personal…" autocomplete="off" inputmode="text">
+              <datalist id="intake-group-list"></datalist>
+            </div>
+            <div class="intake-context-field" style="flex:1">
+              <label for="intake-date">Date</label>
+              <input id="intake-date" type="date">
+            </div>
           </div>
-          <div class="intake-context-field" style="flex:1">
-            <label for="intake-date">Date</label>
-            <input id="intake-date" type="date">
+          <div class="intake-context-row" style="margin-top:8px">
+            <div class="intake-context-field" style="flex:2">
+              <label for="intake-topic">Topic</label>
+              <input id="intake-topic" type="text" placeholder="Meeting topic or title…" autocomplete="off" inputmode="text">
+            </div>
+            <div class="intake-context-field" style="flex:2">
+              <label for="intake-attendees" id="intake-attendees-label">Attendees</label>
+              <input id="intake-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off" inputmode="text">
+            </div>
           </div>
-        </div>
-        <div class="intake-context-row intake-phase1-only" style="margin-top:8px">
-          <div class="intake-context-field" style="flex:2">
-            <label for="intake-topic">Topic</label>
-            <input id="intake-topic" type="text" placeholder="Meeting topic or title…" autocomplete="off" inputmode="text">
-          </div>
-          <div class="intake-context-field" style="flex:2">
-            <label for="intake-attendees">Attendees</label>
-            <input id="intake-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off" inputmode="text">
-          </div>
-        </div>
-        <div class="intake-context-row intake-phase1-only intake-constituent-only" id="intake-purpose-row" style="margin-top:8px">
-          <div class="intake-context-field">
-            <label for="intake-purpose">Purpose</label>
-            <select id="intake-purpose" class="intake-select">
-              <option value="">Select purpose…</option>
-              <option value="Cosponsor request">Cosponsor request</option>
-              <option value="Sign a letter">Sign a letter</option>
-              <option value="Introduction">Introduction / Get to know</option>
-              <option value="General ask">General ask</option>
-              <option value="Other">Other</option>
-            </select>
-          </div>
-        </div>
-        <!-- Phase 2 only: transcription status -->
-        <div id="intake-transcription-status" class="intake-transcription-status">
-          <div id="intake-transcription-loading" class="intake-transcription-loading hidden">
-            <span class="intake-spinner"></span> Transcribing handwriting…
+          <div class="intake-context-row intake-constituent-only" id="intake-purpose-row" style="margin-top:8px">
+            <div class="intake-context-field">
+              <label for="intake-purpose">Purpose</label>
+              <select id="intake-purpose" class="intake-select">
+                <option value="">Select purpose…</option>
+                <option value="Cosponsor request">Cosponsor request</option>
+                <option value="Sign a letter">Sign a letter</option>
+                <option value="Introduction">Introduction / Get to know</option>
+                <option value="General ask">General ask</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
           </div>
         </div>
+        <!-- Phase 2: meeting — metadata chips + canvas -->
+        <div id="intake-meta-chips" class="intake-meta-chips"></div>
         <!-- Canvas — always visible, sizing differs per phase -->
         <div id="intake-canvas-mode">
           <div class="intake-toolbar">
@@ -815,7 +813,7 @@
               <button id="intake-fullscreen-btn" class="tool-icon-btn" title="Fullscreen canvas (Esc to exit)">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
               </button>
-              <button id="intake-rescan-btn" class="scan-action-btn intake-phase2-only">
+              <button id="intake-rescan-btn" class="scan-action-btn intake-phase3-only">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
                 Re-scan
               </button>
@@ -834,7 +832,13 @@
             <span class="intake-legend-item"><span class="intake-legend-sym">H.R./S.</span> Bill</span>
           </div>
         </div>
-        <!-- Phase 2 only: business card scanner -->
+        <!-- Phase 3: post-meeting only — transcription status -->
+        <div id="intake-transcription-status" class="intake-transcription-status">
+          <div id="intake-transcription-loading" class="intake-transcription-loading hidden">
+            <span class="intake-spinner"></span> Transcribing handwriting…
+          </div>
+        </div>
+        <!-- Phase 3: post-meeting only — business card scanner -->
         <div id="card-scan-section">
           <input type="file" id="card-photo-input" accept="image/*" capture="environment" style="display:none">
           <div id="card-saved-contacts"></div>

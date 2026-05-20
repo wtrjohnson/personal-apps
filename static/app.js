@@ -1895,9 +1895,10 @@ function _intakeSelectType(type) {
     $("#intake-purpose").value = "";
   }
 
-  // Advance to phase 1
+  // Advance to phase 1 (pre-meeting)
   modal.dataset.phase = "1";
-  $("#intake-modal-title").textContent = "Write notes";
+  $("#intake-modal-title").textContent = "Pre-meeting";
+  $("#intake-modal-submit").textContent = "Start Meeting →";
   $("#intake-modal-cancel").textContent = "← Back";
 
   // Focus the most useful field
@@ -1908,6 +1909,94 @@ function _intakeSelectType(type) {
   } else {
     setTimeout(() => $("#intake-attendees").focus(), 50);
   }
+}
+
+function _intakeBuildChips() {
+  const container = $("#intake-meta-chips");
+  container.innerHTML = "";
+
+  const fields = [
+    { id: "intake-group",     label: "Group",     type: "text"   },
+    { id: "intake-topic",     label: "Topic",     type: "text"   },
+    { id: "intake-date",      label: "Date",      type: "date"   },
+    { id: "intake-attendees", label: "Attendees", type: "text"   },
+    { id: "intake-purpose",   label: "Purpose",   type: "select" },
+  ];
+
+  for (const f of fields) {
+    const src = $(`#${f.id}`);
+    const val = src.value.trim();
+    if (!val) continue;
+
+    const chip = document.createElement("div");
+    chip.className = "intake-meta-chip";
+    chip.dataset.field = f.id;
+
+    const labelEl = document.createElement("span");
+    labelEl.className = "intake-meta-chip-label";
+    labelEl.textContent = f.label;
+
+    const valueEl = document.createElement("span");
+    valueEl.className = "intake-meta-chip-value";
+    valueEl.textContent = f.id === "intake-date" ? new Date(val + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : val;
+
+    const inputEl = document.createElement("input");
+    inputEl.className = "intake-meta-chip-input";
+    inputEl.type = f.type === "date" ? "date" : "text";
+    inputEl.value = val;
+
+    chip.appendChild(labelEl);
+    chip.appendChild(valueEl);
+    chip.appendChild(inputEl);
+    container.appendChild(chip);
+
+    chip.addEventListener("click", (e) => {
+      if (chip.classList.contains("intake-meta-chip--expanded")) return;
+      document.querySelectorAll(".intake-meta-chip--expanded").forEach((c) => _intakeCollapseChip(c));
+      chip.classList.add("intake-meta-chip--expanded");
+      inputEl.focus();
+      inputEl.select();
+      e.stopPropagation();
+    });
+
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === "Escape") {
+        _intakeCollapseChip(chip);
+        e.preventDefault();
+      }
+    });
+
+    inputEl.addEventListener("blur", () => {
+      setTimeout(() => _intakeCollapseChip(chip), 120);
+    });
+  }
+}
+
+function _intakeCollapseChip(chip) {
+  if (!chip.classList.contains("intake-meta-chip--expanded")) return;
+  const fieldId = chip.dataset.field;
+  const inputEl = chip.querySelector(".intake-meta-chip-input");
+  const valueEl = chip.querySelector(".intake-meta-chip-value");
+  const newVal = inputEl.value.trim();
+  const src = $(`#${fieldId}`);
+  if (newVal) {
+    src.value = newVal;
+    valueEl.textContent = fieldId === "intake-date"
+      ? new Date(newVal + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })
+      : newVal;
+  }
+  chip.classList.remove("intake-meta-chip--expanded");
+}
+
+function _intakeStartMeeting() {
+  const modal = $(".modal-intake");
+  modal.dataset.phase = "2";
+  $("#intake-modal-title").textContent = "In Meeting";
+  $("#intake-modal-submit").textContent = "Finalize Notes";
+  $("#intake-modal-submit").disabled = false;
+  $("#intake-modal-cancel").textContent = "← Back";
+  _intakeBuildChips();
+  requestAnimationFrame(() => _intakeResizeCanvas());
 }
 
 async function _intakeSaveNotes() {
@@ -2008,10 +2097,10 @@ async function _intakeSaveNotes() {
   }
 }
 
-// Phase 1 → Phase 2 transition: run transcription, then reveal review queue
+// Phase 2 → Phase 3 transition: run transcription, then reveal review queue
 async function _intakeFinalizeNotes() {
   const modal = $(".modal-intake");
-  modal.dataset.phase = "2";
+  modal.dataset.phase = "3";
   $("#intake-modal-title").textContent = "Post-meeting";
   const submitBtn = $("#intake-modal-submit");
   submitBtn.textContent = "End Meeting";
@@ -2052,7 +2141,10 @@ async function _intakeFinalizeNotes() {
 
 async function submitIntake() {
   const modal = $(".modal-intake");
-  if (modal.dataset.phase === "1") {
+  const phase = modal.dataset.phase;
+  if (phase === "1") {
+    _intakeStartMeeting();
+  } else if (phase === "2") {
     await _intakeFinalizeNotes();
   } else {
     await _intakeSaveNotes();
@@ -3140,16 +3232,23 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#intake-modal-close").addEventListener("click", closeIntakeModal);
   $("#intake-modal-cancel").addEventListener("click", () => {
     const modal = $(".modal-intake");
-    if (modal.dataset.phase === "2") {
-      // Go back to phase 1
-      modal.dataset.phase = "1";
-      $("#intake-modal-title").textContent = "Write notes";
+    const phase = modal.dataset.phase;
+    if (phase === "3") {
+      // Back to meeting (canvas)
+      modal.dataset.phase = "2";
+      $("#intake-modal-title").textContent = "In Meeting";
       $("#intake-modal-submit").textContent = "Finalize Notes";
       $("#intake-modal-submit").disabled = false;
       $("#intake-modal-cancel").textContent = "← Back";
       $("#intake-transcription-loading").classList.add("hidden");
-    } else if (modal.dataset.phase === "1") {
-      // Go back to phase 0 (type picker)
+    } else if (phase === "2") {
+      // Back to pre-meeting form
+      modal.dataset.phase = "1";
+      $("#intake-modal-title").textContent = "Pre-meeting";
+      $("#intake-modal-submit").textContent = "Start Meeting →";
+      $("#intake-modal-cancel").textContent = "← Back";
+    } else if (phase === "1") {
+      // Back to type picker
       modal.dataset.phase = "0";
       $("#intake-modal-title").textContent = "New Meeting";
       $("#intake-modal-cancel").textContent = "Cancel";
@@ -3164,6 +3263,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#intake-phase0").addEventListener("click", (e) => {
     const card = e.target.closest(".intake-type-card");
     if (card) _intakeSelectType(card.dataset.type);
+  });
+
+  // Collapse any expanded chip when clicking outside
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".intake-meta-chip")) {
+      document.querySelectorAll(".intake-meta-chip--expanded").forEach((c) => _intakeCollapseChip(c));
+    }
   });
 
   // Canvas toolbar

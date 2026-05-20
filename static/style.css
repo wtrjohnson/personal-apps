@@ -2946,35 +2946,116 @@ table.bills-table tr:last-child td { border-bottom: none; }
 
 .secondary-btn-sm:hover { background: var(--card-soft); }
 
-/* ---- Three-phase intake modal ---- */
-/* Phase 0: show only the type picker */
-.modal-intake[data-phase="0"] .intake-phase1-only,
-.modal-intake[data-phase="0"] #intake-canvas-mode,
-.modal-intake[data-phase="0"] #card-scan-section,
-.modal-intake[data-phase="0"] #intake-callout-legend,
-.modal-intake[data-phase="0"] #intake-review-queue,
-.modal-intake[data-phase="0"] #intake-transcription-status,
-.modal-intake[data-phase="0"] #intake-result,
-.modal-intake[data-phase="0"] .intake-phase2-only { display: none !important; }
+/* ---- Four-phase intake modal ---- */
+
+/* Default hidden state for each major section */
+#intake-phase0    { display: none; }
+#intake-premeeting{ display: none; }
+#intake-meta-chips{ display: none; }
+
+/* Phase 0: type picker only */
+.modal-intake[data-phase="0"] #intake-phase0 { display: block; }
 .modal-intake[data-phase="0"] #intake-modal-submit { display: none !important; }
 
-/* Phase 1: hide post-meeting sections and type picker */
-#intake-phase0 { display: none; }
-.modal-intake[data-phase="0"] #intake-phase0 { display: block; }
-.modal-intake[data-phase="1"] #card-scan-section,
-.modal-intake[data-phase="1"] #intake-callout-legend,
-.modal-intake[data-phase="1"] #intake-review-queue,
-.modal-intake[data-phase="1"] #intake-transcription-status,
-.modal-intake[data-phase="1"] #intake-result,
-.modal-intake[data-phase="1"] .intake-phase2-only { display: none !important; }
+/* Phase 1: pre-meeting form only */
+.modal-intake[data-phase="1"] #intake-premeeting { display: block; }
 
-/* Phase 2: hide metadata, compact canvas */
-.modal-intake[data-phase="2"] .intake-phase1-only { display: none !important; }
-.modal-intake[data-phase="2"] .intake-canvas-scroll { max-height: 220px; }
+/* Phase 2: canvas + chips (meeting in progress) */
+.modal-intake[data-phase="2"] #intake-meta-chips { display: flex; }
+
+/* Phase 3: post-meeting — compact canvas + review UI */
+.modal-intake[data-phase="3"] .intake-canvas-scroll { max-height: 220px; }
+
+/* Sections hidden outside Phase 3 */
+.modal-intake:not([data-phase="3"]) #intake-transcription-status,
+.modal-intake:not([data-phase="3"]) #card-scan-section,
+.modal-intake:not([data-phase="3"]) #intake-callout-legend,
+.modal-intake:not([data-phase="3"]) #intake-review-queue,
+.modal-intake:not([data-phase="3"]) #intake-result,
+.modal-intake:not([data-phase="3"]) .intake-phase3-only { display: none !important; }
+
+/* Canvas hidden in Phase 0 and 1 */
+.modal-intake[data-phase="0"] #intake-canvas-mode,
+.modal-intake[data-phase="1"] #intake-canvas-mode { display: none !important; }
+
+/* Legend strip hidden in Phase 3 (canvas is compact, no room) */
+.modal-intake[data-phase="3"] .intake-legend-strip { display: none; }
 
 /* Constituent-only fields */
 .intake-constituent-only { display: none; }
 .intake-constituent-only.intake-show { display: flex; }
+
+/* Pre-meeting form wrapper */
+.intake-premeeting {
+  padding-bottom: 4px;
+}
+
+/* Metadata chips (Phase 2 — meeting in progress) */
+.intake-meta-chips {
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 0 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+.intake-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: var(--card);
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.intake-meta-chip:hover {
+  border-color: var(--accent);
+  background: var(--accent-softer);
+}
+.intake-meta-chip-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.intake-meta-chip-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.intake-meta-chip--expanded {
+  border-color: var(--accent);
+  background: var(--accent-softer);
+  max-width: none;
+  flex: 1 0 180px;
+}
+.intake-meta-chip--expanded .intake-meta-chip-value { display: none; }
+.intake-meta-chip-input {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  padding: 0;
+  min-width: 80px;
+  width: 120px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.intake-meta-chip-input:focus { outline: none; }
 
 /* Phase 0 type picker */
 .intake-phase0 {
