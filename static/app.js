@@ -1471,18 +1471,18 @@ function _intakePointerMove(e) {
     if (_intakeActiveTouches.size >= 2 && _intakeTouchScrollLast) {
       const cur = _intakeTouchCentroid();
       const dy = _intakeTouchScrollLast.y - cur.y;
-      const wrap = _intakeCanvasEl().parentElement;
+      const wrap = (_intakeCanvasCache || _intakeCanvasEl()).parentElement;
       if (wrap) wrap.scrollTop += dy;
       _intakeTouchScrollLast = cur;
-      e.preventDefault();
     }
     return;
   }
   if (!_intakeCurrentStroke) return;
-  e.preventDefault();
   const stroke = _intakeCurrentStroke;
   const ctx = _intakeCtxCache;
-  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  // Include all coalesced intermediate points plus the dispatched event itself
+  // (Safari omits the dispatched event from getCoalescedEvents, so always append e)
+  const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
   ctx.beginPath();
   ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
   for (const ev of events) {
@@ -1647,6 +1647,31 @@ const _SCAN_ICONS = {
 };
 const _SCAN_LABELS = { task: "Task", important: "Important", followup: "Follow-up", deadline: "Deadline", person: "Person", bill: "Bill" };
 
+function _editScanItemInline(el, idx) {
+  if (!_intakeScanResult) return;
+  const item = _intakeScanResult.items[idx];
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.value = item.text;
+  inp.className = "scan-item-edit";
+  el.replaceWith(inp);
+  inp.focus();
+  inp.select();
+  let done = false;
+  function commit() {
+    if (done) return;
+    done = true;
+    const val = inp.value.trim();
+    if (val) item.text = val;
+    _renderScanResults();
+  }
+  inp.addEventListener("blur", commit);
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+    if (e.key === "Escape") { done = true; _renderScanResults(); }
+  });
+}
+
 function _renderScanResults() {
   const queueEl = $("#intake-review-queue");
   if (!_intakeScanResult) { queueEl.classList.add("hidden"); return; }
@@ -1663,7 +1688,7 @@ function _renderScanResults() {
       <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
       <div class="scan-item-body">
         <div class="scan-item-type">${escapeHtml(_SCAN_LABELS[item.type] || item.type)}</div>
-        <div class="scan-item-text">${escapeHtml(item.text)}</div>
+        <div class="scan-item-text" data-idx="${idx}">${escapeHtml(item.text)}</div>
       </div>
       <button class="scan-item-dismiss" data-idx="${idx}" title="${item.accepted ? "Remove" : "Restore"}">
         ${item.accepted ? "×" : "↩"}
@@ -1676,6 +1701,10 @@ function _renderScanResults() {
       _intakeScanResult.items[idx].accepted = !_intakeScanResult.items[idx].accepted;
       _renderScanResults();
     });
+  });
+
+  $("#scan-result-items").querySelectorAll(".scan-item-text[data-idx]").forEach((el) => {
+    el.addEventListener("click", () => _editScanItemInline(el, +el.dataset.idx));
   });
 
   $("#scan-transcription-text").textContent = text || "(empty)";
@@ -3329,7 +3358,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Canvas pointer + touch events
   const intakeCanvas = $("#intake-canvas");
   intakeCanvas.addEventListener("pointerdown", _intakePointerDown);
-  intakeCanvas.addEventListener("pointermove", _intakePointerMove);
+  intakeCanvas.addEventListener("pointermove", _intakePointerMove, { passive: true });
   intakeCanvas.addEventListener("pointerup", _intakePointerUp);
   intakeCanvas.addEventListener("pointercancel", _intakePointerUp);
   intakeCanvas.addEventListener("lostpointercapture", _intakePointerUp);
