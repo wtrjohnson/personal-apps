@@ -1282,6 +1282,7 @@ async function submitImport() {
 // ===== Handwriting Intake =====
 
 // --- Canvas state ---
+let _intakeMeetingType = null;   // selected type from phase 0 picker
 let _intakeStrokes = [];         // [{color, width, points: [{x,y}]}]
 let _intakeCurrentStroke = null;
 let _intakeTool = "pen";
@@ -1830,10 +1831,13 @@ function openIntakeModal() {
   const cancelBtn = $("#intake-modal-cancel");
   cancelBtn.disabled = false;
   cancelBtn.textContent = "Cancel";
-  // Reset to phase 1
+  // Reset to phase 0
   const modal = $(".modal-intake");
-  modal.dataset.phase = "1";
-  $("#intake-modal-title").textContent = "Write notes";
+  _intakeMeetingType = null;
+  modal.dataset.phase = "0";
+  $("#intake-modal-title").textContent = "New Meeting";
+  $("#intake-purpose-row").classList.remove("intake-show");
+  $("#intake-purpose").value = "";
   $("#intake-transcription-loading").classList.add("hidden");
   // Populate group datalist
   const dl = $("#intake-group-list");
@@ -1862,6 +1866,48 @@ function closeIntakeModal() {
   document.body.style.touchAction = "";
   document.body.style.webkitUserSelect = "";
   document.body.style.userSelect = "";
+}
+
+const _intakeTypePresets = {
+  "1on1":       { group: "",          topic: "1:1",                constituent: false },
+  "staff":      { group: "Staff",     topic: "Staff Meeting",      constituent: false },
+  "legteam":    { group: "Leg. Team", topic: "Leg. Team Meeting",  constituent: false },
+  "constituent":{ group: "",          topic: "",                   constituent: true  },
+  "briefing":   { group: "",          topic: "",                   constituent: false },
+  "other":      { group: "",          topic: "",                   constituent: false },
+};
+
+function _intakeSelectType(type) {
+  _intakeMeetingType = type;
+  const preset = _intakeTypePresets[type] || {};
+  const modal = $(".modal-intake");
+
+  // Pre-fill fields
+  if (preset.group !== undefined) $("#intake-group").value = preset.group;
+  if (preset.topic !== undefined) $("#intake-topic").value = preset.topic;
+
+  // Show/hide constituent-only purpose row
+  const purposeRow = $("#intake-purpose-row");
+  if (preset.constituent) {
+    purposeRow.classList.add("intake-show");
+  } else {
+    purposeRow.classList.remove("intake-show");
+    $("#intake-purpose").value = "";
+  }
+
+  // Advance to phase 1
+  modal.dataset.phase = "1";
+  $("#intake-modal-title").textContent = "Write notes";
+  $("#intake-modal-cancel").textContent = "← Back";
+
+  // Focus the most useful field
+  if (!preset.group) {
+    setTimeout(() => $("#intake-group").focus(), 50);
+  } else if (!preset.topic) {
+    setTimeout(() => $("#intake-topic").focus(), 50);
+  } else {
+    setTimeout(() => $("#intake-attendees").focus(), 50);
+  }
 }
 
 async function _intakeSaveNotes() {
@@ -1900,6 +1946,8 @@ async function _intakeSaveNotes() {
         action_items: "",
         reminders: "",
         canvas_image: canvasImage,
+        meeting_type: _intakeMeetingType || null,
+        purpose_val: $("#intake-purpose").value.trim() || null,
         confirmed_items: _intakeScanResult
           ? _intakeScanResult.items.filter((i) => i.accepted).map((i) => {
               const out = { type: i.type, text: i.text };
@@ -3093,19 +3141,30 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#intake-modal-cancel").addEventListener("click", () => {
     const modal = $(".modal-intake");
     if (modal.dataset.phase === "2") {
-      // Go back to phase 1 instead of closing
+      // Go back to phase 1
       modal.dataset.phase = "1";
       $("#intake-modal-title").textContent = "Write notes";
       $("#intake-modal-submit").textContent = "Finalize Notes";
       $("#intake-modal-submit").disabled = false;
-      $("#intake-modal-cancel").textContent = "Cancel";
+      $("#intake-modal-cancel").textContent = "← Back";
       $("#intake-transcription-loading").classList.add("hidden");
+    } else if (modal.dataset.phase === "1") {
+      // Go back to phase 0 (type picker)
+      modal.dataset.phase = "0";
+      $("#intake-modal-title").textContent = "New Meeting";
+      $("#intake-modal-cancel").textContent = "Cancel";
     } else {
       closeIntakeModal();
     }
   });
   // No backdrop-tap-to-close: too easy to accidentally dismiss with a resting palm on iPad
   $("#intake-modal-submit").addEventListener("click", submitIntake);
+
+  // Phase 0 type picker
+  $("#intake-phase0").addEventListener("click", (e) => {
+    const card = e.target.closest(".intake-type-card");
+    if (card) _intakeSelectType(card.dataset.type);
+  });
 
   // Canvas toolbar
   $("#intake-tool-pen").addEventListener("click", () => _intakeSetTool("pen"));

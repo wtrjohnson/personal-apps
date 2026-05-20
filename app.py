@@ -1812,6 +1812,19 @@ def api_notes_intake():
     note_date = (data.get("date") or "").strip() or date_cls.today().isoformat()
     note_attendees = (data.get("attendees") or "").strip()
     canvas_image = data.get("canvas_image") or None
+    meeting_type = (data.get("meeting_type") or "").strip()
+    purpose_val = (data.get("purpose_val") or "").strip()
+
+    # Build purpose list from meeting type and optional constituent purpose
+    _MEETING_TYPE_LABELS = {
+        "1on1": "1:1", "staff": "Staff Meeting", "legteam": "Leg. Team",
+        "constituent": "Constituent", "briefing": "Briefing", "other": "Other",
+    }
+    note_purpose: list = []
+    if meeting_type and meeting_type in _MEETING_TYPE_LABELS:
+        note_purpose.append(_MEETING_TYPE_LABELS[meeting_type])
+    if purpose_val:
+        note_purpose.append(purpose_val)
 
     # confirmed_items from canvas scan: [{type, text, billType?, billNumber?}]
     confirmed_items: List[dict] = data.get("confirmed_items") or []
@@ -1873,6 +1886,8 @@ def api_notes_intake():
         fm_parts.append(f"topic: {note_topic}")
     if note_attendees:
         fm_parts.append(f"attendees: {note_attendees}")
+    if note_purpose:
+        fm_parts.append("purpose: [" + ", ".join(f'"{p}"' for p in note_purpose) + "]")
 
     content = "---\n" + "\n".join(fm_parts) + "\n---\n\n" + body
     filename = f"{note_date} - {safe_group}.md"
