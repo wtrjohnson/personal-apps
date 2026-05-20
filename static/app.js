@@ -1294,12 +1294,15 @@ let _intakeCanvasLogicalHeight = 1200; // grows as user writes near the bottom
 let _intakeActiveTouches = new Map(); // pointerId -> {x, y}
 let _intakeTouchScrollLast = null;    // {x, y} centroid for delta
 let _intakePenActiveUntil = 0;        // performance.now() ms (palm-rejection grace)
+let _intakeCanvasCache = null;        // cached element ref, set at init
+let _intakeCtxCache = null;           // cached 2d context, set at init
+let _intakeStrokeRect = null;         // bounding rect cached per-stroke
 
-function _intakeCanvasEl() { return $("#intake-canvas"); }
-function _intakeCtx() { return _intakeCanvasEl().getContext("2d"); }
+function _intakeCanvasEl() { return _intakeCanvasCache || $("#intake-canvas"); }
+function _intakeCtx() { return _intakeCtxCache || _intakeCanvasEl().getContext("2d"); }
 
 function _initIntakeCanvas() {
-  const canvas = _intakeCanvasEl();
+  const canvas = _intakeCanvasCache = $("#intake-canvas");
   const wrap = canvas.parentElement;
   const dpr = window.devicePixelRatio || 1;
   const w = wrap.clientWidth || 680;
@@ -1308,7 +1311,8 @@ function _initIntakeCanvas() {
   canvas.height = h * dpr;
   canvas.style.width = w + "px";
   canvas.style.height = h + "px";
-  const ctx = _intakeCtx();
+  _intakeCtxCache = canvas.getContext("2d");
+  const ctx = _intakeCtxCache;
   ctx.scale(dpr, dpr);
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, w, h);
@@ -1392,8 +1396,7 @@ function _intakeRedraw() {
 }
 
 function _intakePointerPos(e) {
-  const canvas = _intakeCanvasEl();
-  const rect = canvas.getBoundingClientRect();
+  const rect = _intakeStrokeRect || (_intakeCanvasCache || _intakeCanvasEl()).getBoundingClientRect();
   return { x: e.clientX - rect.left, y: e.clientY - rect.top };
 }
 
@@ -1412,7 +1415,7 @@ function _intakeTouchCentroid() {
 function _intakePointerDown(e) {
   if (e.pointerType === "touch") {
     if (_intakePenIsActive()) return;
-    _intakeCanvasEl().setPointerCapture(e.pointerId);
+    (_intakeCanvasCache || _intakeCanvasEl()).setPointerCapture(e.pointerId);
     _intakeActiveTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (_intakeActiveTouches.size >= 2) {
       _intakeTouchScrollLast = _intakeTouchCentroid();
@@ -1421,7 +1424,9 @@ function _intakePointerDown(e) {
   }
   if (e.pointerType !== "pen") return;
   e.preventDefault();
-  _intakeCanvasEl().setPointerCapture(e.pointerId);
+  const canvas = _intakeCanvasCache || _intakeCanvasEl();
+  canvas.setPointerCapture(e.pointerId);
+  _intakeStrokeRect = canvas.getBoundingClientRect();
   const pos = _intakePointerPos(e);
   const isPen = _intakeTool === "pen";
   _intakeCurrentStroke = {
@@ -1485,6 +1490,7 @@ function _intakePointerUp(e) {
     }
   }
   _intakeCurrentStroke = null;
+  _intakeStrokeRect = null;
   _intakePenActiveUntil = performance.now() + 700;
 }
 
