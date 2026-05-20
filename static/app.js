@@ -1333,8 +1333,10 @@ let _intakeActiveTouches = new Map(); // pointerId -> {x, y}
 let _intakeTouchScrollLast = null;    // {x, y} centroid for delta
 let _intakePenActiveUntil = 0;        // performance.now() ms (palm-rejection grace)
 let _intakeCanvasCache = null;        // cached element ref, set at init
-let _intakeCtxCache = null;           // cached 2d context, set at init
+let _intakeCtxCache = null;           // cached 2d context (fallback only)
 let _intakeStrokeRect = null;         // bounding rect cached per-stroke
+let _intakeWorker = null;             // OffscreenCanvas worker (null = main-thread fallback)
+let _intakeExportCallbacks = new Map(); // id → resolve fn for exportBlob promises
 
 function _intakeCanvasEl() { return _intakeCanvasCache || $("#intake-canvas"); }
 function _intakeCtx() { return _intakeCtxCache || _intakeCanvasEl().getContext("2d"); }
@@ -1349,13 +1351,47 @@ function _initIntakeCanvas() {
   canvas.height = h * dpr;
   canvas.style.width = w + "px";
   canvas.style.height = h + "px";
+  _intakeStrokes = [];
+  _intakeCurrentStroke = null;
+
+  if (canvas.transferControlToOffscreen && window.Worker) {
+    try {
+      const offscreen = canvas.transferControlToOffscreen();
+      _intakeWorker = new Worker("/static/intake-canvas-worker.js");
+      _intakeWorker.onmessage = ({ data }) => {
+        if (data.type === "exportResult") {
+          const resolve = _intakeExportCallbacks.get(data.id);
+          if (resolve) {
+            _intakeExportCallbacks.delete(data.id);
+            const blob = new Blob([data.ab], { type: "image/png" });
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.readAsDataURL(blob);
+          }
+        }
+      };
+      _intakeWorker.postMessage({ type: "init", offscreen, dpr, width: w, height: h }, [offscreen]);
+      return;
+    } catch (err) {
+      _intakeWorker = null;
+    }
+  }
+
+  // Fallback: main-thread rendering
   _intakeCtxCache = canvas.getContext("2d", { desynchronized: true });
   const ctx = _intakeCtxCache;
   ctx.scale(dpr, dpr);
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, w, h);
-  _intakeStrokes = [];
-  _intakeCurrentStroke = null;
+}
+
+async function _intakeExportPng() {
+  if (!_intakeWorker) return (_intakeCanvasCache || _intakeCanvasEl()).toDataURL("image/png");
+  return new Promise((resolve) => {
+    const id = performance.now() + Math.random();
+    _intakeExportCallbacks.set(id, resolve);
+    _intakeWorker.postMessage({ type: "exportBlob", id });
+  });
 }
 
 let _intakeCanvasFsParent = null; // tracks original parent for restore
@@ -1365,13 +1401,17 @@ function _intakeResizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
   const wrap = canvas.parentElement; // .intake-canvas-scroll
   const w = wrap.clientWidth || 680;
-  canvas.width = w * dpr;
-  canvas.height = _intakeCanvasLogicalHeight * dpr;
   canvas.style.width = w + "px";
   canvas.style.height = _intakeCanvasLogicalHeight + "px";
-  const ctx = _intakeCtx();
-  ctx.scale(dpr, dpr);
-  _intakeRedraw();
+  if (_intakeWorker) {
+    _intakeWorker.postMessage({ type: "resize", width: w, height: _intakeCanvasLogicalHeight });
+  } else {
+    canvas.width = w * dpr;
+    canvas.height = _intakeCanvasLogicalHeight * dpr;
+    const ctx = _intakeCtx();
+    ctx.scale(dpr, dpr);
+    _intakeRedraw();
+  }
 }
 
 function _intakeToggleFullscreen() {
@@ -1403,32 +1443,32 @@ function _intakeToggleFullscreen() {
 
 function _intakeGrowCanvas() {
   const canvas = _intakeCanvasCache || _intakeCanvasEl();
-  const ctx = _intakeCtxCache;
-  const dpr = window.devicePixelRatio || 1;
-  const oldLogicalH = _intakeCanvasLogicalHeight;
-
-  // Snapshot pixels before resize clears the canvas
-  const tmp = document.createElement("canvas");
-  tmp.width = canvas.width;
-  tmp.height = canvas.height;
-  tmp.getContext("2d").drawImage(canvas, 0, 0);
-
   _intakeCanvasLogicalHeight += 1600;
-  canvas.height = _intakeCanvasLogicalHeight * dpr;
   canvas.style.height = _intakeCanvasLogicalHeight + "px";
 
-  // Restore snapshot (transform is reset after height change; drawImage uses physical coords)
-  ctx.drawImage(tmp, 0, 0);
-  // Re-apply scale, fill new area white
-  ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, oldLogicalH, canvas.width / dpr, 1600);
+  if (_intakeWorker) {
+    _intakeWorker.postMessage({ type: "grow", newHeight: _intakeCanvasLogicalHeight });
+  } else {
+    const ctx = _intakeCtxCache;
+    const dpr = window.devicePixelRatio || 1;
+    const oldLogicalH = _intakeCanvasLogicalHeight - 1600;
+    const tmp = document.createElement("canvas");
+    tmp.width = canvas.width;
+    tmp.height = canvas.height;
+    tmp.getContext("2d").drawImage(canvas, 0, 0);
+    canvas.height = _intakeCanvasLogicalHeight * dpr;
+    ctx.drawImage(tmp, 0, 0);
+    ctx.scale(dpr, dpr);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, oldLogicalH, canvas.width / dpr, 1600);
+  }
 
   const scrollWrap = canvas.parentElement;
   scrollWrap.scrollTop = scrollWrap.scrollHeight;
 }
 
 function _intakeRedraw() {
+  if (_intakeWorker) return; // worker owns all rendering
   const canvas = _intakeCanvasEl();
   const ctx = _intakeCtx();
   const dpr = window.devicePixelRatio || 1;
@@ -1491,15 +1531,19 @@ function _intakePointerDown(e) {
   const color = isPen ? _intakePenColor : "#ffffff";
   const width = isPen ? _intakePenSize : 24;
   _intakeCurrentStroke = { color, width, points: [pos], lastMid: { x: pos.x, y: pos.y } };
-  const ctx = _intakeCtxCache;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = width;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.beginPath();
-  ctx.arc(pos.x, pos.y, width / 2, 0, Math.PI * 2);
-  ctx.fillStyle = color;
-  ctx.fill();
+  if (_intakeWorker) {
+    _intakeWorker.postMessage({ type: "strokeStart", color, width, x: pos.x, y: pos.y });
+  } else {
+    const ctx = _intakeCtxCache;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, width / 2, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
 }
 
 function _intakePointerMove(e) {
@@ -1517,23 +1561,36 @@ function _intakePointerMove(e) {
   }
   if (!_intakeCurrentStroke) return;
   const stroke = _intakeCurrentStroke;
-  const ctx = _intakeCtxCache;
   // Include all coalesced intermediate points plus the dispatched event itself
   // (Safari omits the dispatched event from getCoalescedEvents, so always append e)
   const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
-  ctx.beginPath();
-  ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
-  for (const ev of events) {
-    const pos = _intakePointerPos(ev);
-    const prev = stroke.points[stroke.points.length - 1];
-    stroke.points.push(pos);
-    const mx = (prev.x + pos.x) * 0.5;
-    const my = (prev.y + pos.y) * 0.5;
-    ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
-    stroke.lastMid.x = mx;
-    stroke.lastMid.y = my;
+  if (_intakeWorker) {
+    const coords = [];
+    for (const ev of events) {
+      const pos = _intakePointerPos(ev);
+      coords.push(pos.x, pos.y);
+      const prev = stroke.points[stroke.points.length - 1];
+      stroke.points.push(pos);
+      stroke.lastMid.x = (prev.x + pos.x) * 0.5;
+      stroke.lastMid.y = (prev.y + pos.y) * 0.5;
+    }
+    _intakeWorker.postMessage({ type: "strokePoints", coords });
+  } else {
+    const ctx = _intakeCtxCache;
+    ctx.beginPath();
+    ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
+    for (const ev of events) {
+      const pos = _intakePointerPos(ev);
+      const prev = stroke.points[stroke.points.length - 1];
+      stroke.points.push(pos);
+      const mx = (prev.x + pos.x) * 0.5;
+      const my = (prev.y + pos.y) * 0.5;
+      ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
+      stroke.lastMid.x = mx;
+      stroke.lastMid.y = my;
+    }
+    ctx.stroke();
   }
-  ctx.stroke();
 }
 
 function _intakePointerUp(e) {
@@ -1552,6 +1609,7 @@ function _intakePointerUp(e) {
       _intakeGrowCanvas();
     }
   }
+  if (_intakeWorker) _intakeWorker.postMessage({ type: "strokeEnd" });
   _intakeCurrentStroke = null;
   _intakeStrokeRect = null;
   _intakePenActiveUntil = performance.now() + 700;
@@ -1560,13 +1618,21 @@ function _intakePointerUp(e) {
 function _intakeUndo() {
   if (_intakeStrokes.length === 0) return;
   _intakeStrokes.pop();
-  _intakeRedraw();
+  if (_intakeWorker) {
+    _intakeWorker.postMessage({ type: "undo" });
+  } else {
+    _intakeRedraw();
+  }
 }
 
 function _intakeClearCanvas() {
   _intakeStrokes = [];
   _intakeScanResult = null;
-  _intakeRedraw();
+  if (_intakeWorker) {
+    _intakeWorker.postMessage({ type: "clear" });
+  } else {
+    _intakeRedraw();
+  }
   $("#intake-review-queue").classList.add("hidden");
 }
 
@@ -1637,7 +1703,6 @@ function _extractCallouts(text) {
 }
 
 async function _intakeScan() {
-  const canvas = _intakeCanvasEl();
   const scanBtn = $("#intake-rescan-btn");
   const scanSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>';
 
@@ -1651,7 +1716,7 @@ async function _intakeScan() {
     const res = await fetch("/api/notes/transcribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: canvas.toDataURL("image/png") }),
+      body: JSON.stringify({ image: await _intakeExportPng() }),
     });
     const data = await res.json();
 
@@ -2132,7 +2197,7 @@ async function _intakeSaveNotes() {
 
   let canvasImage = null;
   if (hasCanvasContent) {
-    canvasImage = _intakeCanvasEl().toDataURL("image/png");
+    canvasImage = await _intakeExportPng();
   }
 
   const btn = $("#intake-modal-submit");
@@ -2247,11 +2312,10 @@ async function _intakeFinalizeNotes() {
   submitBtn.disabled = true;
 
   try {
-    const canvas = _intakeCanvasEl();
     const res = await fetch("/api/notes/transcribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: canvas.toDataURL("image/png") }),
+      body: JSON.stringify({ image: await _intakeExportPng() }),
     });
     const data = await res.json();
     loadingEl.classList.add("hidden");
