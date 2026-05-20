@@ -1354,20 +1354,38 @@ function _intakeToggleFullscreen() {
     // Exit fullscreen: return canvas mode to modal
     if (_intakeCanvasFsParent) _intakeCanvasFsParent.insertBefore(canvasMode, _intakeCanvasFsParent.querySelector("#card-scan-section"));
     overlay.classList.add("hidden");
-    _intakeCanvasLogicalHeight = Math.max(_intakeCanvasLogicalHeight, 600);
+    // Shrink canvas back to content height — keeping the fullscreen size (vh*3) would leave
+    // a huge physical texture that tanks compositing performance even in the modal view.
+    let contentH = 0;
+    for (const s of _intakeStrokes) for (const p of s.points) if (p.y > contentH) contentH = p.y;
+    _intakeCanvasLogicalHeight = Math.max(contentH + 400, 1200);
     requestAnimationFrame(_intakeResizeCanvas);
   }
 }
 
 function _intakeGrowCanvas() {
-  const canvas = _intakeCanvasEl();
+  const canvas = _intakeCanvasCache || _intakeCanvasEl();
+  const ctx = _intakeCtxCache;
   const dpr = window.devicePixelRatio || 1;
-  const w = canvas.width / dpr;
-  _intakeCanvasLogicalHeight += 800;
+  const oldLogicalH = _intakeCanvasLogicalHeight;
+
+  // Snapshot pixels before resize clears the canvas
+  const tmp = document.createElement("canvas");
+  tmp.width = canvas.width;
+  tmp.height = canvas.height;
+  tmp.getContext("2d").drawImage(canvas, 0, 0);
+
+  _intakeCanvasLogicalHeight += 1600;
   canvas.height = _intakeCanvasLogicalHeight * dpr;
   canvas.style.height = _intakeCanvasLogicalHeight + "px";
-  _intakeRedraw();
-  // Scroll the wrapper to keep the pen near visible area
+
+  // Restore snapshot (transform is reset after height change; drawImage uses physical coords)
+  ctx.drawImage(tmp, 0, 0);
+  // Re-apply scale, fill new area white
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, oldLogicalH, canvas.width / dpr, 1600);
+
   const scrollWrap = canvas.parentElement;
   scrollWrap.scrollTop = scrollWrap.scrollHeight;
 }
@@ -1432,16 +1450,17 @@ function _intakePointerDown(e) {
   _intakeStrokeRect = canvas.getBoundingClientRect();
   const pos = _intakePointerPos(e);
   const isPen = _intakeTool === "pen";
-  _intakeCurrentStroke = {
-    color: isPen ? _intakePenColor : "#ffffff",
-    width: isPen ? _intakePenSize : 24,
-    points: [pos],
-    lastMid: pos,
-  };
-  const ctx = _intakeCtx();
+  const color = isPen ? _intakePenColor : "#ffffff";
+  const width = isPen ? _intakePenSize : 24;
+  _intakeCurrentStroke = { color, width, points: [pos], lastMid: { x: pos.x, y: pos.y } };
+  const ctx = _intakeCtxCache;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
   ctx.beginPath();
-  ctx.arc(pos.x, pos.y, _intakeCurrentStroke.width / 2, 0, Math.PI * 2);
-  ctx.fillStyle = _intakeCurrentStroke.color;
+  ctx.arc(pos.x, pos.y, width / 2, 0, Math.PI * 2);
+  ctx.fillStyle = color;
   ctx.fill();
 }
 
@@ -1465,18 +1484,16 @@ function _intakePointerMove(e) {
   const ctx = _intakeCtxCache;
   const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
   ctx.beginPath();
-  ctx.strokeStyle = stroke.color;
-  ctx.lineWidth = stroke.width;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
   ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
   for (const ev of events) {
     const pos = _intakePointerPos(ev);
     const prev = stroke.points[stroke.points.length - 1];
     stroke.points.push(pos);
-    const mid = { x: (prev.x + pos.x) * 0.5, y: (prev.y + pos.y) * 0.5 };
-    ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
-    stroke.lastMid = mid;
+    const mx = (prev.x + pos.x) * 0.5;
+    const my = (prev.y + pos.y) * 0.5;
+    ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
+    stroke.lastMid.x = mx;
+    stroke.lastMid.y = my;
   }
   ctx.stroke();
 }
