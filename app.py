@@ -171,6 +171,12 @@ def init_db() -> None:
                     ) THEN
                         ALTER TABLE meetings ADD COLUMN canvas_image TEXT;
                     END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tasks' AND column_name='callout_source'
+                    ) THEN
+                        ALTER TABLE tasks ADD COLUMN callout_source TEXT NULL;
+                    END IF;
                     -- Add FK constraint on parent_id if column exists but constraint doesn't
                     IF NOT EXISTS (
                         SELECT 1 FROM information_schema.table_constraints tc
@@ -214,6 +220,16 @@ def init_db() -> None:
                     created_at  TIMESTAMP DEFAULT NOW()
                 );
                 CREATE INDEX IF NOT EXISTS bill_refs_meeting ON bill_references (meeting_id);
+                CREATE TABLE IF NOT EXISTS meeting_scan_items (
+                    id           SERIAL PRIMARY KEY,
+                    meeting_id   TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                    callout_type TEXT NOT NULL,
+                    text         TEXT NOT NULL,
+                    task_id      TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+                    accepted     BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at   TIMESTAMP DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS scan_items_meeting ON meeting_scan_items (meeting_id);
             """)
 
 
@@ -311,6 +327,7 @@ class Meeting:
             "body_html": self.body_html,
             "canvas_image": self.canvas_image,
             "contacts": getattr(self, "_contacts", []),
+            "bill_references": getattr(self, "_bill_references", []),
         }
 
 
@@ -337,6 +354,7 @@ class Task:
     parent_id: Optional[str]
     subtask_count: int          # computed via subquery
     has_blockers: bool          # computed via EXISTS subquery
+    callout_source: Optional[str] = None  # 'task' | 'followup' | 'important' | None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -361,6 +379,7 @@ class Task:
             "parent_id": self.parent_id,
             "subtask_count": self.subtask_count,
             "has_blockers": self.has_blockers,
+            "callout_source": self.callout_source,
         }
 
 
@@ -521,12 +540,14 @@ FREE_GROUP_RE = re.compile(
 
 
 def _extract_tasks_from_body(
-    body: str, filename: str, meeting_id: str, group: str, date_str: Optional[str]
+    body: str, filename: str, meeting_id: str, group: str, date_str: Optional[str],
+    callout_source_map: Optional[Dict[str, str]] = None,
 ) -> List[dict]:
     lines = body.splitlines()
     tasks = []
     in_reminders = in_actions = False
     year = _year_from_date(date_str)
+    source_map = callout_source_map or {}
 
     for line in lines:
         if SECTION_HEADER_RE["reminders"].match(line):
@@ -554,6 +575,7 @@ def _extract_tasks_from_body(
             "meeting_id": meeting_id, "source_filename": filename,
             "section": section, "group_name": group,
             "source_date": date_str, "deadline": deadline, "deadline_raw": deadline_raw,
+            "callout_source": source_map.get(text),
         })
     return tasks
 
@@ -618,6 +640,7 @@ def _task_row_to_task(row: dict, today: str) -> Task:
         parent_id=row.get("parent_id"),
         subtask_count=int(row.get("subtask_count") or 0),
         has_blockers=bool(row.get("has_blockers")),
+        callout_source=row.get("callout_source"),
     )
 
 
@@ -650,15 +673,23 @@ def db_get_meeting(mid: str) -> Optional[Meeting]:
             cur.execute("SELECT * FROM tasks WHERE meeting_id = %s", (mid,))
             task_rows = cur.fetchall()
             cur.execute("""
-                SELECT c.id, c.name, c.company, c.title, c.email, c.phone
+                SELECT c.id, c.name, c.company, c.title, c.email, c.phone, c.card_image
                 FROM contacts c
                 JOIN meeting_contacts mc ON mc.contact_id = c.id
                 WHERE mc.meeting_id = %s
                 ORDER BY c.name
             """, (mid,))
             contact_rows = [dict(r) for r in cur.fetchall()]
+            cur.execute("""
+                SELECT bill_type, bill_number
+                FROM bill_references
+                WHERE meeting_id = %s
+                ORDER BY id
+            """, (mid,))
+            bill_rows = [dict(r) for r in cur.fetchall()]
     m = _row_to_meeting(dict(row), [dict(t) for t in task_rows])
     m._contacts = contact_rows
+    m._bill_references = bill_rows
     return m
 
 
@@ -691,7 +722,12 @@ def db_get_all_tasks(include_done: bool = False) -> List[Task]:
 # IMPORT (parse markdown → DB)
 # --------------------------------------------------
 
-def import_meeting_from_content(filename: str, content: str, canvas_image: Optional[str] = None) -> dict:
+def import_meeting_from_content(
+    filename: str,
+    content: str,
+    canvas_image: Optional[str] = None,
+    callout_source_map: Optional[Dict[str, str]] = None,
+) -> dict:
     """Parse and upsert a meeting from raw markdown content."""
     post = frontmatter.loads(content)
     meta = post.metadata or {}
@@ -722,7 +758,10 @@ def import_meeting_from_content(filename: str, content: str, canvas_image: Optio
         except Exception:
             pass
 
-    tasks = _extract_tasks_from_body(body_md, filename, mid, canon, date_str)
+    tasks = _extract_tasks_from_body(
+        body_md, filename, mid, canon, date_str,
+        callout_source_map=callout_source_map,
+    )
     seen_texts = {t["text"] for t in tasks}
     year = _year_from_date(date_str)
 
@@ -742,6 +781,7 @@ def import_meeting_from_content(filename: str, content: str, canvas_image: Optio
             "meeting_id": mid, "source_filename": filename, "section": section_,
             "group_name": canon, "source_date": date_str,
             "deadline": deadline, "deadline_raw": deadline_raw,
+            "callout_source": None,
         })
 
     with get_db() as conn:
@@ -772,19 +812,21 @@ def import_meeting_from_content(filename: str, content: str, canvas_image: Optio
                 cur.execute("""
                     INSERT INTO tasks
                         (id, text, type, done, meeting_id, source_filename,
-                         section, group_name, source_date, deadline, deadline_raw)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         section, group_name, source_date, deadline, deadline_raw, callout_source)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (id) DO UPDATE SET
                         text=EXCLUDED.text, type=EXCLUDED.type,
                         meeting_id=EXCLUDED.meeting_id,
                         source_filename=EXCLUDED.source_filename,
                         section=EXCLUDED.section, group_name=EXCLUDED.group_name,
                         source_date=EXCLUDED.source_date,
-                        deadline=EXCLUDED.deadline, deadline_raw=EXCLUDED.deadline_raw
+                        deadline=EXCLUDED.deadline, deadline_raw=EXCLUDED.deadline_raw,
+                        callout_source=COALESCE(EXCLUDED.callout_source, tasks.callout_source)
                 """, (
                     t["id"], t["text"], t["type"], t["done"], t["meeting_id"],
                     t["source_filename"], t["section"], t["group_name"],
                     t["source_date"], t["deadline"], t["deadline_raw"],
+                    t.get("callout_source"),
                 ))
 
     return {"id": mid, "filename": filename, "tasks": len(tasks)}
@@ -1834,19 +1876,29 @@ def api_notes_intake():
     action_items_raw = (data.get("action_items") or "").strip()
     reminders_raw = (data.get("reminders") or "").strip()
 
-    # If canvas items provided, merge them into the body sections
-    if confirmed_items:
-        task_items = [i["text"] for i in confirmed_items if i.get("type") in ("task",) and i.get("text")]
-        important_items = [i["text"] for i in confirmed_items if i.get("type") in ("important", "followup") and i.get("text")]
-        bill_refs = [i["text"] for i in confirmed_items if i.get("type") == "bill" and i.get("text")]
-        person_refs = [i["text"] for i in confirmed_items if i.get("type") == "person" and i.get("text")]
-        deadline_refs = [i["text"] for i in confirmed_items if i.get("type") == "deadline" and i.get("text")]
+    # Map of task text -> originating callout source ('task' | 'followup' | 'important').
+    # Stamped onto created tasks so the UI can show provenance badges and the user
+    # can find what they originally wrote on the canvas.
+    callout_source_map: Dict[str, str] = {}
 
-        # Merge into action_items and reminders
+    # If canvas items provided, merge them into the body sections.
+    # Routing: task + followup -> Action Items (type=action), important -> Reminders.
+    if confirmed_items:
+        task_texts     = [i["text"] for i in confirmed_items if i.get("type") == "task"     and i.get("text")]
+        followup_texts = [i["text"] for i in confirmed_items if i.get("type") == "followup" and i.get("text")]
+        important_texts = [i["text"] for i in confirmed_items if i.get("type") == "important" and i.get("text")]
+        bill_refs      = [i["text"] for i in confirmed_items if i.get("type") == "bill"     and i.get("text")]
+        person_refs    = [i["text"] for i in confirmed_items if i.get("type") == "person"   and i.get("text")]
+        deadline_refs  = [i["text"] for i in confirmed_items if i.get("type") == "deadline" and i.get("text")]
+
+        for t in task_texts:      callout_source_map[t] = "task"
+        for t in followup_texts:  callout_source_map[t] = "followup"
+        for t in important_texts: callout_source_map[t] = "important"
+
         existing_actions = [l.strip() for l in action_items_raw.splitlines() if l.strip()]
         existing_reminders = [l.strip() for l in reminders_raw.splitlines() if l.strip()]
-        action_items_raw = "\n".join(existing_actions + task_items)
-        reminders_raw = "\n".join(existing_reminders + important_items)
+        action_items_raw = "\n".join(existing_actions + task_texts + followup_texts)
+        reminders_raw = "\n".join(existing_reminders + important_texts)
 
         # Append structured references as context in the body
         extras = []
@@ -1893,24 +1945,61 @@ def api_notes_intake():
     filename = f"{note_date} - {safe_group}.md"
 
     try:
-        summary = import_meeting_from_content(filename, content, canvas_image=canvas_image)
-        if bill_items and summary.get("id"):
+        summary = import_meeting_from_content(
+            filename, content,
+            canvas_image=canvas_image,
+            callout_source_map=callout_source_map or None,
+        )
+        mid_out = summary.get("id")
+        created = {"actions": 0, "followups": 0, "reminders": 0, "bills": 0}
+
+        if mid_out:
             with get_db() as conn:
                 with conn.cursor() as cur:
-                    for bill in bill_items:
-                        bt = (bill.get("billType") or "").strip()
-                        bn = (bill.get("billNumber") or "").strip()
-                        if bt and bn:
-                            cur.execute(
-                                "INSERT INTO bill_references (meeting_id, bill_type, bill_number)"
-                                " VALUES (%s, %s, %s)",
-                                (summary["id"], bt, bn)
-                            )
+                    # Bill references
+                    if bill_items:
+                        for bill in bill_items:
+                            bt = (bill.get("billType") or "").strip()
+                            bn = (bill.get("billNumber") or "").strip()
+                            if bt and bn:
+                                cur.execute(
+                                    "INSERT INTO bill_references (meeting_id, bill_type, bill_number)"
+                                    " VALUES (%s, %s, %s)",
+                                    (mid_out, bt, bn)
+                                )
+                                created["bills"] += 1
+
+                    # Audit rows + per-type counts. Compute deterministic task_id from
+                    # filename+section+text so we can link rows back to the row we just
+                    # wrote in import_meeting_from_content.
+                    for item in confirmed_items:
+                        ctype = item.get("type") or ""
+                        text = (item.get("text") or "").strip()
+                        if not text:
+                            continue
+                        tid: Optional[str] = None
+                        if ctype in ("task", "followup"):
+                            tid = _task_id(filename, "action_items", text)
+                            if ctype == "task":
+                                created["actions"] += 1
+                            else:
+                                created["followups"] += 1
+                        elif ctype == "important":
+                            tid = _task_id(filename, "reminders", text)
+                            created["reminders"] += 1
+                        # deadline/person/bill: no task row; tid stays None.
+                        cur.execute("""
+                            INSERT INTO meeting_scan_items
+                                (meeting_id, callout_type, text, task_id, accepted)
+                            VALUES (%s, %s, %s, %s, TRUE)
+                        """, (mid_out, ctype, text, tid))
+
         return jsonify({
             "ok": True,
-            "meeting_id": summary["id"],
+            "meeting_id": mid_out,
             "filename": filename,
             "task_count": summary["tasks"],
+            "created": created,
             "topic": note_topic,
             "group": note_group,
         })

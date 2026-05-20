@@ -256,6 +256,11 @@ function _hasUrgencySignals(t) {
 
 function _taskRow(t, i, paper) {
   const chips = [];
+  if (t.callout_source && _SCAN_LABELS[t.callout_source]) {
+    chips.push(
+      `<span class="chip callout-chip callout-chip--${t.callout_source}" title="From handwritten ${_SCAN_LABELS[t.callout_source]}">${_SCAN_ICONS[t.callout_source] || ""}${_SCAN_LABELS[t.callout_source]}</span>`
+    );
+  }
   chips.push(`<span class="chip type-${t.type}">${escapeHtml(t.type)}</span>`);
   if (t.group) chips.push(`<span class="chip group">${escapeHtml(t.group)}</span>`);
   if (t.contact) chips.push(`<span class="chip contact">${escapeHtml(t.contact)}</span>`);
@@ -671,14 +676,47 @@ async function openDrawer(task) {
     if (m.purpose?.length) meta.push(`<span>${escapeHtml(m.purpose.join(" · "))}</span>`);
     if (m.attendees)     meta.push(`<span>👥 ${escapeHtml(m.attendees)}</span>`);
     if (m.outcome)       meta.push(`<span>→ ${escapeHtml(m.outcome)}</span>`);
+
+    const cs = task.callout_source;
+    const sourceBadge = cs
+      ? `<span class="callout-badge callout-badge--${cs}" title="From handwritten ${_SCAN_LABELS[cs] || cs}">
+           ${_SCAN_ICONS[cs] || ""}<span>${escapeHtml(_SCAN_LABELS[cs] || cs)}</span>
+         </span>`
+      : "";
+
+    const bills = (m.bill_references || []).map((b) =>
+      `<span class="bill-pill">${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}</span>`
+    ).join("");
+    const billsBlock = bills
+      ? `<div class="drawer-bills"><div class="drawer-section-label">Bills referenced</div>${bills}</div>`
+      : "";
+
+    const cards = (m.contacts || []).map((c) => `
+      <div class="drawer-card">
+        ${c.card_image ? `<img class="drawer-card-thumb" src="${c.card_image}" alt="Business card">` : ""}
+        <div class="drawer-card-info">
+          <div class="drawer-card-name">${escapeHtml(c.name || "(no name)")}</div>
+          ${c.title || c.company ? `<div class="drawer-card-sub">${escapeHtml([c.title, c.company].filter(Boolean).join(" · "))}</div>` : ""}
+          ${c.email ? `<div class="drawer-card-sub">${escapeHtml(c.email)}</div>` : ""}
+          ${c.phone ? `<div class="drawer-card-sub">${escapeHtml(c.phone)}</div>` : ""}
+        </div>
+      </div>
+    `).join("");
+    const cardsBlock = cards
+      ? `<div class="drawer-cards"><div class="drawer-section-label">Cards from this meeting</div>${cards}</div>`
+      : "";
+
     el.innerHTML = `
       <header>
         <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
         <div class="meta">${meta.join("")}</div>
+        ${sourceBadge}
         <a href="#" class="open-full" data-mid="${m.id}">Open full meeting view →</a>
       </header>
       ${m.canvas_image ? `<img class="canvas-note-image" src="${m.canvas_image}" alt="Handwritten note">` : ""}
       <div class="body">${m.body_html}</div>
+      ${billsBlock}
+      ${cardsBlock}
     `;
   } catch (e) {
     el.innerHTML = `<div class="detail-empty">Couldn't load source note.</div>`;
@@ -1672,6 +1710,11 @@ function _editScanItemInline(el, idx) {
   });
 }
 
+// Which callout types the user is allowed to switch between in the review queue.
+// Deadline/person/bill have distinct downstream semantics and aren't task-producing,
+// so they're not interchangeable with task/followup/important.
+const _SWITCHABLE_CALLOUT_TYPES = ["task", "followup", "important"];
+
 function _renderScanResults() {
   const queueEl = $("#intake-review-queue");
   if (!_intakeScanResult) { queueEl.classList.add("hidden"); return; }
@@ -1683,17 +1726,27 @@ function _renderScanResults() {
     ? "Transcribed — no callouts detected"
     : `${active.length} of ${items.length} item${items.length !== 1 ? "s" : ""} kept`;
 
-  $("#scan-result-items").innerHTML = items.map((item, idx) => `
+  $("#scan-result-items").innerHTML = items.map((item, idx) => {
+    const switchable = _SWITCHABLE_CALLOUT_TYPES.includes(item.type);
+    const typeControl = switchable
+      ? `<select class="scan-item-type-select" data-idx="${idx}" title="Change type">
+           ${_SWITCHABLE_CALLOUT_TYPES.map((k) =>
+             `<option value="${k}"${k === item.type ? " selected" : ""}>${_SCAN_LABELS[k]}</option>`
+           ).join("")}
+         </select>`
+      : `<div class="scan-item-type">${escapeHtml(_SCAN_LABELS[item.type] || item.type)}</div>`;
+    return `
     <div class="scan-item ${item.accepted ? "scan-item--accepted" : "scan-item--dismissed"}">
       <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
       <div class="scan-item-body">
-        <div class="scan-item-type">${escapeHtml(_SCAN_LABELS[item.type] || item.type)}</div>
+        ${typeControl}
         <div class="scan-item-text" data-idx="${idx}">${escapeHtml(item.text)}</div>
       </div>
       <button class="scan-item-dismiss" data-idx="${idx}" title="${item.accepted ? "Remove" : "Restore"}">
         ${item.accepted ? "×" : "↩"}
       </button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   $("#scan-result-items").querySelectorAll(".scan-item-dismiss").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1705,6 +1758,14 @@ function _renderScanResults() {
 
   $("#scan-result-items").querySelectorAll(".scan-item-text[data-idx]").forEach((el) => {
     el.addEventListener("click", () => _editScanItemInline(el, +el.dataset.idx));
+  });
+
+  $("#scan-result-items").querySelectorAll(".scan-item-type-select").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const idx = +sel.dataset.idx;
+      _intakeScanResult.items[idx].type = sel.value;
+      _renderScanResults();
+    });
   });
 
   $("#scan-transcription-text").textContent = text || "(empty)";
@@ -2121,10 +2182,19 @@ async function _intakeSaveNotes() {
         ));
       }
       resultEl.className = "intake-result intake-result-ok";
+      const c = data.created || {};
+      const breakdown = [
+        c.actions   ? `${c.actions} task${c.actions !== 1 ? "s" : ""}` : "",
+        c.followups ? `${c.followups} follow-up${c.followups !== 1 ? "s" : ""}` : "",
+        c.reminders ? `${c.reminders} reminder${c.reminders !== 1 ? "s" : ""}` : "",
+        c.bills     ? `${c.bills} bill${c.bills !== 1 ? "s" : ""}` : "",
+      ].filter(Boolean).join(" · ");
       const chips = [
         data.topic ? `<span class="intake-chip">${escapeHtml(data.topic)}</span>` : "",
         data.group ? `<span class="intake-chip">${escapeHtml(data.group)}</span>` : "",
-        `<span class="intake-chip">${data.task_count} task${data.task_count !== 1 ? "s" : ""}</span>`,
+        breakdown
+          ? `<span class="intake-chip">${escapeHtml(breakdown)}</span>`
+          : `<span class="intake-chip">${data.task_count} task${data.task_count !== 1 ? "s" : ""}</span>`,
       ].join("");
       resultEl.innerHTML = `<strong>Saved!</strong> ${chips}
         <button class="intake-view-btn" id="intake-view-meeting">View note →</button>`;
