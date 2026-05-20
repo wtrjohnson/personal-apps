@@ -1311,7 +1311,7 @@ function _initIntakeCanvas() {
   canvas.height = h * dpr;
   canvas.style.width = w + "px";
   canvas.style.height = h + "px";
-  _intakeCtxCache = canvas.getContext("2d");
+  _intakeCtxCache = canvas.getContext("2d", { desynchronized: true });
   const ctx = _intakeCtxCache;
   ctx.scale(dpr, dpr);
   ctx.fillStyle = "#ffffff";
@@ -1381,16 +1381,19 @@ function _intakeRedraw() {
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, w, h);
   for (const stroke of _intakeStrokes) {
-    if (stroke.points.length < 2) continue;
+    const pts = stroke.points;
+    if (pts.length < 2) continue;
     ctx.beginPath();
     ctx.strokeStyle = stroke.color;
     ctx.lineWidth = stroke.width;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
-    for (let i = 1; i < stroke.points.length; i++) {
-      ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
+    ctx.moveTo((pts[0].x + pts[1].x) * 0.5, (pts[0].y + pts[1].y) * 0.5);
+    for (let i = 1; i < pts.length - 1; i++) {
+      const mid = { x: (pts[i].x + pts[i + 1].x) * 0.5, y: (pts[i].y + pts[i + 1].y) * 0.5 };
+      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mid.x, mid.y);
     }
+    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
     ctx.stroke();
   }
 }
@@ -1433,6 +1436,7 @@ function _intakePointerDown(e) {
     color: isPen ? _intakePenColor : "#ffffff",
     width: isPen ? _intakePenSize : 24,
     points: [pos],
+    lastMid: pos,
   };
   const ctx = _intakeCtx();
   ctx.beginPath();
@@ -1457,20 +1461,24 @@ function _intakePointerMove(e) {
   }
   if (!_intakeCurrentStroke) return;
   e.preventDefault();
-  const pos = _intakePointerPos(e);
-  _intakeCurrentStroke.points.push(pos);
-  const pts = _intakeCurrentStroke.points;
-  const ctx = _intakeCtx();
+  const stroke = _intakeCurrentStroke;
+  const ctx = _intakeCtxCache;
+  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
   ctx.beginPath();
-  ctx.strokeStyle = _intakeCurrentStroke.color;
-  ctx.lineWidth = _intakeCurrentStroke.width;
+  ctx.strokeStyle = stroke.color;
+  ctx.lineWidth = stroke.width;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  if (pts.length >= 2) {
-    ctx.moveTo(pts[pts.length - 2].x, pts[pts.length - 2].y);
-    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
-    ctx.stroke();
+  ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
+  for (const ev of events) {
+    const pos = _intakePointerPos(ev);
+    const prev = stroke.points[stroke.points.length - 1];
+    stroke.points.push(pos);
+    const mid = { x: (prev.x + pos.x) * 0.5, y: (prev.y + pos.y) * 0.5 };
+    ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
+    stroke.lastMid = mid;
   }
+  ctx.stroke();
 }
 
 function _intakePointerUp(e) {
