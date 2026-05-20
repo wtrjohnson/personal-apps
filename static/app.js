@@ -256,6 +256,11 @@ function _hasUrgencySignals(t) {
 
 function _taskRow(t, i, paper) {
   const chips = [];
+  if (t.callout_source && _SCAN_LABELS[t.callout_source]) {
+    chips.push(
+      `<span class="chip callout-chip callout-chip--${t.callout_source}" title="From handwritten ${_SCAN_LABELS[t.callout_source]}">${_SCAN_ICONS[t.callout_source] || ""}${_SCAN_LABELS[t.callout_source]}</span>`
+    );
+  }
   chips.push(`<span class="chip type-${t.type}">${escapeHtml(t.type)}</span>`);
   if (t.group) chips.push(`<span class="chip group">${escapeHtml(t.group)}</span>`);
   if (t.contact) chips.push(`<span class="chip contact">${escapeHtml(t.contact)}</span>`);
@@ -671,14 +676,47 @@ async function openDrawer(task) {
     if (m.purpose?.length) meta.push(`<span>${escapeHtml(m.purpose.join(" · "))}</span>`);
     if (m.attendees)     meta.push(`<span>👥 ${escapeHtml(m.attendees)}</span>`);
     if (m.outcome)       meta.push(`<span>→ ${escapeHtml(m.outcome)}</span>`);
+
+    const cs = task.callout_source;
+    const sourceBadge = cs
+      ? `<span class="callout-badge callout-badge--${cs}" title="From handwritten ${_SCAN_LABELS[cs] || cs}">
+           ${_SCAN_ICONS[cs] || ""}<span>${escapeHtml(_SCAN_LABELS[cs] || cs)}</span>
+         </span>`
+      : "";
+
+    const bills = (m.bill_references || []).map((b) =>
+      `<span class="bill-pill">${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}</span>`
+    ).join("");
+    const billsBlock = bills
+      ? `<div class="drawer-bills"><div class="drawer-section-label">Bills referenced</div>${bills}</div>`
+      : "";
+
+    const cards = (m.contacts || []).map((c) => `
+      <div class="drawer-card">
+        ${c.card_image ? `<img class="drawer-card-thumb" src="${c.card_image}" alt="Business card">` : ""}
+        <div class="drawer-card-info">
+          <div class="drawer-card-name">${escapeHtml(c.name || "(no name)")}</div>
+          ${c.title || c.company ? `<div class="drawer-card-sub">${escapeHtml([c.title, c.company].filter(Boolean).join(" · "))}</div>` : ""}
+          ${c.email ? `<div class="drawer-card-sub">${escapeHtml(c.email)}</div>` : ""}
+          ${c.phone ? `<div class="drawer-card-sub">${escapeHtml(c.phone)}</div>` : ""}
+        </div>
+      </div>
+    `).join("");
+    const cardsBlock = cards
+      ? `<div class="drawer-cards"><div class="drawer-section-label">Cards from this meeting</div>${cards}</div>`
+      : "";
+
     el.innerHTML = `
       <header>
         <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
         <div class="meta">${meta.join("")}</div>
+        ${sourceBadge}
         <a href="#" class="open-full" data-mid="${m.id}">Open full meeting view →</a>
       </header>
       ${m.canvas_image ? `<img class="canvas-note-image" src="${m.canvas_image}" alt="Handwritten note">` : ""}
       <div class="body">${m.body_html}</div>
+      ${billsBlock}
+      ${cardsBlock}
     `;
   } catch (e) {
     el.innerHTML = `<div class="detail-empty">Couldn't load source note.</div>`;
@@ -1295,8 +1333,10 @@ let _intakeActiveTouches = new Map(); // pointerId -> {x, y}
 let _intakeTouchScrollLast = null;    // {x, y} centroid for delta
 let _intakePenActiveUntil = 0;        // performance.now() ms (palm-rejection grace)
 let _intakeCanvasCache = null;        // cached element ref, set at init
-let _intakeCtxCache = null;           // cached 2d context, set at init
+let _intakeCtxCache = null;           // cached 2d context (fallback only)
 let _intakeStrokeRect = null;         // bounding rect cached per-stroke
+let _intakeWorker = null;             // OffscreenCanvas worker (null = main-thread fallback)
+let _intakeExportCallbacks = new Map(); // id → resolve fn for exportBlob promises
 
 function _intakeCanvasEl() { return _intakeCanvasCache || $("#intake-canvas"); }
 function _intakeCtx() { return _intakeCtxCache || _intakeCanvasEl().getContext("2d"); }
@@ -1311,13 +1351,47 @@ function _initIntakeCanvas() {
   canvas.height = h * dpr;
   canvas.style.width = w + "px";
   canvas.style.height = h + "px";
+  _intakeStrokes = [];
+  _intakeCurrentStroke = null;
+
+  if (canvas.transferControlToOffscreen && window.Worker) {
+    try {
+      const offscreen = canvas.transferControlToOffscreen();
+      _intakeWorker = new Worker("/static/intake-canvas-worker.js");
+      _intakeWorker.onmessage = ({ data }) => {
+        if (data.type === "exportResult") {
+          const resolve = _intakeExportCallbacks.get(data.id);
+          if (resolve) {
+            _intakeExportCallbacks.delete(data.id);
+            const blob = new Blob([data.ab], { type: "image/png" });
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.readAsDataURL(blob);
+          }
+        }
+      };
+      _intakeWorker.postMessage({ type: "init", offscreen, dpr, width: w, height: h }, [offscreen]);
+      return;
+    } catch (err) {
+      _intakeWorker = null;
+    }
+  }
+
+  // Fallback: main-thread rendering
   _intakeCtxCache = canvas.getContext("2d", { desynchronized: true });
   const ctx = _intakeCtxCache;
   ctx.scale(dpr, dpr);
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, w, h);
-  _intakeStrokes = [];
-  _intakeCurrentStroke = null;
+}
+
+async function _intakeExportPng() {
+  if (!_intakeWorker) return (_intakeCanvasCache || _intakeCanvasEl()).toDataURL("image/png");
+  return new Promise((resolve) => {
+    const id = performance.now() + Math.random();
+    _intakeExportCallbacks.set(id, resolve);
+    _intakeWorker.postMessage({ type: "exportBlob", id });
+  });
 }
 
 let _intakeCanvasFsParent = null; // tracks original parent for restore
@@ -1327,13 +1401,17 @@ function _intakeResizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
   const wrap = canvas.parentElement; // .intake-canvas-scroll
   const w = wrap.clientWidth || 680;
-  canvas.width = w * dpr;
-  canvas.height = _intakeCanvasLogicalHeight * dpr;
   canvas.style.width = w + "px";
   canvas.style.height = _intakeCanvasLogicalHeight + "px";
-  const ctx = _intakeCtx();
-  ctx.scale(dpr, dpr);
-  _intakeRedraw();
+  if (_intakeWorker) {
+    _intakeWorker.postMessage({ type: "resize", width: w, height: _intakeCanvasLogicalHeight });
+  } else {
+    canvas.width = w * dpr;
+    canvas.height = _intakeCanvasLogicalHeight * dpr;
+    const ctx = _intakeCtx();
+    ctx.scale(dpr, dpr);
+    _intakeRedraw();
+  }
 }
 
 function _intakeToggleFullscreen() {
@@ -1365,32 +1443,32 @@ function _intakeToggleFullscreen() {
 
 function _intakeGrowCanvas() {
   const canvas = _intakeCanvasCache || _intakeCanvasEl();
-  const ctx = _intakeCtxCache;
-  const dpr = window.devicePixelRatio || 1;
-  const oldLogicalH = _intakeCanvasLogicalHeight;
-
-  // Snapshot pixels before resize clears the canvas
-  const tmp = document.createElement("canvas");
-  tmp.width = canvas.width;
-  tmp.height = canvas.height;
-  tmp.getContext("2d").drawImage(canvas, 0, 0);
-
   _intakeCanvasLogicalHeight += 1600;
-  canvas.height = _intakeCanvasLogicalHeight * dpr;
   canvas.style.height = _intakeCanvasLogicalHeight + "px";
 
-  // Restore snapshot (transform is reset after height change; drawImage uses physical coords)
-  ctx.drawImage(tmp, 0, 0);
-  // Re-apply scale, fill new area white
-  ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, oldLogicalH, canvas.width / dpr, 1600);
+  if (_intakeWorker) {
+    _intakeWorker.postMessage({ type: "grow", newHeight: _intakeCanvasLogicalHeight });
+  } else {
+    const ctx = _intakeCtxCache;
+    const dpr = window.devicePixelRatio || 1;
+    const oldLogicalH = _intakeCanvasLogicalHeight - 1600;
+    const tmp = document.createElement("canvas");
+    tmp.width = canvas.width;
+    tmp.height = canvas.height;
+    tmp.getContext("2d").drawImage(canvas, 0, 0);
+    canvas.height = _intakeCanvasLogicalHeight * dpr;
+    ctx.drawImage(tmp, 0, 0);
+    ctx.scale(dpr, dpr);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, oldLogicalH, canvas.width / dpr, 1600);
+  }
 
   const scrollWrap = canvas.parentElement;
   scrollWrap.scrollTop = scrollWrap.scrollHeight;
 }
 
 function _intakeRedraw() {
+  if (_intakeWorker) return; // worker owns all rendering
   const canvas = _intakeCanvasEl();
   const ctx = _intakeCtx();
   const dpr = window.devicePixelRatio || 1;
@@ -1453,15 +1531,19 @@ function _intakePointerDown(e) {
   const color = isPen ? _intakePenColor : "#ffffff";
   const width = isPen ? _intakePenSize : 24;
   _intakeCurrentStroke = { color, width, points: [pos], lastMid: { x: pos.x, y: pos.y } };
-  const ctx = _intakeCtxCache;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = width;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.beginPath();
-  ctx.arc(pos.x, pos.y, width / 2, 0, Math.PI * 2);
-  ctx.fillStyle = color;
-  ctx.fill();
+  if (_intakeWorker) {
+    _intakeWorker.postMessage({ type: "strokeStart", color, width, x: pos.x, y: pos.y });
+  } else {
+    const ctx = _intakeCtxCache;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, width / 2, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
 }
 
 function _intakePointerMove(e) {
@@ -1479,23 +1561,36 @@ function _intakePointerMove(e) {
   }
   if (!_intakeCurrentStroke) return;
   const stroke = _intakeCurrentStroke;
-  const ctx = _intakeCtxCache;
   // Include all coalesced intermediate points plus the dispatched event itself
   // (Safari omits the dispatched event from getCoalescedEvents, so always append e)
   const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
-  ctx.beginPath();
-  ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
-  for (const ev of events) {
-    const pos = _intakePointerPos(ev);
-    const prev = stroke.points[stroke.points.length - 1];
-    stroke.points.push(pos);
-    const mx = (prev.x + pos.x) * 0.5;
-    const my = (prev.y + pos.y) * 0.5;
-    ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
-    stroke.lastMid.x = mx;
-    stroke.lastMid.y = my;
+  if (_intakeWorker) {
+    const coords = [];
+    for (const ev of events) {
+      const pos = _intakePointerPos(ev);
+      coords.push(pos.x, pos.y);
+      const prev = stroke.points[stroke.points.length - 1];
+      stroke.points.push(pos);
+      stroke.lastMid.x = (prev.x + pos.x) * 0.5;
+      stroke.lastMid.y = (prev.y + pos.y) * 0.5;
+    }
+    _intakeWorker.postMessage({ type: "strokePoints", coords });
+  } else {
+    const ctx = _intakeCtxCache;
+    ctx.beginPath();
+    ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
+    for (const ev of events) {
+      const pos = _intakePointerPos(ev);
+      const prev = stroke.points[stroke.points.length - 1];
+      stroke.points.push(pos);
+      const mx = (prev.x + pos.x) * 0.5;
+      const my = (prev.y + pos.y) * 0.5;
+      ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
+      stroke.lastMid.x = mx;
+      stroke.lastMid.y = my;
+    }
+    ctx.stroke();
   }
-  ctx.stroke();
 }
 
 function _intakePointerUp(e) {
@@ -1514,6 +1609,7 @@ function _intakePointerUp(e) {
       _intakeGrowCanvas();
     }
   }
+  if (_intakeWorker) _intakeWorker.postMessage({ type: "strokeEnd" });
   _intakeCurrentStroke = null;
   _intakeStrokeRect = null;
   _intakePenActiveUntil = performance.now() + 700;
@@ -1522,13 +1618,21 @@ function _intakePointerUp(e) {
 function _intakeUndo() {
   if (_intakeStrokes.length === 0) return;
   _intakeStrokes.pop();
-  _intakeRedraw();
+  if (_intakeWorker) {
+    _intakeWorker.postMessage({ type: "undo" });
+  } else {
+    _intakeRedraw();
+  }
 }
 
 function _intakeClearCanvas() {
   _intakeStrokes = [];
   _intakeScanResult = null;
-  _intakeRedraw();
+  if (_intakeWorker) {
+    _intakeWorker.postMessage({ type: "clear" });
+  } else {
+    _intakeRedraw();
+  }
   $("#intake-review-queue").classList.add("hidden");
 }
 
@@ -1599,7 +1703,6 @@ function _extractCallouts(text) {
 }
 
 async function _intakeScan() {
-  const canvas = _intakeCanvasEl();
   const scanBtn = $("#intake-rescan-btn");
   const scanSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>';
 
@@ -1613,7 +1716,7 @@ async function _intakeScan() {
     const res = await fetch("/api/notes/transcribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: canvas.toDataURL("image/png") }),
+      body: JSON.stringify({ image: await _intakeExportPng() }),
     });
     const data = await res.json();
 
@@ -1672,6 +1775,11 @@ function _editScanItemInline(el, idx) {
   });
 }
 
+// Which callout types the user is allowed to switch between in the review queue.
+// Deadline/person/bill have distinct downstream semantics and aren't task-producing,
+// so they're not interchangeable with task/followup/important.
+const _SWITCHABLE_CALLOUT_TYPES = ["task", "followup", "important"];
+
 function _renderScanResults() {
   const queueEl = $("#intake-review-queue");
   if (!_intakeScanResult) { queueEl.classList.add("hidden"); return; }
@@ -1683,17 +1791,27 @@ function _renderScanResults() {
     ? "Transcribed — no callouts detected"
     : `${active.length} of ${items.length} item${items.length !== 1 ? "s" : ""} kept`;
 
-  $("#scan-result-items").innerHTML = items.map((item, idx) => `
+  $("#scan-result-items").innerHTML = items.map((item, idx) => {
+    const switchable = _SWITCHABLE_CALLOUT_TYPES.includes(item.type);
+    const typeControl = switchable
+      ? `<select class="scan-item-type-select" data-idx="${idx}" title="Change type">
+           ${_SWITCHABLE_CALLOUT_TYPES.map((k) =>
+             `<option value="${k}"${k === item.type ? " selected" : ""}>${_SCAN_LABELS[k]}</option>`
+           ).join("")}
+         </select>`
+      : `<div class="scan-item-type">${escapeHtml(_SCAN_LABELS[item.type] || item.type)}</div>`;
+    return `
     <div class="scan-item ${item.accepted ? "scan-item--accepted" : "scan-item--dismissed"}">
       <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
       <div class="scan-item-body">
-        <div class="scan-item-type">${escapeHtml(_SCAN_LABELS[item.type] || item.type)}</div>
+        ${typeControl}
         <div class="scan-item-text" data-idx="${idx}">${escapeHtml(item.text)}</div>
       </div>
       <button class="scan-item-dismiss" data-idx="${idx}" title="${item.accepted ? "Remove" : "Restore"}">
         ${item.accepted ? "×" : "↩"}
       </button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   $("#scan-result-items").querySelectorAll(".scan-item-dismiss").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1705,6 +1823,14 @@ function _renderScanResults() {
 
   $("#scan-result-items").querySelectorAll(".scan-item-text[data-idx]").forEach((el) => {
     el.addEventListener("click", () => _editScanItemInline(el, +el.dataset.idx));
+  });
+
+  $("#scan-result-items").querySelectorAll(".scan-item-type-select").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const idx = +sel.dataset.idx;
+      _intakeScanResult.items[idx].type = sel.value;
+      _renderScanResults();
+    });
   });
 
   $("#scan-transcription-text").textContent = text || "(empty)";
@@ -2071,7 +2197,7 @@ async function _intakeSaveNotes() {
 
   let canvasImage = null;
   if (hasCanvasContent) {
-    canvasImage = _intakeCanvasEl().toDataURL("image/png");
+    canvasImage = await _intakeExportPng();
   }
 
   const btn = $("#intake-modal-submit");
@@ -2121,10 +2247,19 @@ async function _intakeSaveNotes() {
         ));
       }
       resultEl.className = "intake-result intake-result-ok";
+      const c = data.created || {};
+      const breakdown = [
+        c.actions   ? `${c.actions} task${c.actions !== 1 ? "s" : ""}` : "",
+        c.followups ? `${c.followups} follow-up${c.followups !== 1 ? "s" : ""}` : "",
+        c.reminders ? `${c.reminders} reminder${c.reminders !== 1 ? "s" : ""}` : "",
+        c.bills     ? `${c.bills} bill${c.bills !== 1 ? "s" : ""}` : "",
+      ].filter(Boolean).join(" · ");
       const chips = [
         data.topic ? `<span class="intake-chip">${escapeHtml(data.topic)}</span>` : "",
         data.group ? `<span class="intake-chip">${escapeHtml(data.group)}</span>` : "",
-        `<span class="intake-chip">${data.task_count} task${data.task_count !== 1 ? "s" : ""}</span>`,
+        breakdown
+          ? `<span class="intake-chip">${escapeHtml(breakdown)}</span>`
+          : `<span class="intake-chip">${data.task_count} task${data.task_count !== 1 ? "s" : ""}</span>`,
       ].join("");
       resultEl.innerHTML = `<strong>Saved!</strong> ${chips}
         <button class="intake-view-btn" id="intake-view-meeting">View note →</button>`;
@@ -2177,11 +2312,10 @@ async function _intakeFinalizeNotes() {
   submitBtn.disabled = true;
 
   try {
-    const canvas = _intakeCanvasEl();
     const res = await fetch("/api/notes/transcribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: canvas.toDataURL("image/png") }),
+      body: JSON.stringify({ image: await _intakeExportPng() }),
     });
     const data = await res.json();
     loadingEl.classList.add("hidden");
