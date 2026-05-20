@@ -1647,6 +1647,31 @@ const _SCAN_ICONS = {
 };
 const _SCAN_LABELS = { task: "Task", important: "Important", followup: "Follow-up", deadline: "Deadline", person: "Person", bill: "Bill" };
 
+function _editScanItemInline(el, idx) {
+  if (!_intakeScanResult) return;
+  const item = _intakeScanResult.items[idx];
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.value = item.text;
+  inp.className = "scan-item-edit";
+  el.replaceWith(inp);
+  inp.focus();
+  inp.select();
+  let done = false;
+  function commit() {
+    if (done) return;
+    done = true;
+    const val = inp.value.trim();
+    if (val) item.text = val;
+    _renderScanResults();
+  }
+  inp.addEventListener("blur", commit);
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+    if (e.key === "Escape") { done = true; _renderScanResults(); }
+  });
+}
+
 function _renderScanResults() {
   const queueEl = $("#intake-review-queue");
   if (!_intakeScanResult) { queueEl.classList.add("hidden"); return; }
@@ -1663,7 +1688,7 @@ function _renderScanResults() {
       <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
       <div class="scan-item-body">
         <div class="scan-item-type">${escapeHtml(_SCAN_LABELS[item.type] || item.type)}</div>
-        <div class="scan-item-text">${escapeHtml(item.text)}</div>
+        <div class="scan-item-text" data-idx="${idx}">${escapeHtml(item.text)}</div>
       </div>
       <button class="scan-item-dismiss" data-idx="${idx}" title="${item.accepted ? "Remove" : "Restore"}">
         ${item.accepted ? "×" : "↩"}
@@ -1676,6 +1701,10 @@ function _renderScanResults() {
       _intakeScanResult.items[idx].accepted = !_intakeScanResult.items[idx].accepted;
       _renderScanResults();
     });
+  });
+
+  $("#scan-result-items").querySelectorAll(".scan-item-text[data-idx]").forEach((el) => {
+    el.addEventListener("click", () => _editScanItemInline(el, +el.dataset.idx));
   });
 
   $("#scan-transcription-text").textContent = text || "(empty)";

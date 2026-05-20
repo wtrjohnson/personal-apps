@@ -3404,7 +3404,13 @@ table.bills-table tr:last-child td { border-bottom: none; }
 
 .scan-item-body { flex: 1; min-width: 0; }
 .scan-item-type { font-size: 9.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; }
-.scan-item-text { font-size: 13.5px; color: var(--ink); line-height: 1.4; word-break: break-word; }
+.scan-item-text { font-size: 13.5px; color: var(--ink); line-height: 1.4; word-break: break-word; cursor: text; }
+.scan-item-edit {
+  font-size: 13.5px; color: var(--ink); line-height: 1.4;
+  width: 100%; padding: 0; margin: 0; font-family: inherit;
+  border: none; border-bottom: 1.5px solid var(--accent);
+  background: transparent; outline: none;
+}
 
 .scan-item-dismiss {
   background: none; border: 1px solid var(--border-strong); border-radius: var(--r-pill);
