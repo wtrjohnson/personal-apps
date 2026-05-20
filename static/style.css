@@ -2992,41 +2992,41 @@ table.bills-table tr:last-child td { border-bottom: none; }
 
 /* Metadata chips (Phase 2 — meeting in progress) */
 .intake-meta-chips {
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 10px 0 8px;
+  flex-wrap: nowrap;
+  gap: 5px;
+  padding: 7px 0 6px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 2px;
+  overflow: hidden;
 }
 .intake-meta-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
-  border: 1.5px solid var(--border-strong);
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-strong);
   border-radius: var(--r-pill);
   background: var(--card);
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--ink);
   cursor: pointer;
-  transition: border-color 0.1s, background 0.1s;
+  transition: border-color 0.1s, background 0.1s, width 0.15s;
   white-space: nowrap;
   user-select: none;
   -webkit-user-select: none;
-  max-width: 200px;
   overflow: hidden;
-  text-overflow: ellipsis;
+  flex-shrink: 0;
 }
 .intake-meta-chip:hover {
   border-color: var(--accent);
   background: var(--accent-softer);
 }
 .intake-meta-chip-label {
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.8px;
+  letter-spacing: 0.6px;
   color: var(--muted);
   flex-shrink: 0;
 }
@@ -3034,27 +3034,27 @@ table.bills-table tr:last-child td { border-bottom: none; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 90px;
 }
 .intake-meta-chip--expanded {
   border-color: var(--accent);
   background: var(--accent-softer);
-  max-width: none;
-  flex: 1 0 180px;
 }
 .intake-meta-chip--expanded .intake-meta-chip-value { display: none; }
 .intake-meta-chip-input {
+  display: none;
   border: none;
   background: transparent;
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--ink);
   padding: 0;
-  min-width: 80px;
-  width: 120px;
+  width: 110px;
   outline: none;
   user-select: text;
   -webkit-user-select: text;
 }
+.intake-meta-chip--expanded .intake-meta-chip-input { display: block; }
 .intake-meta-chip-input:focus { outline: none; }
 
 /* Phase 0 type picker */
