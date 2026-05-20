@@ -1471,18 +1471,18 @@ function _intakePointerMove(e) {
     if (_intakeActiveTouches.size >= 2 && _intakeTouchScrollLast) {
       const cur = _intakeTouchCentroid();
       const dy = _intakeTouchScrollLast.y - cur.y;
-      const wrap = _intakeCanvasEl().parentElement;
+      const wrap = (_intakeCanvasCache || _intakeCanvasEl()).parentElement;
       if (wrap) wrap.scrollTop += dy;
       _intakeTouchScrollLast = cur;
-      e.preventDefault();
     }
     return;
   }
   if (!_intakeCurrentStroke) return;
-  e.preventDefault();
   const stroke = _intakeCurrentStroke;
   const ctx = _intakeCtxCache;
-  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  // Include all coalesced intermediate points plus the dispatched event itself
+  // (Safari omits the dispatched event from getCoalescedEvents, so always append e)
+  const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
   ctx.beginPath();
   ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
   for (const ev of events) {
@@ -3358,7 +3358,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Canvas pointer + touch events
   const intakeCanvas = $("#intake-canvas");
   intakeCanvas.addEventListener("pointerdown", _intakePointerDown);
-  intakeCanvas.addEventListener("pointermove", _intakePointerMove);
+  intakeCanvas.addEventListener("pointermove", _intakePointerMove, { passive: true });
   intakeCanvas.addEventListener("pointerup", _intakePointerUp);
   intakeCanvas.addEventListener("pointercancel", _intakePointerUp);
   intakeCanvas.addEventListener("lostpointercapture", _intakePointerUp);

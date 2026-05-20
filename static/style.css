@@ -3246,7 +3246,6 @@ table.bills-table tr:last-child td { border-bottom: none; }
   border: 1.5px solid var(--border-strong);
   border-radius: var(--r-sm);
   overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
 }
 
 .intake-canvas {
