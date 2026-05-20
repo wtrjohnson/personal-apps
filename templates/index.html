@@ -696,6 +696,42 @@
         <button class="modal-close" id="intake-modal-close" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body intake-modal-body">
+        <!-- Phase 0: meeting type picker -->
+        <div id="intake-phase0" class="intake-phase0">
+          <p class="intake-phase0-prompt">What kind of meeting?</p>
+          <div class="intake-type-grid">
+            <button class="intake-type-card" data-type="1on1">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+              <span class="intake-type-label">1:1</span>
+              <span class="intake-type-desc">One-on-one</span>
+            </button>
+            <button class="intake-type-card" data-type="staff">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3"/><path d="M3 20c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5"/><circle cx="17" cy="7" r="3"/><path d="M21 20c0-3-1.3-5-4-5.4"/></svg>
+              <span class="intake-type-label">Staff</span>
+              <span class="intake-type-desc">Staff meeting</span>
+            </button>
+            <button class="intake-type-card" data-type="legteam">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>
+              <span class="intake-type-label">Leg. Team</span>
+              <span class="intake-type-desc">Legislative team</span>
+            </button>
+            <button class="intake-type-card" data-type="constituent">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+              <span class="intake-type-label">Constituent</span>
+              <span class="intake-type-desc">Advocacy / outreach</span>
+            </button>
+            <button class="intake-type-card" data-type="briefing">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              <span class="intake-type-label">Briefing</span>
+              <span class="intake-type-desc">Briefing or hearing</span>
+            </button>
+            <button class="intake-type-card" data-type="other">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>
+              <span class="intake-type-label">Other</span>
+              <span class="intake-type-desc">Other meeting</span>
+            </button>
+          </div>
+        </div>
         <!-- Metadata fields — phase 1 only -->
         <div class="intake-context-row intake-phase1-only">
           <div class="intake-context-field" style="flex:2">
@@ -716,6 +752,19 @@
           <div class="intake-context-field" style="flex:2">
             <label for="intake-attendees">Attendees</label>
             <input id="intake-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off" inputmode="text">
+          </div>
+        </div>
+        <div class="intake-context-row intake-phase1-only intake-constituent-only" id="intake-purpose-row" style="margin-top:8px">
+          <div class="intake-context-field">
+            <label for="intake-purpose">Purpose</label>
+            <select id="intake-purpose" class="intake-select">
+              <option value="">Select purpose…</option>
+              <option value="Cosponsor request">Cosponsor request</option>
+              <option value="Sign a letter">Sign a letter</option>
+              <option value="Introduction">Introduction / Get to know</option>
+              <option value="General ask">General ask</option>
+              <option value="Other">Other</option>
+            </select>
           </div>
         </div>
         <!-- Phase 2 only: transcription status -->
