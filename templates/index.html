@@ -287,26 +287,54 @@
       <!-- GROUPS -->
       <section class="view" id="view-groups">
         <div class="groups-subtabs-bar">
-          <button class="groups-subtab active" data-subtab="groups">Groups</button>
+          <button class="groups-subtab active" data-subtab="orgs">Organizations</button>
+          <button class="groups-subtab" data-subtab="people">People</button>
           <button class="groups-subtab" data-subtab="bills">Bills</button>
         </div>
-        <div class="groups-panel" id="groups-panel-groups">
-          <div class="groups-wrap">
+
+        <!-- Organizations subtab -->
+        <div class="groups-panel stakeholders-layout" id="groups-panel-orgs">
+          <div class="stakeholders-list">
             <table class="groups">
               <thead>
                 <tr>
-                  <th>Group</th>
+                  <th>Organization</th>
                   <th class="num">Meetings</th>
-                  <th>Last contact</th>
-                  <th class="num">Open actions</th>
-                  <th class="num">Open reminders</th>
-                  <th>Variants</th>
+                  <th>Last met</th>
+                  <th class="num">Open asks</th>
+                  <th class="num">Commitments</th>
+                  <th class="num">Open tasks</th>
                 </tr>
               </thead>
-              <tbody id="groups-body"></tbody>
+              <tbody id="orgs-body"></tbody>
             </table>
           </div>
+          <div class="stakeholders-detail hidden" id="org-detail-panel">
+            <div id="org-detail-content"></div>
+          </div>
         </div>
+
+        <!-- People subtab -->
+        <div class="groups-panel stakeholders-layout hidden" id="groups-panel-people">
+          <div class="stakeholders-list">
+            <table class="groups">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Organization</th>
+                  <th>Last seen</th>
+                  <th class="num">Meetings</th>
+                </tr>
+              </thead>
+              <tbody id="people-body"></tbody>
+            </table>
+          </div>
+          <div class="stakeholders-detail hidden" id="person-detail-panel">
+            <div id="person-detail-content"></div>
+          </div>
+        </div>
+
+        <!-- Bills subtab -->
         <div class="groups-panel hidden" id="groups-panel-bills">
           <div class="groups-wrap">
             <table class="bills-table">
@@ -314,6 +342,7 @@
                 <tr>
                   <th>Bill</th>
                   <th>Meetings Referenced</th>
+                  <th>Organizations</th>
                   <th>Last Seen</th>
                 </tr>
               </thead>
@@ -347,6 +376,10 @@
             <button class="smart-view-btn" data-view="waiting">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
               Waiting
+            </button>
+            <button class="smart-view-btn" data-view="commitments">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              Commitments
             </button>
           </div>
           <div class="smart-views-content">
@@ -769,6 +802,8 @@
             </div>
           </div>
         </div>
+        <!-- Pre-meeting brief (shown when group has history) -->
+        <div id="intake-brief" class="intake-brief hidden"></div>
         <!-- Phase 2: meeting — metadata chips + canvas -->
         <div id="intake-meta-chips" class="intake-meta-chips"></div>
         <!-- Canvas — always visible, sizing differs per phase -->

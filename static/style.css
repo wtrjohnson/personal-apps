@@ -3683,3 +3683,153 @@ table.bills-table tr:last-child td { border-bottom: none; }
 }
 .detail-contact-unlink:hover { background: #fef2f2; color: #dc2626; border-color: #fca5a5; }
 
+/* ── Stakeholders tab (Organizations / People / Bills) ─── */
+.stakeholders-layout {
+  display: flex; flex: 1; min-height: 0; overflow: hidden;
+}
+.stakeholders-list {
+  flex: 1; overflow-y: auto; min-width: 0;
+}
+.stakeholders-detail {
+  width: 360px; flex-shrink: 0; overflow-y: auto;
+  border-left: 1px solid var(--border); padding: 16px;
+  background: var(--card);
+}
+.stakeholders-detail.hidden { display: none; }
+
+/* Count badges */
+.count-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  font-size: 11px; font-weight: 700; line-height: 1;
+}
+.count-badge--ask {
+  background: #fef3c7; color: #92400e; border: 1px solid #fcd34d;
+}
+.count-badge--commitment {
+  background: #ede9fe; color: #5b21b6; border: 1px solid #c4b5fd;
+}
+
+/* Callout/entity type badges in task drawer */
+.callout-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: var(--r-pill);
+  font-size: 11px; font-weight: 600; border: 1px solid transparent;
+}
+.callout-badge--ask {
+  background: #fef3c7; color: #92400e; border-color: #fcd34d;
+}
+.callout-badge--commitment {
+  background: #ede9fe; color: #5b21b6; border-color: #c4b5fd;
+}
+.callout-badge--trigger {
+  background: #ccfbf1; color: #065f46; border-color: #6ee7b7;
+}
+
+/* Org/person detail panels */
+.org-detail-header { margin-bottom: 14px; }
+.org-detail-name { font-size: 16px; font-weight: 700; color: var(--ink); margin: 0 0 2px; }
+.org-detail-type { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+.org-detail-section { margin-bottom: 16px; }
+.org-detail-section-title {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); margin: 0 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border);
+}
+.org-entity-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 0; border-bottom: 1px solid var(--border);
+  font-size: 13px; color: var(--ink);
+}
+.org-entity-row:last-child { border-bottom: none; }
+.org-entity-text, .entity-text { flex: 1; min-width: 0; }
+.org-entity-status, .entity-status {
+  padding: 2px 7px; border-radius: var(--r-pill); font-size: 10px; font-weight: 600;
+  background: var(--surface); color: var(--muted); border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.org-entity-status--ask   { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
+.org-entity-status--open  { background: #ede9fe; color: #5b21b6; border-color: #c4b5fd; }
+.org-entity-status--done  { background: #dcfce7; color: #14532d; border-color: #86efac; }
+.org-entity-status--watch { background: #ccfbf1; color: #065f46; border-color: #6ee7b7; }
+
+.ask-status-select {
+  font: inherit; font-size: 11px; padding: 2px 4px;
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--ink); cursor: pointer; flex-shrink: 0;
+}
+
+.org-meeting-row {
+  padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.org-meeting-row:last-child { border-bottom: none; }
+.org-meeting-date { color: var(--muted); font-size: 11px; }
+.org-meeting-topic { font-size: 13px; color: var(--ink); }
+
+.org-contact-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; margin: 3px 4px 3px 0;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-pill);
+  font-size: 12px; color: var(--ink);
+}
+
+.bill-pills-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.bill-pill {
+  display: inline-flex; padding: 2px 8px; border-radius: var(--r-pill);
+  font-size: 11px; background: var(--accent-softer); color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.person-meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+
+/* Stakeholder rows */
+.stakeholder-row:hover td { background: var(--surface); }
+
+/* Commitments smart view */
+.smart-commitment-group {
+  list-style: none; padding: 0; margin-bottom: 12px;
+}
+.smart-commitment-org {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); padding: 8px 16px 4px; border-top: 1px solid var(--border);
+}
+.smart-commitment-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
+}
+.commitment-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: #7c3aed;
+  flex-shrink: 0; margin-top: 5px;
+}
+.smart-commitment-body { flex: 1; min-width: 0; }
+.smart-commitment-text { font-size: 14px; color: var(--ink); margin-bottom: 3px; }
+.smart-commitment-meta { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+.commitment-linked-task {
+  display: inline-flex; padding: 1px 7px; border-radius: var(--r-pill); font-size: 11px;
+  background: #dcfce7; color: #14532d; border: 1px solid #86efac;
+}
+.commitment-create-task-btn {
+  background: none; border: 1px solid var(--border-strong); border-radius: var(--r-pill);
+  color: var(--accent); font-size: 11px; padding: 1px 8px; cursor: pointer;
+}
+.commitment-create-task-btn:hover { background: var(--accent-softer); }
+
+/* Pre-meeting brief in intake Phase 1 */
+.intake-brief {
+  margin: 8px 0 0; padding: 10px 12px; border-radius: var(--r-sm);
+  background: var(--surface); border: 1px solid var(--border);
+  font-size: 13px; color: var(--ink);
+}
+.intake-brief.hidden { display: none; }
+.brief-header {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); margin-bottom: 7px;
+}
+.brief-row { display: flex; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+.brief-label {
+  font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: var(--r-pill);
+  background: var(--surface); border: 1px solid var(--border); color: var(--muted); flex-shrink: 0;
+}
+.brief-label--ask { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
+.brief-label--commitment { background: #ede9fe; color: #5b21b6; border-color: #c4b5fd; }
+.brief-empty { font-size: 12px; color: var(--muted); font-style: italic; }
+
