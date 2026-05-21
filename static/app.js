@@ -1214,14 +1214,16 @@ async function selectOrg(orgId) {
     content.querySelectorAll(".entity-status-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
         await api(`/api/asks/${btn.dataset.askId}/status`, {
-          method: "POST", body: JSON.stringify({ status: btn.dataset.status }),
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: btn.dataset.status }),
         });
         selectOrg(orgId);
       });
     });
     content.querySelectorAll(".create-task-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        await api(`/api/commitments/${btn.dataset.commitId}/create-task`, { method: "POST" });
+        await api(`/api/commitments/${btn.dataset.commitId}/create-task`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+        });
         selectOrg(orgId);
         await refreshTasks();
       });
@@ -2725,7 +2727,8 @@ async function loadSmartView(viewName) {
 
   if (viewName === "commitments") {
     try {
-      const rows = await api("/api/commitments?status=open");
+      const allRows = await api("/api/commitments");
+      const rows = allRows.filter((r) => !["completed", "closed_no_action"].includes(r.status));
       if (!rows.length) {
         ul.innerHTML = `<li class="empty">No open commitments.</li>`;
       } else {
@@ -3735,7 +3738,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const briefEl = $("#intake-brief");
     if (!briefEl) return;
     if (!val) { briefEl.classList.add("hidden"); briefEl.innerHTML = ""; return; }
-    const slug = val.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const slug = val.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
     if (!slug) { briefEl.classList.add("hidden"); return; }
     try {
       const data = await api(`/api/organizations/${slug}/brief`);

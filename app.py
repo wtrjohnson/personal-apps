@@ -987,12 +987,13 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
             """, (org_id,))
             contacts_rows = [dict(r) for r in cur.fetchall()]
             cur.execute("""
-                SELECT DISTINCT br.bill_type, br.bill_number,
-                       to_char(br.created_at,'YYYY-MM-DD') AS first_seen
+                SELECT br.bill_type, br.bill_number,
+                       to_char(MIN(br.created_at),'YYYY-MM-DD') AS first_seen
                 FROM bill_references br
                 JOIN meetings m ON br.meeting_id = m.id
                 WHERE m.organization_id = %s
-                ORDER BY br.created_at DESC
+                GROUP BY br.bill_type, br.bill_number
+                ORDER BY MIN(br.created_at) DESC
             """, (org_id,))
             bills = [dict(r) for r in cur.fetchall()]
     return {

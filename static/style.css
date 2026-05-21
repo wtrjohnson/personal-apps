@@ -3741,8 +3741,8 @@ table.bills-table tr:last-child td { border-bottom: none; }
   font-size: 13px; color: var(--ink);
 }
 .org-entity-row:last-child { border-bottom: none; }
-.org-entity-text { flex: 1; min-width: 0; }
-.org-entity-status {
+.org-entity-text, .entity-text { flex: 1; min-width: 0; }
+.org-entity-status, .entity-status {
   padding: 2px 7px; border-radius: var(--r-pill); font-size: 10px; font-weight: 600;
   background: var(--surface); color: var(--muted); border: 1px solid var(--border);
   flex-shrink: 0;
@@ -3762,7 +3762,8 @@ table.bills-table tr:last-child td { border-bottom: none; }
   padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px;
 }
 .org-meeting-row:last-child { border-bottom: none; }
-.org-meeting-date { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+.org-meeting-date { color: var(--muted); font-size: 11px; }
+.org-meeting-topic { font-size: 13px; color: var(--ink); }
 
 .org-contact-chip {
   display: inline-flex; align-items: center; gap: 5px;
