@@ -684,6 +684,17 @@ async function openDrawer(task) {
          </span>`
       : "";
 
+    // Commitment badge
+    let commitmentBadge = "";
+    if (task.commitment_id) {
+      commitmentBadge = `<span class="callout-badge callout-badge--commitment" title="Created from a commitment">${_SCAN_ICONS.commitment || ""}${escapeHtml(_SCAN_LABELS.commitment)}</span>`;
+    }
+    // Ask badge
+    let askBadge = "";
+    if (task.ask_id) {
+      askBadge = `<span class="callout-badge callout-badge--ask" title="Linked to an ask">${_SCAN_ICONS.ask || ""}${escapeHtml(_SCAN_LABELS.ask)}</span>`;
+    }
+
     const bills = (m.bill_references || []).map((b) =>
       `<span class="bill-pill">${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}</span>`
     ).join("");
@@ -710,7 +721,7 @@ async function openDrawer(task) {
       <header>
         <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
         <div class="meta">${meta.join("")}</div>
-        ${sourceBadge}
+        ${sourceBadge}${commitmentBadge}${askBadge}
         <a href="#" class="open-full" data-mid="${m.id}">Open full meeting view →</a>
       </header>
       ${m.canvas_image ? `<img class="canvas-note-image" src="${m.canvas_image}" alt="Handwritten note">` : ""}
@@ -1088,21 +1099,199 @@ $("#detail").addEventListener("click", async (e) => {
 });
 
 function renderGroupsTable(groups) {
-  const tbody = $("#groups-body");
-  if (!groups.length) {
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--muted); padding:30px;">No groups yet.</td></tr>`;
+  // Legacy function kept for compatibility — now delegates to org table
+  renderOrgsTable(groups.map((g) => ({
+    id: g.group,
+    name: g.group,
+    meeting_count: g.meeting_count,
+    last_meeting: g.last_contact,
+    open_asks: 0,
+    open_commitments: 0,
+    open_tasks: g.open_action_items || 0,
+  })));
+}
+
+function renderOrgsTable(orgs) {
+  const tbody = $("#orgs-body");
+  if (!tbody) return;
+  if (!orgs.length) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:30px;">No organizations yet.</td></tr>`;
     return;
   }
-  tbody.innerHTML = groups.map((g) => `
-    <tr data-group="${escapeHtml(g.group)}">
-      <td><strong>${escapeHtml(g.group)}</strong></td>
-      <td class="num">${g.meeting_count}</td>
-      <td>${g.last_contact ? escapeHtml(g.last_contact) : "—"}</td>
-      <td class="num">${g.open_action_items || ""}</td>
-      <td class="num">${g.open_reminders || ""}</td>
-      <td class="variants">${g.raw_variants?.length ? escapeHtml(g.raw_variants.join(" · ")) : ""}</td>
+  tbody.innerHTML = orgs.map((o) => `
+    <tr class="stakeholder-row" data-org-id="${escapeHtml(o.id)}" style="cursor:pointer">
+      <td><strong>${escapeHtml(o.name)}</strong></td>
+      <td class="num">${o.meeting_count || 0}</td>
+      <td>${o.last_meeting ? escapeHtml(o.last_meeting) : "—"}</td>
+      <td class="num">${o.open_asks ? `<span class="count-badge count-badge--ask">${o.open_asks}</span>` : "—"}</td>
+      <td class="num">${o.open_commitments ? `<span class="count-badge count-badge--commitment">${o.open_commitments}</span>` : "—"}</td>
+      <td class="num">${o.open_tasks || "—"}</td>
     </tr>
   `).join("");
+  tbody.querySelectorAll(".stakeholder-row").forEach((row) => {
+    row.addEventListener("click", () => selectOrg(row.dataset.orgId));
+  });
+}
+
+async function selectOrg(orgId) {
+  $$("#orgs-body .stakeholder-row").forEach((r) =>
+    r.classList.toggle("active", r.dataset.orgId === orgId));
+  const panel = $("#org-detail-panel");
+  const content = $("#org-detail-content");
+  if (!panel || !content) return;
+  panel.classList.remove("hidden");
+  content.innerHTML = `<div class="detail-empty">Loading…</div>`;
+  try {
+    const org = await api(`/api/organizations/${orgId}`);
+    const openAsks = (org.asks || []).filter((a) =>
+      !["completed","declined","no_action"].includes(a.status));
+    const openCommits = (org.commitments || []).filter((c) =>
+      ["open","needs_review","task_created"].includes(c.status));
+
+    const asksHtml = openAsks.length
+      ? openAsks.map((a) => `
+          <div class="org-entity-row">
+            <span class="callout-badge callout-badge--ask">${_SCAN_ICONS.ask}Ask</span>
+            <span class="entity-text">${escapeHtml(a.text)}</span>
+            <span class="entity-status status-${a.status}">${escapeHtml(a.status.replace("_"," "))}</span>
+            <button class="entity-status-btn" data-ask-id="${a.id}" data-status="completed">✓</button>
+          </div>`).join("")
+      : `<p class="detail-empty-inline">No open asks.</p>`;
+
+    const commitsHtml = openCommits.length
+      ? openCommits.map((c) => `
+          <div class="org-entity-row">
+            <span class="callout-badge callout-badge--commitment">${_SCAN_ICONS.commitment}Commitment</span>
+            <span class="entity-text">${escapeHtml(c.text)}</span>
+            <span class="entity-status status-${c.status}">${escapeHtml(c.status.replace("_"," "))}</span>
+            ${!c.task_id ? `<button class="create-task-btn" data-commit-id="${c.id}">+ Task</button>` : ""}
+          </div>`).join("")
+      : `<p class="detail-empty-inline">No open commitments.</p>`;
+
+    const billsHtml = (org.bills || []).length
+      ? (org.bills || []).map((b) =>
+          `<span class="bill-pill">${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}</span>`
+        ).join("")
+      : `<span style="color:var(--muted)">None</span>`;
+
+    const contactsHtml = (org.contacts || []).map((c) => `
+      <div class="drawer-card">
+        ${c.card_image ? `<img class="drawer-card-thumb" src="${c.card_image}" alt="">` : ""}
+        <div class="drawer-card-info">
+          <div class="drawer-card-name">${escapeHtml(c.name || "(no name)")}</div>
+          ${c.title || c.company ? `<div class="drawer-card-sub">${escapeHtml([c.title,c.company].filter(Boolean).join(" · "))}</div>` : ""}
+          ${c.email ? `<div class="drawer-card-sub">${escapeHtml(c.email)}</div>` : ""}
+        </div>
+      </div>`).join("");
+
+    const meetingsHtml = (org.meetings || []).slice(0, 8).map((m) =>
+      `<div class="org-meeting-row">
+         <span class="org-meeting-date">${escapeHtml(m.date || "—")}</span>
+         <span class="org-meeting-topic">${escapeHtml(m.topic || m.canonical_group || "Meeting")}</span>
+       </div>`).join("");
+
+    content.innerHTML = `
+      <div class="org-detail-header">
+        <h2>${escapeHtml(org.name)}</h2>
+      </div>
+      <div class="org-detail-section">
+        <div class="drawer-section-label">Open Asks</div>
+        ${asksHtml}
+      </div>
+      <div class="org-detail-section">
+        <div class="drawer-section-label">Open Commitments</div>
+        ${commitsHtml}
+      </div>
+      <div class="org-detail-section">
+        <div class="drawer-section-label">Bills Raised</div>
+        <div class="bill-pills-row">${billsHtml}</div>
+      </div>
+      ${contactsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Contacts</div><div class="drawer-cards">${contactsHtml}</div></div>` : ""}
+      ${meetingsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Meeting History</div>${meetingsHtml}</div>` : ""}
+    `;
+
+    // Wire status change buttons
+    content.querySelectorAll(".entity-status-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await api(`/api/asks/${btn.dataset.askId}/status`, {
+          method: "POST", body: JSON.stringify({ status: btn.dataset.status }),
+        });
+        selectOrg(orgId);
+      });
+    });
+    content.querySelectorAll(".create-task-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await api(`/api/commitments/${btn.dataset.commitId}/create-task`, { method: "POST" });
+        selectOrg(orgId);
+        await refreshTasks();
+      });
+    });
+  } catch {
+    content.innerHTML = `<div class="detail-empty">Couldn't load organization.</div>`;
+  }
+}
+
+function renderPeopleTable(people) {
+  const tbody = $("#people-body");
+  if (!tbody) return;
+  if (!people.length) {
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:30px;">No contacts yet.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = people.map((p) => `
+    <tr class="stakeholder-row" data-person-id="${escapeHtml(p.id)}" style="cursor:pointer">
+      <td><strong>${escapeHtml(p.name)}</strong></td>
+      <td>${escapeHtml(p.org_name || p.company || "—")}</td>
+      <td>${escapeHtml(p.last_seen || "—")}</td>
+      <td class="num">${p.meeting_count || 0}</td>
+    </tr>
+  `).join("");
+  tbody.querySelectorAll(".stakeholder-row").forEach((row) => {
+    row.addEventListener("click", () => selectPerson(row.dataset.personId));
+  });
+}
+
+async function selectPerson(contactId) {
+  $$("#people-body .stakeholder-row").forEach((r) =>
+    r.classList.toggle("active", r.dataset.personId === contactId));
+  const panel = $("#person-detail-panel");
+  const content = $("#person-detail-content");
+  if (!panel || !content) return;
+  panel.classList.remove("hidden");
+  content.innerHTML = `<div class="detail-empty">Loading…</div>`;
+  try {
+    const p = await api(`/api/people/${contactId}`);
+    const asksHtml = (p.asks || []).map((a) =>
+      `<div class="org-entity-row">
+         <span class="entity-text">${escapeHtml(a.text)}</span>
+         <span class="entity-status status-${a.status}">${escapeHtml(a.status)}</span>
+       </div>`).join("") || `<p class="detail-empty-inline">No asks on record.</p>`;
+
+    const meetingsHtml = (p.meetings || []).slice(0, 8).map((m) =>
+      `<div class="org-meeting-row">
+         <span class="org-meeting-date">${escapeHtml(m.date || "—")}</span>
+         <span class="org-meeting-topic">${escapeHtml(m.topic || m.canonical_group || "Meeting")}</span>
+       </div>`).join("");
+
+    content.innerHTML = `
+      <div class="org-detail-header">
+        <h2>${escapeHtml(p.name)}</h2>
+        <div class="person-meta">
+          ${p.title || p.company ? `<span>${escapeHtml([p.title,p.company].filter(Boolean).join(" · "))}</span>` : ""}
+          ${p.email ? `<span>${escapeHtml(p.email)}</span>` : ""}
+          ${p.phone ? `<span>${escapeHtml(p.phone)}</span>` : ""}
+        </div>
+        ${p.card_image ? `<img class="drawer-card-thumb" src="${p.card_image}" alt="Business card" style="margin-top:10px">` : ""}
+      </div>
+      <div class="org-detail-section">
+        <div class="drawer-section-label">Asks Raised</div>
+        ${asksHtml}
+      </div>
+      ${meetingsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Meeting History</div>${meetingsHtml}</div>` : ""}
+    `;
+  } catch {
+    content.innerHTML = `<div class="detail-empty">Couldn't load person.</div>`;
+  }
 }
 
 // ---------- Radial menu ----------
@@ -1684,6 +1873,15 @@ function _extractCallouts(text) {
         items.push({ type: "followup", text: t });
         if (_hasDue(t)) items.push({ type: "deadline", text: t });
       }
+    } else if (/^~~\s*\S/.test(line) || /^ASK\s+/i.test(line)) {
+      const t = line.replace(/^~~\s*/, "").replace(/^ASK\s+/i, "").trim();
+      if (t) items.push({ type: "ask", text: t });
+    } else if (/^>>>\s*\S/.test(line) || /^COMMIT\s+/i.test(line)) {
+      const t = line.replace(/^>>>\s*/, "").replace(/^COMMIT\s+/i, "").trim();
+      if (t) items.push({ type: "commitment", text: t });
+    } else if (/^FU\s+IF\s+/i.test(line)) {
+      const t = line.replace(/^FU\s+IF\s+/i, "").trim();
+      if (t) items.push({ type: "trigger", text: t });
     } else if (_hasDue(line)) {
       items.push({ type: "deadline", text: line });
     } else if (/^@([A-Za-z]\w*)/.test(line)) {
@@ -1746,9 +1944,16 @@ const _SCAN_ICONS = {
   followup:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
   deadline:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
   person:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
-  bill:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+  bill:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+  ask:        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+  commitment: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+  trigger:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
 };
-const _SCAN_LABELS = { task: "Task", important: "Important", followup: "Follow-up", deadline: "Deadline", person: "Person", bill: "Bill" };
+const _SCAN_LABELS = {
+  task: "Task", important: "Important", followup: "Follow-up",
+  deadline: "Deadline", person: "Person", bill: "Bill",
+  ask: "Ask", commitment: "Commitment", trigger: "Trigger",
+};
 
 function _editScanItemInline(el, idx) {
   if (!_intakeScanResult) return;
@@ -1778,7 +1983,7 @@ function _editScanItemInline(el, idx) {
 // Which callout types the user is allowed to switch between in the review queue.
 // Deadline/person/bill have distinct downstream semantics and aren't task-producing,
 // so they're not interchangeable with task/followup/important.
-const _SWITCHABLE_CALLOUT_TYPES = ["task", "followup", "important"];
+const _SWITCHABLE_CALLOUT_TYPES = ["task", "followup", "important", "ask", "commitment", "trigger"];
 
 function _renderScanResults() {
   const queueEl = $("#intake-review-queue");
@@ -2249,10 +2454,13 @@ async function _intakeSaveNotes() {
       resultEl.className = "intake-result intake-result-ok";
       const c = data.created || {};
       const breakdown = [
-        c.actions   ? `${c.actions} task${c.actions !== 1 ? "s" : ""}` : "",
-        c.followups ? `${c.followups} follow-up${c.followups !== 1 ? "s" : ""}` : "",
-        c.reminders ? `${c.reminders} reminder${c.reminders !== 1 ? "s" : ""}` : "",
-        c.bills     ? `${c.bills} bill${c.bills !== 1 ? "s" : ""}` : "",
+        c.actions      ? `${c.actions} task${c.actions !== 1 ? "s" : ""}` : "",
+        c.followups    ? `${c.followups} follow-up${c.followups !== 1 ? "s" : ""}` : "",
+        c.reminders    ? `${c.reminders} reminder${c.reminders !== 1 ? "s" : ""}` : "",
+        c.bills        ? `${c.bills} bill${c.bills !== 1 ? "s" : ""}` : "",
+        c.asks         ? `${c.asks} ask${c.asks !== 1 ? "s" : ""}` : "",
+        c.commitments  ? `${c.commitments} commitment${c.commitments !== 1 ? "s" : ""}` : "",
+        c.triggers     ? `${c.triggers} trigger${c.triggers !== 1 ? "s" : ""}` : "",
       ].filter(Boolean).join(" · ");
       const chips = [
         data.topic ? `<span class="intake-chip">${escapeHtml(data.topic)}</span>` : "",
@@ -2388,11 +2596,13 @@ function renderBillsTable(bills) {
 }
 
 async function loadGroups() {
-  const [groups, bills] = await Promise.all([
-    api("/api/groups"),
+  const [orgs, people, bills] = await Promise.all([
+    api("/api/organizations"),
+    api("/api/people"),
     api("/api/bills"),
   ]);
-  renderGroupsTable(groups);
+  renderOrgsTable(orgs);
+  renderPeopleTable(people);
   renderBillsTable(bills);
 }
 
@@ -2497,13 +2707,14 @@ function _renderFocusPanel(tasks) {
 async function loadSmartView(viewName) {
   state.smartView = viewName;
   $$(".smart-view-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === viewName));
-  const titles = { today: "Today", upcoming: "Upcoming", neglected: "Neglected", quick_wins: "Quick Wins", waiting: "Waiting on…" };
+  const titles = { today: "Today", upcoming: "Upcoming", neglected: "Neglected", quick_wins: "Quick Wins", waiting: "Waiting on…", commitments: "Commitments" };
   const descs = {
     today: "Tasks due today or highest urgency.",
     upcoming: "Deadlines in the next 7 days.",
     neglected: "High-priority tasks older than 2 weeks.",
     quick_wins: "Tasks estimating 30 minutes or less.",
     waiting: "Tasks blocked by unfinished dependencies.",
+    commitments: "Open commitments made to stakeholders.",
   };
   const vName = viewName;
   if ($("#smart-view-title")) $("#smart-view-title").textContent = titles[vName] || vName;
@@ -2511,6 +2722,56 @@ async function loadSmartView(viewName) {
 
   const ul = $("#smart-view-tasks");
   ul.innerHTML = `<li class="empty">Loading…</li>`;
+
+  if (viewName === "commitments") {
+    try {
+      const rows = await api("/api/commitments?status=open");
+      if (!rows.length) {
+        ul.innerHTML = `<li class="empty">No open commitments.</li>`;
+      } else {
+        const byOrg = {};
+        rows.forEach((r) => {
+          const key = r.organization_id || "__none__";
+          if (!byOrg[key]) byOrg[key] = { name: r.org_name || "No organization", items: [] };
+          byOrg[key].items.push(r);
+        });
+        ul.innerHTML = Object.values(byOrg).map((group) => `
+          <li class="smart-commitment-group">
+            <div class="smart-commitment-org">${escapeHtml(group.name)}</div>
+            ${group.items.map((c) => `
+              <div class="smart-commitment-row" data-commitment-id="${escapeHtml(c.id)}">
+                <span class="commitment-dot"></span>
+                <div class="smart-commitment-body">
+                  <div class="smart-commitment-text">${escapeHtml(c.text)}</div>
+                  <div class="smart-commitment-meta">
+                    ${c.meeting_date ? `<span>${escapeHtml(c.meeting_date)}</span>` : ""}
+                    ${c.task_id ? `<span class="commitment-linked-task">Task created</span>` : `<button class="commitment-create-task-btn" data-id="${escapeHtml(c.id)}">+ Create task</button>`}
+                  </div>
+                </div>
+              </div>
+            `).join("")}
+          </li>
+        `).join("");
+        ul.querySelectorAll(".commitment-create-task-btn").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            btn.disabled = true;
+            btn.textContent = "Creating…";
+            try {
+              await api(`/api/commitments/${btn.dataset.id}/create-task`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+              loadSmartView("commitments");
+            } catch (e) {
+              btn.disabled = false;
+              btn.textContent = "+ Create task";
+            }
+          });
+        });
+      }
+    } catch (e) {
+      ul.innerHTML = `<li class="empty">Failed to load.</li>`;
+    }
+    return;
+  }
+
   try {
     const data = await api("/api/tasks?smart_view=" + encodeURIComponent(viewName) + "&status=open");
     state.smartViewTasks = data.tasks;
@@ -3464,6 +3725,38 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!e.target.closest(".intake-meta-chip")) {
       document.querySelectorAll(".intake-meta-chip--expanded").forEach((c) => _intakeCollapseChip(c));
     }
+  });
+
+  // Pre-meeting brief: fetch org history when group field changes in Phase 1
+  const _intakeGroupInput = $("#intake-group");
+  let _intakeBriefTimeout = null;
+  const _fetchIntakeBrief = async () => {
+    const val = _intakeGroupInput.value.trim();
+    const briefEl = $("#intake-brief");
+    if (!briefEl) return;
+    if (!val) { briefEl.classList.add("hidden"); briefEl.innerHTML = ""; return; }
+    const slug = val.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!slug) { briefEl.classList.add("hidden"); return; }
+    try {
+      const data = await api(`/api/organizations/${slug}/brief`);
+      if (!data || data.error) { briefEl.classList.add("hidden"); return; }
+      const lines = [];
+      if (data.last_meeting) lines.push(`<div class="brief-row"><span class="brief-label">Last met</span> <span>${escapeHtml(data.last_meeting.date || "")} — ${escapeHtml((data.last_meeting.attendees || []).join(", ") || "no attendees listed")}</span></div>`);
+      if (data.open_asks && data.open_asks.length) lines.push(`<div class="brief-row"><span class="brief-label brief-label--ask">Open asks (${data.open_asks.length})</span> <span>${data.open_asks.map((a) => escapeHtml(a.text)).join("; ")}</span></div>`);
+      if (data.open_commitments && data.open_commitments.length) lines.push(`<div class="brief-row"><span class="brief-label brief-label--commitment">Commitments owed (${data.open_commitments.length})</span> <span>${data.open_commitments.map((c) => escapeHtml(c.text)).join("; ")}</span></div>`);
+      if (data.bills && data.bills.length) lines.push(`<div class="brief-row"><span class="brief-label">Bills raised</span> <span>${data.bills.map((b) => escapeHtml(`${b.bill_type}${b.bill_number}`)).join(", ")}</span></div>`);
+      if (!lines.length && !data.last_meeting) {
+        briefEl.innerHTML = `<div class="brief-empty">No prior history with this group.</div>`;
+      } else {
+        briefEl.innerHTML = `<div class="brief-header">Before this meeting</div>${lines.join("")}`;
+      }
+      briefEl.classList.remove("hidden");
+    } catch (_) { briefEl.classList.add("hidden"); }
+  };
+  _intakeGroupInput.addEventListener("blur", _fetchIntakeBrief);
+  _intakeGroupInput.addEventListener("change", () => {
+    clearTimeout(_intakeBriefTimeout);
+    _intakeBriefTimeout = setTimeout(_fetchIntakeBrief, 400);
   });
 
   // Canvas toolbar

@@ -231,6 +231,116 @@ def init_db() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS scan_items_meeting ON meeting_scan_items (meeting_id);
             """)
+            # Phase 1: organizations, asks, commitments, followup_triggers
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS organizations (
+                    id         TEXT PRIMARY KEY,
+                    name       TEXT NOT NULL,
+                    type       TEXT,
+                    notes      TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS asks (
+                    id              TEXT PRIMARY KEY,
+                    meeting_id      TEXT REFERENCES meetings(id) ON DELETE CASCADE,
+                    text            TEXT NOT NULL,
+                    organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
+                    contact_id      TEXT REFERENCES contacts(id) ON DELETE SET NULL,
+                    bill_ref_id     INTEGER REFERENCES bill_references(id) ON DELETE SET NULL,
+                    status          TEXT NOT NULL DEFAULT 'logged',
+                    priority        TEXT NOT NULL DEFAULT 'normal',
+                    task_id         TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+                    source_excerpt  TEXT,
+                    created_at      TIMESTAMP DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS commitments (
+                    id              TEXT PRIMARY KEY,
+                    meeting_id      TEXT REFERENCES meetings(id) ON DELETE CASCADE,
+                    text            TEXT NOT NULL,
+                    contact_id      TEXT REFERENCES contacts(id) ON DELETE SET NULL,
+                    organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
+                    related_ask_id  TEXT REFERENCES asks(id) ON DELETE SET NULL,
+                    due_date        DATE,
+                    status          TEXT NOT NULL DEFAULT 'open',
+                    task_id         TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+                    source_excerpt  TEXT,
+                    created_at      TIMESTAMP DEFAULT NOW()
+                );
+                CREATE TABLE IF NOT EXISTS followup_triggers (
+                    id              TEXT PRIMARY KEY,
+                    meeting_id      TEXT REFERENCES meetings(id) ON DELETE CASCADE,
+                    condition_text  TEXT NOT NULL,
+                    action_text     TEXT NOT NULL,
+                    bill_ref_id     INTEGER REFERENCES bill_references(id) ON DELETE SET NULL,
+                    contact_id      TEXT REFERENCES contacts(id) ON DELETE SET NULL,
+                    organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
+                    status          TEXT NOT NULL DEFAULT 'watching',
+                    created_at      TIMESTAMP DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS asks_meeting   ON asks (meeting_id);
+                CREATE INDEX IF NOT EXISTS asks_org       ON asks (organization_id);
+                CREATE INDEX IF NOT EXISTS commits_meeting ON commitments (meeting_id);
+                CREATE INDEX IF NOT EXISTS triggers_meeting ON followup_triggers (meeting_id);
+            """)
+            # New columns linking existing tables to organizations/asks/commitments
+            cur.execute("""
+                DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='contacts' AND column_name='organization_id'
+                    ) THEN
+                        ALTER TABLE contacts ADD COLUMN organization_id TEXT
+                            REFERENCES organizations(id) ON DELETE SET NULL;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='meetings' AND column_name='organization_id'
+                    ) THEN
+                        ALTER TABLE meetings ADD COLUMN organization_id TEXT
+                            REFERENCES organizations(id) ON DELETE SET NULL;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tasks' AND column_name='ask_id'
+                    ) THEN
+                        ALTER TABLE tasks ADD COLUMN ask_id TEXT
+                            REFERENCES asks(id) ON DELETE SET NULL;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tasks' AND column_name='commitment_id'
+                    ) THEN
+                        ALTER TABLE tasks ADD COLUMN commitment_id TEXT
+                            REFERENCES commitments(id) ON DELETE SET NULL;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tasks' AND column_name='organization_id'
+                    ) THEN
+                        ALTER TABLE tasks ADD COLUMN organization_id TEXT
+                            REFERENCES organizations(id) ON DELETE SET NULL;
+                    END IF;
+                END $$;
+            """)
+            # Seed organizations from existing canonical_groups and link meetings
+            cur.execute("""
+                INSERT INTO organizations (id, name, created_at, updated_at)
+                SELECT DISTINCT
+                    trim('-' FROM regexp_replace(lower(canonical_group), '[^a-z0-9]+', '-', 'g')) AS id,
+                    canonical_group AS name,
+                    NOW(), NOW()
+                FROM meetings
+                WHERE canonical_group IS NOT NULL AND canonical_group != ''
+                ON CONFLICT (id) DO NOTHING
+            """)
+            cur.execute("""
+                UPDATE meetings
+                SET organization_id =
+                    trim('-' FROM regexp_replace(lower(canonical_group), '[^a-z0-9]+', '-', 'g'))
+                WHERE organization_id IS NULL
+                  AND canonical_group IS NOT NULL AND canonical_group != ''
+            """)
 
 
 if DATABASE_URL:
@@ -355,6 +465,9 @@ class Task:
     subtask_count: int          # computed via subquery
     has_blockers: bool          # computed via EXISTS subquery
     callout_source: Optional[str] = None  # 'task' | 'followup' | 'important' | None
+    ask_id: Optional[str] = None
+    commitment_id: Optional[str] = None
+    organization_id: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -380,6 +493,115 @@ class Task:
             "subtask_count": self.subtask_count,
             "has_blockers": self.has_blockers,
             "callout_source": self.callout_source,
+            "ask_id": self.ask_id,
+            "commitment_id": self.commitment_id,
+            "organization_id": self.organization_id,
+        }
+
+
+@dataclass
+class Organization:
+    id: str
+    name: str
+    type: Optional[str]
+    notes: Optional[str]
+    created_at: Optional[str]
+    updated_at: Optional[str]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "type": self.type,
+            "notes": self.notes,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class Ask:
+    id: str
+    meeting_id: Optional[str]
+    text: str
+    organization_id: Optional[str]
+    contact_id: Optional[str]
+    bill_ref_id: Optional[int]
+    status: str
+    priority: str
+    task_id: Optional[str]
+    source_excerpt: Optional[str]
+    created_at: Optional[str]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "meeting_id": self.meeting_id,
+            "text": self.text,
+            "organization_id": self.organization_id,
+            "contact_id": self.contact_id,
+            "bill_ref_id": self.bill_ref_id,
+            "status": self.status,
+            "priority": self.priority,
+            "task_id": self.task_id,
+            "source_excerpt": self.source_excerpt,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass
+class Commitment:
+    id: str
+    meeting_id: Optional[str]
+    text: str
+    contact_id: Optional[str]
+    organization_id: Optional[str]
+    related_ask_id: Optional[str]
+    due_date: Optional[str]
+    status: str
+    task_id: Optional[str]
+    source_excerpt: Optional[str]
+    created_at: Optional[str]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "meeting_id": self.meeting_id,
+            "text": self.text,
+            "contact_id": self.contact_id,
+            "organization_id": self.organization_id,
+            "related_ask_id": self.related_ask_id,
+            "due_date": self.due_date,
+            "status": self.status,
+            "task_id": self.task_id,
+            "source_excerpt": self.source_excerpt,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass
+class FollowupTrigger:
+    id: str
+    meeting_id: Optional[str]
+    condition_text: str
+    action_text: str
+    bill_ref_id: Optional[int]
+    contact_id: Optional[str]
+    organization_id: Optional[str]
+    status: str
+    created_at: Optional[str]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "meeting_id": self.meeting_id,
+            "condition_text": self.condition_text,
+            "action_text": self.action_text,
+            "bill_ref_id": self.bill_ref_id,
+            "contact_id": self.contact_id,
+            "organization_id": self.organization_id,
+            "status": self.status,
+            "created_at": self.created_at,
         }
 
 
@@ -440,6 +662,11 @@ def extract_deadline(
 def _task_id(*parts: str) -> str:
     blob = "\x1f".join(parts).encode("utf-8")
     return hashlib.sha1(blob).hexdigest()[:16]
+
+
+def _org_slug(name: str) -> str:
+    s = re.sub(r'[^a-z0-9]+', '-', name.strip().lower())
+    return s.strip('-')[:40] or 'org'
 
 
 def _year_from_date(s: Optional[str]) -> Optional[int]:
@@ -641,6 +868,9 @@ def _task_row_to_task(row: dict, today: str) -> Task:
         subtask_count=int(row.get("subtask_count") or 0),
         has_blockers=bool(row.get("has_blockers")),
         callout_source=row.get("callout_source"),
+        ask_id=row.get("ask_id"),
+        commitment_id=row.get("commitment_id"),
+        organization_id=row.get("organization_id"),
     )
 
 
@@ -716,6 +946,90 @@ def db_get_all_tasks(include_done: bool = False) -> List[Task]:
                 cur.execute(_TASKS_SELECT + "WHERE NOT t.done ORDER BY t.created_at")
             rows = cur.fetchall()
     return [_task_row_to_task(dict(r), today) for r in rows]
+
+
+def db_get_org_profile(org_id: str) -> Optional[dict]:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM organizations WHERE id = %s", (org_id,))
+            org_row = cur.fetchone()
+            if not org_row:
+                return None
+            cur.execute("""
+                SELECT m.id, m.topic, to_char(m.file_date,'YYYY-MM-DD') AS date,
+                       m.attendees, m.canonical_group
+                FROM meetings m WHERE m.organization_id = %s
+                ORDER BY m.file_date DESC NULLS LAST
+            """, (org_id,))
+            meetings = [dict(r) for r in cur.fetchall()]
+            cur.execute("""
+                SELECT a.*, to_char(a.created_at,'YYYY-MM-DD') AS created_at_str
+                FROM asks a WHERE a.organization_id = %s
+                ORDER BY a.created_at DESC
+            """, (org_id,))
+            asks = [dict(r) for r in cur.fetchall()]
+            cur.execute("""
+                SELECT c.*, to_char(c.created_at,'YYYY-MM-DD') AS created_at_str
+                FROM commitments c WHERE c.organization_id = %s
+                ORDER BY c.created_at DESC
+            """, (org_id,))
+            commitments_rows = [dict(r) for r in cur.fetchall()]
+            cur.execute("""
+                SELECT ft.*, to_char(ft.created_at,'YYYY-MM-DD') AS created_at_str
+                FROM followup_triggers ft WHERE ft.organization_id = %s
+                ORDER BY ft.created_at DESC
+            """, (org_id,))
+            triggers = [dict(r) for r in cur.fetchall()]
+            cur.execute("""
+                SELECT ct.id, ct.name, ct.title, ct.company, ct.email, ct.phone, ct.card_image
+                FROM contacts ct WHERE ct.organization_id = %s
+                ORDER BY ct.name
+            """, (org_id,))
+            contacts_rows = [dict(r) for r in cur.fetchall()]
+            cur.execute("""
+                SELECT DISTINCT br.bill_type, br.bill_number,
+                       to_char(br.created_at,'YYYY-MM-DD') AS first_seen
+                FROM bill_references br
+                JOIN meetings m ON br.meeting_id = m.id
+                WHERE m.organization_id = %s
+                ORDER BY br.created_at DESC
+            """, (org_id,))
+            bills = [dict(r) for r in cur.fetchall()]
+    return {
+        "id": org_row["id"],
+        "name": org_row["name"],
+        "type": org_row["type"],
+        "notes": org_row["notes"],
+        "meetings": meetings,
+        "asks": asks,
+        "commitments": commitments_rows,
+        "triggers": triggers,
+        "contacts": contacts_rows,
+        "bills": bills,
+    }
+
+
+def db_get_pre_meeting_brief(org_id: str) -> dict:
+    profile = db_get_org_profile(org_id)
+    if not profile:
+        return {"exists": False}
+    open_asks = [a for a in profile["asks"]
+                 if a["status"] not in ("completed", "declined", "no_action")]
+    open_commitments = [c for c in profile["commitments"]
+                        if c["status"] in ("open", "needs_review", "task_created")]
+    last_meeting = profile["meetings"][0] if profile["meetings"] else None
+    return {
+        "exists": True,
+        "org_id": org_id,
+        "org_name": profile["name"],
+        "last_meeting": last_meeting,
+        "meeting_count": len(profile["meetings"]),
+        "open_asks": open_asks,
+        "open_commitments": open_commitments,
+        "bills": profile["bills"],
+        "contacts": profile["contacts"],
+        "triggers": [t for t in profile["triggers"] if t["status"] == "watching"],
+    }
 
 
 # --------------------------------------------------
@@ -1105,6 +1419,283 @@ def api_bills():
         "bill_number": r["bill_number"],
         "meetings": r["meetings"],
         "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
+    } for r in rows])
+
+
+@app.route("/api/organizations")
+def api_organizations():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT o.id, o.name, o.type, o.notes,
+                    COUNT(DISTINCT m.id) AS meeting_count,
+                    to_char(MAX(m.file_date), 'YYYY-MM-DD') AS last_meeting,
+                    COUNT(DISTINCT a.id) FILTER (
+                        WHERE a.status NOT IN ('completed','declined','no_action')) AS open_asks,
+                    COUNT(DISTINCT c.id) FILTER (
+                        WHERE c.status IN ('open','needs_review','task_created')) AS open_commitments,
+                    COUNT(DISTINCT t.id) FILTER (
+                        WHERE NOT t.done AND t.organization_id = o.id) AS open_tasks
+                FROM organizations o
+                LEFT JOIN meetings m ON m.organization_id = o.id
+                LEFT JOIN asks a ON a.organization_id = o.id
+                LEFT JOIN commitments c ON c.organization_id = o.id
+                LEFT JOIN tasks t ON t.organization_id = o.id
+                GROUP BY o.id, o.name, o.type, o.notes
+                ORDER BY MAX(m.file_date) DESC NULLS LAST, o.name
+            """)
+            rows = cur.fetchall()
+    return jsonify([{
+        "id": r["id"], "name": r["name"], "type": r["type"],
+        "meeting_count": r["meeting_count"],
+        "last_meeting": r["last_meeting"],
+        "open_asks": r["open_asks"],
+        "open_commitments": r["open_commitments"],
+        "open_tasks": r["open_tasks"],
+    } for r in rows])
+
+
+@app.route("/api/organizations/<org_id>")
+def api_organization_detail(org_id):
+    profile = db_get_org_profile(org_id)
+    if not profile:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    return jsonify(profile)
+
+
+@app.route("/api/organizations/<org_id>/brief")
+def api_organization_brief(org_id):
+    return jsonify(db_get_pre_meeting_brief(org_id))
+
+
+@app.route("/api/people")
+def api_people():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ct.id, ct.name, ct.company, ct.title, ct.email, ct.phone,
+                       ct.card_image, ct.organization_id,
+                       o.name AS org_name,
+                       COUNT(DISTINCT mc.meeting_id) AS meeting_count,
+                       to_char(MAX(m.file_date), 'YYYY-MM-DD') AS last_seen
+                FROM contacts ct
+                LEFT JOIN organizations o ON ct.organization_id = o.id
+                LEFT JOIN meeting_contacts mc ON mc.contact_id = ct.id
+                LEFT JOIN meetings m ON m.id = mc.meeting_id
+                GROUP BY ct.id, ct.name, ct.company, ct.title, ct.email,
+                         ct.phone, ct.card_image, ct.organization_id, o.name
+                ORDER BY MAX(m.file_date) DESC NULLS LAST, ct.name
+            """)
+            rows = cur.fetchall()
+    return jsonify([{
+        "id": r["id"], "name": r["name"], "company": r["company"],
+        "title": r["title"], "email": r["email"], "phone": r["phone"],
+        "card_image": r["card_image"], "organization_id": r["organization_id"],
+        "org_name": r["org_name"],
+        "meeting_count": r["meeting_count"], "last_seen": r["last_seen"],
+    } for r in rows])
+
+
+@app.route("/api/people/<contact_id>")
+def api_person_detail(contact_id):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM contacts WHERE id = %s", (contact_id,))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            cur.execute("""
+                SELECT m.id, m.topic, to_char(m.file_date,'YYYY-MM-DD') AS date,
+                       m.canonical_group, m.attendees
+                FROM meetings m
+                JOIN meeting_contacts mc ON mc.meeting_id = m.id
+                WHERE mc.contact_id = %s
+                ORDER BY m.file_date DESC NULLS LAST
+            """, (contact_id,))
+            meetings = [dict(r) for r in cur.fetchall()]
+            cur.execute("""
+                SELECT a.id, a.text, a.status, a.priority,
+                       to_char(a.created_at,'YYYY-MM-DD') AS created_at_str
+                FROM asks a WHERE a.contact_id = %s
+                ORDER BY a.created_at DESC
+            """, (contact_id,))
+            asks = [dict(r) for r in cur.fetchall()]
+    return jsonify({
+        "id": row["id"], "name": row["name"], "company": row["company"],
+        "title": row["title"], "email": row["email"], "phone": row["phone"],
+        "card_image": row["card_image"], "organization_id": row["organization_id"],
+        "meetings": meetings, "asks": asks,
+    })
+
+
+@app.route("/api/asks")
+def api_asks():
+    status = request.args.get("status")
+    org_id = request.args.get("org_id")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            conditions = []
+            params: list = []
+            if status:
+                conditions.append("a.status = %s")
+                params.append(status)
+            if org_id:
+                conditions.append("a.organization_id = %s")
+                params.append(org_id)
+            where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+            cur.execute(f"""
+                SELECT a.*, o.name AS org_name,
+                       to_char(a.created_at,'YYYY-MM-DD') AS created_at_str,
+                       to_char(m.file_date,'YYYY-MM-DD') AS meeting_date,
+                       m.topic AS meeting_topic
+                FROM asks a
+                LEFT JOIN organizations o ON a.organization_id = o.id
+                LEFT JOIN meetings m ON a.meeting_id = m.id
+                {where}
+                ORDER BY a.created_at DESC
+            """, params)
+            rows = cur.fetchall()
+    return jsonify([{
+        "id": r["id"], "text": r["text"], "status": r["status"],
+        "priority": r["priority"], "meeting_id": r["meeting_id"],
+        "organization_id": r["organization_id"], "org_name": r["org_name"],
+        "contact_id": r["contact_id"], "bill_ref_id": r["bill_ref_id"],
+        "task_id": r["task_id"], "source_excerpt": r["source_excerpt"],
+        "created_at": r["created_at_str"],
+        "meeting_date": r["meeting_date"], "meeting_topic": r["meeting_topic"],
+    } for r in rows])
+
+
+@app.route("/api/asks/<ask_id>/status", methods=["POST"])
+def api_ask_status(ask_id):
+    data = request.get_json(force=True, silent=True) or {}
+    status = (data.get("status") or "").strip()
+    valid = {"logged","needs_review","under_review","task_created","accepted",
+             "declined","completed","no_action","notify_if_changes"}
+    if status not in valid:
+        return jsonify({"ok": False, "error": "Invalid status"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE asks SET status = %s WHERE id = %s", (status, ask_id))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/commitments")
+def api_commitments():
+    status = request.args.get("status")
+    org_id = request.args.get("org_id")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            conditions = []
+            params: list = []
+            if status:
+                conditions.append("c.status = %s")
+                params.append(status)
+            if org_id:
+                conditions.append("c.organization_id = %s")
+                params.append(org_id)
+            where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+            cur.execute(f"""
+                SELECT c.*, o.name AS org_name,
+                       to_char(c.created_at,'YYYY-MM-DD') AS created_at_str,
+                       to_char(c.due_date,'YYYY-MM-DD') AS due_date_str,
+                       to_char(m.file_date,'YYYY-MM-DD') AS meeting_date,
+                       m.topic AS meeting_topic
+                FROM commitments c
+                LEFT JOIN organizations o ON c.organization_id = o.id
+                LEFT JOIN meetings m ON c.meeting_id = m.id
+                {where}
+                ORDER BY c.created_at DESC
+            """, params)
+            rows = cur.fetchall()
+    return jsonify([{
+        "id": r["id"], "text": r["text"], "status": r["status"],
+        "meeting_id": r["meeting_id"], "organization_id": r["organization_id"],
+        "org_name": r["org_name"], "contact_id": r["contact_id"],
+        "related_ask_id": r["related_ask_id"], "due_date": r["due_date_str"],
+        "task_id": r["task_id"], "source_excerpt": r["source_excerpt"],
+        "created_at": r["created_at_str"],
+        "meeting_date": r["meeting_date"], "meeting_topic": r["meeting_topic"],
+    } for r in rows])
+
+
+@app.route("/api/commitments/<commitment_id>/status", methods=["POST"])
+def api_commitment_status(commitment_id):
+    data = request.get_json(force=True, silent=True) or {}
+    status = (data.get("status") or "").strip()
+    valid = {"open","task_created","waiting","completed","closed_no_action","needs_review"}
+    if status not in valid:
+        return jsonify({"ok": False, "error": "Invalid status"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE commitments SET status = %s WHERE id = %s",
+                        (status, commitment_id))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/commitments/<commitment_id>/create-task", methods=["POST"])
+def api_commitment_create_task(commitment_id):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT c.*, o.name AS org_name,
+                       to_char(m.file_date,'YYYY-MM-DD') AS meeting_date
+                FROM commitments c
+                LEFT JOIN organizations o ON c.organization_id = o.id
+                LEFT JOIN meetings m ON c.meeting_id = m.id
+                WHERE c.id = %s
+            """, (commitment_id,))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"ok": False, "error": "Commitment not found"}), 404
+            if row["task_id"]:
+                return jsonify({"ok": True, "task_id": row["task_id"], "already_exists": True})
+            tid = str(uuid.uuid4())
+            org_ctx = f" (for {row['org_name']})" if row["org_name"] else ""
+            mtg_ctx = f" — from meeting {row['meeting_date']}" if row["meeting_date"] else ""
+            cur.execute("""
+                INSERT INTO tasks
+                    (id, text, type, done, backburner, meeting_id, source_filename,
+                     section, group_name, source_date, priority, commitment_id, organization_id,
+                     callout_source, created_at)
+                VALUES (%s,%s,'action',FALSE,FALSE,%s,%s,'action_items',%s,%s,'normal',%s,%s,'commitment',NOW())
+            """, (
+                tid,
+                row["text"] + org_ctx + mtg_ctx,
+                row["meeting_id"],
+                f"commitment-{commitment_id[:8]}",
+                row["org_name"] or "",
+                row["meeting_date"],
+                commitment_id,
+                row["organization_id"],
+            ))
+            cur.execute("UPDATE commitments SET status='task_created', task_id=%s WHERE id=%s",
+                        (tid, commitment_id))
+    return jsonify({"ok": True, "task_id": tid})
+
+
+@app.route("/api/followup-triggers")
+def api_followup_triggers():
+    status = request.args.get("status", "watching")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ft.*, o.name AS org_name,
+                       to_char(ft.created_at,'YYYY-MM-DD') AS created_at_str,
+                       to_char(m.file_date,'YYYY-MM-DD') AS meeting_date
+                FROM followup_triggers ft
+                LEFT JOIN organizations o ON ft.organization_id = o.id
+                LEFT JOIN meetings m ON ft.meeting_id = m.id
+                WHERE ft.status = %s
+                ORDER BY ft.created_at DESC
+            """, (status,))
+            rows = cur.fetchall()
+    return jsonify([{
+        "id": r["id"], "condition_text": r["condition_text"],
+        "action_text": r["action_text"], "status": r["status"],
+        "meeting_id": r["meeting_id"], "organization_id": r["organization_id"],
+        "org_name": r["org_name"], "bill_ref_id": r["bill_ref_id"],
+        "created_at": r["created_at_str"], "meeting_date": r["meeting_date"],
     } for r in rows])
 
 
@@ -1911,7 +2502,9 @@ def api_notes_intake():
         if extras:
             note_body = (note_body + "\n\n" + "\n".join(extras)).strip()
 
-    if not any([note_body, action_items_raw, reminders_raw, canvas_image]):
+    has_new_items = any(i.get("type") in ("ask", "commitment", "trigger")
+                        for i in confirmed_items)
+    if not any([note_body, action_items_raw, reminders_raw, canvas_image, has_new_items]):
         return jsonify({"ok": False, "error": "Nothing to save — add some notes or tasks"}), 400
 
     # Build body with sections the existing parser understands
@@ -1951,11 +2544,25 @@ def api_notes_intake():
             callout_source_map=callout_source_map or None,
         )
         mid_out = summary.get("id")
-        created = {"actions": 0, "followups": 0, "reminders": 0, "bills": 0}
+        created = {"actions": 0, "followups": 0, "reminders": 0,
+                   "bills": 0, "asks": 0, "commitments": 0, "triggers": 0}
 
         if mid_out:
             with get_db() as conn:
                 with conn.cursor() as cur:
+                    # Resolve or create organization for this meeting
+                    org_id_out: Optional[str] = None
+                    if note_group and note_group != "intake":
+                        org_id_out = _org_slug(note_group)
+                        cur.execute("""
+                            INSERT INTO organizations (id, name, created_at, updated_at)
+                            VALUES (%s, %s, NOW(), NOW())
+                            ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
+                        """, (org_id_out, note_group))
+                        cur.execute("""
+                            UPDATE meetings SET organization_id = %s WHERE id = %s
+                        """, (org_id_out, mid_out))
+
                     # Bill references
                     if bill_items:
                         for bill in bill_items:
@@ -1969,11 +2576,99 @@ def api_notes_intake():
                                 )
                                 created["bills"] += 1
 
-                    # Audit rows + per-type counts. Compute deterministic task_id from
-                    # filename+section+text so we can link rows back to the row we just
-                    # wrote in import_meeting_from_content.
+                    # Asks, commitments, triggers — new types
+                    ask_items_in    = [i for i in confirmed_items if i.get("type") == "ask"]
+                    commit_items_in = [i for i in confirmed_items if i.get("type") == "commitment"]
+                    trigger_items_in = [i for i in confirmed_items if i.get("type") == "trigger"]
+
+                    for item in ask_items_in:
+                        text = (item.get("text") or "").strip()
+                        if not text:
+                            continue
+                        aid = _task_id(mid_out, "ask", text)
+                        cur.execute("""
+                            INSERT INTO asks
+                                (id, meeting_id, text, organization_id, status, priority, source_excerpt)
+                            VALUES (%s, %s, %s, %s, 'logged', 'normal', %s)
+                            ON CONFLICT (id) DO NOTHING
+                        """, (aid, mid_out, text, org_id_out, text))
+                        cur.execute("""
+                            INSERT INTO meeting_scan_items
+                                (meeting_id, callout_type, text, task_id, accepted)
+                            VALUES (%s, 'ask', %s, NULL, TRUE)
+                        """, (mid_out, text))
+                        created["asks"] += 1
+
+                    for item in commit_items_in:
+                        text = (item.get("text") or "").strip()
+                        if not text:
+                            continue
+                        cid = _task_id(mid_out, "commitment", text)
+                        cur.execute("""
+                            INSERT INTO commitments
+                                (id, meeting_id, text, organization_id, status, source_excerpt)
+                            VALUES (%s, %s, %s, %s, 'open', %s)
+                            ON CONFLICT (id) DO NOTHING
+                        """, (cid, mid_out, text, org_id_out, text))
+                        # Create a task for the commitment
+                        task_tid = _task_id(mid_out, "commitment-task", text)
+                        org_ctx = f" (for {note_group})" if note_group and note_group != "intake" else ""
+                        cur.execute("""
+                            INSERT INTO tasks
+                                (id, text, type, done, backburner, meeting_id, source_filename,
+                                 section, group_name, source_date, priority, commitment_id,
+                                 organization_id, callout_source, created_at)
+                            VALUES (%s,%s,'action',FALSE,FALSE,%s,%s,'action_items',%s,%s,
+                                    'normal',%s,%s,'commitment',NOW())
+                            ON CONFLICT (id) DO NOTHING
+                        """, (
+                            task_tid, text + org_ctx, mid_out, filename,
+                            note_group or "", note_date,
+                            cid, org_id_out,
+                        ))
+                        cur.execute("""
+                            UPDATE commitments SET status='task_created', task_id=%s WHERE id=%s
+                        """, (task_tid, cid))
+                        cur.execute("""
+                            INSERT INTO meeting_scan_items
+                                (meeting_id, callout_type, text, task_id, accepted)
+                            VALUES (%s, 'commitment', %s, %s, TRUE)
+                        """, (mid_out, text, task_tid))
+                        created["commitments"] += 1
+
+                    for item in trigger_items_in:
+                        full_text = (item.get("text") or "").strip()
+                        if not full_text:
+                            continue
+                        # Split on → or -> for condition/action
+                        if "→" in full_text:
+                            parts = full_text.split("→", 1)
+                        elif "->" in full_text:
+                            parts = full_text.split("->", 1)
+                        else:
+                            parts = [full_text, ""]
+                        cond = parts[0].strip().lstrip("FU IF").lstrip("FU if").strip()
+                        action = parts[1].strip() if len(parts) > 1 else ""
+                        trig_id = _task_id(mid_out, "trigger", full_text)
+                        cur.execute("""
+                            INSERT INTO followup_triggers
+                                (id, meeting_id, condition_text, action_text,
+                                 organization_id, status)
+                            VALUES (%s, %s, %s, %s, %s, 'watching')
+                            ON CONFLICT (id) DO NOTHING
+                        """, (trig_id, mid_out, cond or full_text, action, org_id_out))
+                        cur.execute("""
+                            INSERT INTO meeting_scan_items
+                                (meeting_id, callout_type, text, task_id, accepted)
+                            VALUES (%s, 'trigger', %s, NULL, TRUE)
+                        """, (mid_out, full_text))
+                        created["triggers"] += 1
+
+                    # Audit rows + per-type counts for task/followup/important/deadline/person/bill
                     for item in confirmed_items:
                         ctype = item.get("type") or ""
+                        if ctype in ("ask", "commitment", "trigger"):
+                            continue  # already handled above
                         text = (item.get("text") or "").strip()
                         if not text:
                             continue
@@ -1993,6 +2688,12 @@ def api_notes_intake():
                                 (meeting_id, callout_type, text, task_id, accepted)
                             VALUES (%s, %s, %s, %s, TRUE)
                         """, (mid_out, ctype, text, tid))
+                    # Stamp organization_id on tasks created for this meeting
+                    if org_id_out:
+                        cur.execute("""
+                            UPDATE tasks SET organization_id = %s
+                            WHERE meeting_id = %s AND organization_id IS NULL
+                        """, (org_id_out, mid_out))
 
         return jsonify({
             "ok": True,
