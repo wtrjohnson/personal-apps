@@ -3665,15 +3665,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (li) selectMeeting(li.dataset.id);
   });
 
-  // Groups table click
-  $("#groups-body").addEventListener("click", (e) => {
-    const tr = e.target.closest("tr[data-group]");
-    if (!tr) return;
-    state.meetingFilters.group = tr.dataset.group;
-    switchTab("meetings");
-    updateRadialFilterState();
-    refreshMeetings();
-  });
 
   // Groups sub-tab toggle (Groups / Bills)
   document.querySelectorAll(".groups-subtab").forEach((btn) => {
