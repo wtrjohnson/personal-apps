@@ -204,10 +204,42 @@ async function renderHome() {
 
   _renderFocusPanel(s.top_urgency || []);
 
+  // Today's callouts summary card
+  _refreshTodayCalloutsSummary();
+
   // Daily planning: auto-open on first visit each day
   const today = new Date().toISOString().slice(0, 10);
   if (localStorage.getItem("last_plan_date") !== today && s.open_count > 0) {
     openDailyPlan();
+  }
+}
+
+async function _refreshTodayCalloutsSummary() {
+  const summaryEl = $("#today-callouts-summary");
+  const breakdownEl = $("#today-callouts-breakdown");
+  if (!summaryEl || !breakdownEl) return;
+  try {
+    const data = await api("/api/scan-items");
+    const meetings = data.meetings || [];
+    const allItems = meetings.flatMap((m) => m.items || []);
+    if (!allItems.length) {
+      summaryEl.textContent = "Nothing yet";
+      breakdownEl.innerHTML = `<span class="chip-mini">No meetings recorded today</span>`;
+      return;
+    }
+    const counts = {};
+    for (const it of allItems) {
+      counts[it.type] = (counts[it.type] || 0) + 1;
+    }
+    summaryEl.textContent = `${allItems.length} callout${allItems.length === 1 ? "" : "s"} · ${meetings.length} meeting${meetings.length === 1 ? "" : "s"}`;
+    const order = ["task", "important", "followup", "ask", "commitment", "trigger", "deadline", "person", "bill"];
+    breakdownEl.innerHTML = order
+      .filter((k) => counts[k])
+      .map((k) => `<span class="chip-mini"><strong>${counts[k]}</strong> ${_SCAN_LABELS[k] || k}</span>`)
+      .join("");
+  } catch (e) {
+    summaryEl.textContent = "—";
+    breakdownEl.innerHTML = "";
   }
 }
 
@@ -1190,6 +1222,21 @@ async function selectOrg(orgId) {
          <span class="org-meeting-topic">${escapeHtml(m.topic || m.canonical_group || "Meeting")}</span>
        </div>`).join("");
 
+    const openTasks = org.open_tasks || [];
+    const tasksHtml = openTasks.length
+      ? openTasks.map((t) => {
+          const deadline = t.deadline ? `<span class="entity-status">${escapeHtml(t.deadline)}</span>` : "";
+          const priority = t.priority === "high" ? `<span class="entity-status status-task_created">high</span>` : "";
+          return `
+            <div class="org-entity-row org-entity-row--task" data-task-id="${escapeHtml(t.id)}">
+              <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
+              <span class="entity-text">${escapeHtml(t.text)}</span>
+              ${deadline}
+              ${priority}
+            </div>`;
+        }).join("")
+      : `<p class="detail-empty-inline">No open tasks.</p>`;
+
     content.innerHTML = `
       <div class="org-detail-header">
         <h2>${escapeHtml(org.name)}</h2>
@@ -1201,6 +1248,10 @@ async function selectOrg(orgId) {
       <div class="org-detail-section">
         <div class="drawer-section-label">Open Commitments</div>
         ${commitsHtml}
+      </div>
+      <div class="org-detail-section">
+        <div class="drawer-section-label">Open Tasks</div>
+        ${tasksHtml}
       </div>
       <div class="org-detail-section">
         <div class="drawer-section-label">Bills Raised</div>
@@ -1226,6 +1277,13 @@ async function selectOrg(orgId) {
         });
         selectOrg(orgId);
         await refreshTasks();
+      });
+    });
+    content.querySelectorAll(".org-entity-row--task").forEach((row) => {
+      row.addEventListener("click", () => {
+        const taskId = row.dataset.taskId;
+        const task = openTasks.find((t) => t.id === taskId);
+        if (task) openDrawer(task);
       });
     });
   } catch {
@@ -1512,8 +1570,9 @@ async function submitImport() {
 
 // --- Canvas state ---
 let _intakeMeetingType = null;   // selected type from phase 0 picker
-let _intakeStrokes = [];         // [{color, width, points: [{x,y}]}]
+let _intakeStrokes = [];         // worker mode: [{maxY}]; fallback: [{color,width,points:[{x,y}]}]
 let _intakeCurrentStroke = null;
+let _intakeContentMaxY = 0;      // running max y of any committed stroke (worker mode)
 let _intakeTool = "pen";
 let _intakePenColor = "#111111";
 let _intakePenSize = 3;
@@ -1538,12 +1597,24 @@ function _initIntakeCanvas() {
   const dpr = window.devicePixelRatio || 1;
   const w = wrap.clientWidth || 680;
   const h = _intakeCanvasLogicalHeight;
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  canvas.style.width = w + "px";
-  canvas.style.height = h + "px";
+
   _intakeStrokes = [];
   _intakeCurrentStroke = null;
+  _intakeContentMaxY = 0;
+
+  // Reusing an existing worker: the canvas DOM element has already had
+  // transferControlToOffscreen called on it (which can only happen once per
+  // element, ever). Reset state via the worker instead of re-transferring.
+  if (_intakeWorker) {
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    _intakeWorker.postMessage({ type: "clear" });
+    _intakeWorker.postMessage({ type: "resize", width: w, height: h });
+    return;
+  }
+
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
 
   if (canvas.transferControlToOffscreen && window.Worker) {
     try {
@@ -1568,7 +1639,9 @@ function _initIntakeCanvas() {
     }
   }
 
-  // Fallback: main-thread rendering
+  // Fallback: main-thread rendering (no OffscreenCanvas / no Worker support)
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
   _intakeCtxCache = canvas.getContext("2d", { desynchronized: true });
   const ctx = _intakeCtxCache;
   ctx.scale(dpr, dpr);
@@ -1625,8 +1698,10 @@ function _intakeToggleFullscreen() {
     overlay.classList.add("hidden");
     // Shrink canvas back to content height — keeping the fullscreen size (vh*3) would leave
     // a huge physical texture that tanks compositing performance even in the modal view.
-    let contentH = 0;
-    for (const s of _intakeStrokes) for (const p of s.points) if (p.y > contentH) contentH = p.y;
+    let contentH = _intakeContentMaxY;
+    if (!_intakeWorker) {
+      for (const s of _intakeStrokes) for (const p of (s.points || [])) if (p.y > contentH) contentH = p.y;
+    }
     _intakeCanvasLogicalHeight = Math.max(contentH + 400, 1200);
     requestAnimationFrame(_intakeResizeCanvas);
   }
@@ -1721,10 +1796,13 @@ function _intakePointerDown(e) {
   const isPen = _intakeTool === "pen";
   const color = isPen ? _intakePenColor : "#ffffff";
   const width = isPen ? _intakePenSize : 24;
-  _intakeCurrentStroke = { color, width, points: [pos], lastMid: { x: pos.x, y: pos.y } };
   if (_intakeWorker) {
+    // Lightweight stroke handle — worker owns the real geometry. Track lastY
+    // for the grow-canvas check at strokeEnd.
+    _intakeCurrentStroke = { lastY: pos.y };
     _intakeWorker.postMessage({ type: "strokeStart", color, width, x: pos.x, y: pos.y });
   } else {
+    _intakeCurrentStroke = { color, width, points: [pos], lastMid: { x: pos.x, y: pos.y } };
     const ctx = _intakeCtxCache;
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
@@ -1752,21 +1830,27 @@ function _intakePointerMove(e) {
   }
   if (!_intakeCurrentStroke) return;
   const stroke = _intakeCurrentStroke;
+  const rect = _intakeStrokeRect;
   // Include all coalesced intermediate points plus the dispatched event itself
   // (Safari omits the dispatched event from getCoalescedEvents, so always append e)
-  const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
   if (_intakeWorker) {
-    const coords = [];
-    for (const ev of events) {
-      const pos = _intakePointerPos(ev);
-      coords.push(pos.x, pos.y);
-      const prev = stroke.points[stroke.points.length - 1];
-      stroke.points.push(pos);
-      stroke.lastMid.x = (prev.x + pos.x) * 0.5;
-      stroke.lastMid.y = (prev.y + pos.y) * 0.5;
+    const coalesced = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+    const n = coalesced ? coalesced.length + 1 : 1;
+    const coords = new Float32Array(n * 2);
+    let i = 0;
+    if (coalesced) {
+      for (const ev of coalesced) {
+        coords[i++] = ev.clientX - rect.left;
+        coords[i++] = ev.clientY - rect.top;
+      }
     }
-    _intakeWorker.postMessage({ type: "strokePoints", coords });
+    coords[i++] = e.clientX - rect.left;
+    coords[i++] = e.clientY - rect.top;
+    stroke.lastY = coords[i - 1];
+    // Transfer the buffer to the worker zero-copy.
+    _intakeWorker.postMessage({ type: "strokePoints", coords }, [coords.buffer]);
   } else {
+    const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
     const ctx = _intakeCtxCache;
     ctx.beginPath();
     ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
@@ -1793,14 +1877,20 @@ function _intakePointerUp(e) {
   }
   if (!_intakeCurrentStroke) return;
   e.preventDefault();
-  if (_intakeCurrentStroke.points.length > 0) {
+  if (_intakeWorker) {
+    const lastY = _intakeCurrentStroke.lastY ?? 0;
+    _intakeStrokes.push({ maxY: lastY });
+    if (lastY > _intakeContentMaxY) _intakeContentMaxY = lastY;
+    if (lastY > _intakeCanvasLogicalHeight - 400) _intakeGrowCanvas();
+    _intakeWorker.postMessage({ type: "strokeEnd" });
+  } else if (_intakeCurrentStroke.points && _intakeCurrentStroke.points.length > 0) {
     _intakeStrokes.push(_intakeCurrentStroke);
     const lastPt = _intakeCurrentStroke.points[_intakeCurrentStroke.points.length - 1];
+    if (lastPt && lastPt.y > _intakeContentMaxY) _intakeContentMaxY = lastPt.y;
     if (lastPt && lastPt.y > _intakeCanvasLogicalHeight - 400) {
       _intakeGrowCanvas();
     }
   }
-  if (_intakeWorker) _intakeWorker.postMessage({ type: "strokeEnd" });
   _intakeCurrentStroke = null;
   _intakeStrokeRect = null;
   _intakePenActiveUntil = performance.now() + 700;
@@ -1809,6 +1899,11 @@ function _intakePointerUp(e) {
 function _intakeUndo() {
   if (_intakeStrokes.length === 0) return;
   _intakeStrokes.pop();
+  _intakeContentMaxY = 0;
+  for (const s of _intakeStrokes) {
+    const y = s.maxY ?? (s.points && s.points.length ? s.points[s.points.length - 1].y : 0);
+    if (y > _intakeContentMaxY) _intakeContentMaxY = y;
+  }
   if (_intakeWorker) {
     _intakeWorker.postMessage({ type: "undo" });
   } else {
@@ -1818,6 +1913,7 @@ function _intakeUndo() {
 
 function _intakeClearCanvas() {
   _intakeStrokes = [];
+  _intakeContentMaxY = 0;
   _intakeScanResult = null;
   if (_intakeWorker) {
     _intakeWorker.postMessage({ type: "clear" });
@@ -1982,10 +2078,40 @@ function _editScanItemInline(el, idx) {
   });
 }
 
+function _editScanItemDateInline(anchorEl, idx) {
+  if (!_intakeScanResult) return;
+  const item = _intakeScanResult.items[idx];
+  const inp = document.createElement("input");
+  inp.type = "date";
+  inp.value = item.due || "";
+  inp.className = "scan-item-date-edit";
+  anchorEl.replaceWith(inp);
+  inp.focus();
+  if (inp.showPicker) { try { inp.showPicker(); } catch (_) {} }
+  let done = false;
+  function commit() {
+    if (done) return;
+    done = true;
+    item.due = inp.value || null;
+    _renderScanResults();
+  }
+  inp.addEventListener("change", commit);
+  inp.addEventListener("blur", () => setTimeout(commit, 120));
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+    if (e.key === "Escape") { done = true; _renderScanResults(); }
+  });
+}
+
 // Which callout types the user is allowed to switch between in the review queue.
 // Deadline/person/bill have distinct downstream semantics and aren't task-producing,
 // so they're not interchangeable with task/followup/important.
 const _SWITCHABLE_CALLOUT_TYPES = ["task", "followup", "important", "ask", "commitment", "trigger"];
+// Types where setting a due date downstream makes sense.
+const _DATABLE_CALLOUT_TYPES = ["task", "followup", "important", "ask", "commitment", "trigger", "deadline"];
+
+const _SCAN_PENCIL_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+const _SCAN_CALENDAR_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>';
 
 function _renderScanResults() {
   const queueEl = $("#intake-review-queue");
@@ -2000,6 +2126,7 @@ function _renderScanResults() {
 
   $("#scan-result-items").innerHTML = items.map((item, idx) => {
     const switchable = _SWITCHABLE_CALLOUT_TYPES.includes(item.type);
+    const datable = _DATABLE_CALLOUT_TYPES.includes(item.type);
     const typeControl = switchable
       ? `<select class="scan-item-type-select" data-idx="${idx}" title="Change type">
            ${_SWITCHABLE_CALLOUT_TYPES.map((k) =>
@@ -2007,32 +2134,55 @@ function _renderScanResults() {
            ).join("")}
          </select>`
       : `<div class="scan-item-type">${escapeHtml(_SCAN_LABELS[item.type] || item.type)}</div>`;
+    const dueChip = item.due
+      ? `<span class="scan-item-due-chip" data-idx="${idx}" title="Click to change">${escapeHtml(item.due)}</span>`
+      : "";
+    const dateBtn = datable
+      ? `<button class="scan-item-action" data-action="date" data-idx="${idx}" title="Set due date">${_SCAN_CALENDAR_SVG}</button>`
+      : "";
     return `
     <div class="scan-item ${item.accepted ? "scan-item--accepted" : "scan-item--dismissed"}">
       <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
       <div class="scan-item-body">
         ${typeControl}
-        <div class="scan-item-text" data-idx="${idx}">${escapeHtml(item.text)}</div>
+        <div class="scan-item-text" data-idx="${idx}" title="Click to edit">${escapeHtml(item.text)}</div>
+        ${dueChip}
       </div>
-      <button class="scan-item-dismiss" data-idx="${idx}" title="${item.accepted ? "Remove" : "Restore"}">
-        ${item.accepted ? "×" : "↩"}
-      </button>
+      <div class="scan-item-actions">
+        <button class="scan-item-action" data-action="edit" data-idx="${idx}" title="Edit text">${_SCAN_PENCIL_SVG}</button>
+        ${dateBtn}
+        <button class="scan-item-action scan-item-dismiss" data-action="dismiss" data-idx="${idx}" title="${item.accepted ? "Remove" : "Restore"}">
+          ${item.accepted ? "×" : "↩"}
+        </button>
+      </div>
     </div>`;
   }).join("");
 
-  $("#scan-result-items").querySelectorAll(".scan-item-dismiss").forEach((btn) => {
+  const itemsRoot = $("#scan-result-items");
+  itemsRoot.querySelectorAll(".scan-item-action[data-action='dismiss']").forEach((btn) => {
     btn.addEventListener("click", () => {
       const idx = +btn.dataset.idx;
       _intakeScanResult.items[idx].accepted = !_intakeScanResult.items[idx].accepted;
       _renderScanResults();
     });
   });
-
-  $("#scan-result-items").querySelectorAll(".scan-item-text[data-idx]").forEach((el) => {
+  itemsRoot.querySelectorAll(".scan-item-action[data-action='edit']").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = +btn.dataset.idx;
+      const textEl = itemsRoot.querySelector(`.scan-item-text[data-idx='${idx}']`);
+      if (textEl) _editScanItemInline(textEl, idx);
+    });
+  });
+  itemsRoot.querySelectorAll(".scan-item-action[data-action='date']").forEach((btn) => {
+    btn.addEventListener("click", () => _editScanItemDateInline(btn, +btn.dataset.idx));
+  });
+  itemsRoot.querySelectorAll(".scan-item-text[data-idx]").forEach((el) => {
     el.addEventListener("click", () => _editScanItemInline(el, +el.dataset.idx));
   });
-
-  $("#scan-result-items").querySelectorAll(".scan-item-type-select").forEach((sel) => {
+  itemsRoot.querySelectorAll(".scan-item-due-chip").forEach((chip) => {
+    chip.addEventListener("click", () => _editScanItemDateInline(chip, +chip.dataset.idx));
+  });
+  itemsRoot.querySelectorAll(".scan-item-type-select").forEach((sel) => {
     sel.addEventListener("change", () => {
       const idx = +sel.dataset.idx;
       _intakeScanResult.items[idx].type = sel.value;
@@ -2042,6 +2192,191 @@ function _renderScanResults() {
 
   $("#scan-transcription-text").textContent = text || "(empty)";
   queueEl.classList.remove("hidden");
+}
+
+// ---------- Today's Callouts modal ----------
+let _todayCalloutsDate = null;  // YYYY-MM-DD currently displayed
+let _todayCalloutsData = null;  // {date, meetings: [...]}
+
+function openTodayCalloutsModal() {
+  $("#today-callouts-backdrop").classList.remove("hidden");
+  const today = new Date().toISOString().slice(0, 10);
+  _todayCalloutsDate = today;
+  $("#today-callouts-date").value = today;
+  _loadTodayCallouts(today);
+}
+
+function closeTodayCalloutsModal() {
+  $("#today-callouts-backdrop").classList.add("hidden");
+  _todayCalloutsData = null;
+}
+
+async function _loadTodayCallouts(dateISO) {
+  const body = $("#today-callouts-body");
+  body.innerHTML = `<div class="detail-empty">Loading…</div>`;
+  try {
+    const data = await api("/api/scan-items?date=" + encodeURIComponent(dateISO));
+    _todayCalloutsData = data;
+    _todayCalloutsDate = data.date || dateISO;
+    $("#today-callouts-date").value = _todayCalloutsDate;
+    _renderTodayCallouts();
+  } catch (e) {
+    body.innerHTML = `<div class="today-callouts-empty">Couldn't load callouts.</div>`;
+  }
+}
+
+function _renderTodayCallouts() {
+  const body = $("#today-callouts-body");
+  const meetings = _todayCalloutsData?.meetings || [];
+  if (!meetings.length) {
+    body.innerHTML = `<div class="today-callouts-empty">No callouts recorded on this day.</div>`;
+    return;
+  }
+  body.innerHTML = meetings.map((m) => {
+    const itemsHtml = (m.items || []).map((item) => {
+      const switchable = _SWITCHABLE_CALLOUT_TYPES.includes(item.type);
+      const datable = _DATABLE_CALLOUT_TYPES.includes(item.type);
+      const typeControl = switchable
+        ? `<select class="scan-item-type-select" data-item-id="${item.id}" title="Change type">
+             ${_SWITCHABLE_CALLOUT_TYPES.map((k) =>
+               `<option value="${k}"${k === item.type ? " selected" : ""}>${_SCAN_LABELS[k]}</option>`
+             ).join("")}
+           </select>`
+        : `<div class="scan-item-type">${escapeHtml(_SCAN_LABELS[item.type] || item.type)}</div>`;
+      const due = item.task_deadline;
+      const dueChip = due
+        ? `<span class="scan-item-due-chip" data-item-id="${item.id}" title="Click to change">${escapeHtml(due)}</span>`
+        : "";
+      const dateBtn = datable && item.task_id
+        ? `<button class="scan-item-action" data-action="date" data-item-id="${item.id}" title="Set due date">${_SCAN_CALENDAR_SVG}</button>`
+        : "";
+      const doneCls = item.task_done ? " today-callouts-item-done" : "";
+      return `
+        <div class="scan-item scan-item--accepted${doneCls}" data-item-id="${item.id}">
+          <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
+          <div class="scan-item-body">
+            ${typeControl}
+            <div class="scan-item-text" data-item-id="${item.id}" title="Click to edit">${escapeHtml(item.text)}</div>
+            ${dueChip}
+          </div>
+          <div class="scan-item-actions">
+            <button class="scan-item-action" data-action="edit" data-item-id="${item.id}" title="Edit text">${_SCAN_PENCIL_SVG}</button>
+            ${dateBtn}
+          </div>
+        </div>`;
+    }).join("");
+    const dateLabel = m.date ? new Date(m.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
+    return `
+      <div class="today-callouts-meeting-block">
+        <div class="today-callouts-meeting-header">
+          <h3>${escapeHtml(m.topic || m.group || "Meeting")}</h3>
+          <span class="meeting-meta">${escapeHtml(m.group || "")}${dateLabel ? " · " + escapeHtml(dateLabel) : ""}</span>
+        </div>
+        ${itemsHtml}
+      </div>`;
+  }).join("");
+  _wireTodayCalloutsHandlers();
+}
+
+function _wireTodayCalloutsHandlers() {
+  const body = $("#today-callouts-body");
+  body.querySelectorAll(".scan-item-action[data-action='edit']").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const itemId = btn.dataset.itemId;
+      const textEl = body.querySelector(`.scan-item-text[data-item-id='${itemId}']`);
+      if (textEl) _editTodayCalloutText(textEl, itemId);
+    });
+  });
+  body.querySelectorAll(".scan-item-text[data-item-id]").forEach((el) => {
+    el.addEventListener("click", () => _editTodayCalloutText(el, el.dataset.itemId));
+  });
+  body.querySelectorAll(".scan-item-action[data-action='date']").forEach((btn) => {
+    btn.addEventListener("click", () => _editTodayCalloutDate(btn, btn.dataset.itemId));
+  });
+  body.querySelectorAll(".scan-item-due-chip").forEach((chip) => {
+    chip.addEventListener("click", () => _editTodayCalloutDate(chip, chip.dataset.itemId));
+  });
+  body.querySelectorAll(".scan-item-type-select").forEach((sel) => {
+    sel.addEventListener("change", async () => {
+      const itemId = sel.dataset.itemId;
+      const newType = sel.value;
+      try {
+        await api(`/api/scan-items/${itemId}/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: newType }),
+        });
+        _loadTodayCallouts(_todayCalloutsDate);
+      } catch (e) {
+        // revert dropdown visually
+        _loadTodayCallouts(_todayCalloutsDate);
+      }
+    });
+  });
+}
+
+function _editTodayCalloutText(el, itemId) {
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.value = el.textContent || "";
+  inp.className = "scan-item-edit";
+  el.replaceWith(inp);
+  inp.focus();
+  inp.select();
+  let done = false;
+  async function commit() {
+    if (done) return;
+    done = true;
+    const val = inp.value.trim();
+    if (val && val !== el.textContent) {
+      try {
+        await api(`/api/scan-items/${itemId}/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: val }),
+        });
+      } catch (_) {}
+    }
+    _loadTodayCallouts(_todayCalloutsDate);
+  }
+  inp.addEventListener("blur", commit);
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+    if (e.key === "Escape") { done = true; _renderTodayCallouts(); }
+  });
+}
+
+function _editTodayCalloutDate(anchorEl, itemId) {
+  const inp = document.createElement("input");
+  inp.type = "date";
+  inp.className = "scan-item-date-edit";
+  // pre-fill from current due chip if visible
+  const meeting = (_todayCalloutsData?.meetings || []).find((m) => (m.items || []).some((i) => String(i.id) === String(itemId)));
+  const item = meeting?.items.find((i) => String(i.id) === String(itemId));
+  if (item?.task_deadline) inp.value = item.task_deadline;
+  anchorEl.replaceWith(inp);
+  inp.focus();
+  if (inp.showPicker) { try { inp.showPicker(); } catch (_) {} }
+  let done = false;
+  async function commit() {
+    if (done) return;
+    done = true;
+    const val = inp.value || null;
+    try {
+      await api(`/api/scan-items/${itemId}/update`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ due: val }),
+      });
+    } catch (_) {}
+    _loadTodayCallouts(_todayCalloutsDate);
+  }
+  inp.addEventListener("change", commit);
+  inp.addEventListener("blur", () => setTimeout(commit, 120));
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+    if (e.key === "Escape") { done = true; _renderTodayCallouts(); }
+  });
 }
 
 // --- Business card scanning ---
@@ -2435,6 +2770,7 @@ async function _intakeSaveNotes() {
               const out = { type: i.type, text: i.text };
               if (i.billType) out.billType = i.billType;
               if (i.billNumber) out.billNumber = i.billNumber;
+              if (i.due) out.due = i.due;
               return out;
             })
           : null,
@@ -3708,6 +4044,28 @@ document.addEventListener("DOMContentLoaded", async () => {
   // No backdrop-tap-to-close: too easy to accidentally dismiss with a resting palm on iPad
   $("#intake-modal-submit").addEventListener("click", submitIntake);
 
+  // Today's Callouts modal
+  $("#today-callouts-close")?.addEventListener("click", closeTodayCalloutsModal);
+  $("#today-callouts-backdrop")?.addEventListener("click", (e) => {
+    if (e.target.id === "today-callouts-backdrop") closeTodayCalloutsModal();
+  });
+  $("#today-callouts-date")?.addEventListener("change", (e) => {
+    if (e.target.value) _loadTodayCallouts(e.target.value);
+  });
+  $("#today-callouts-prev")?.addEventListener("click", () => {
+    const d = new Date((_todayCalloutsDate || new Date().toISOString().slice(0, 10)) + "T12:00:00");
+    d.setDate(d.getDate() - 1);
+    _loadTodayCallouts(d.toISOString().slice(0, 10));
+  });
+  $("#today-callouts-next")?.addEventListener("click", () => {
+    const d = new Date((_todayCalloutsDate || new Date().toISOString().slice(0, 10)) + "T12:00:00");
+    d.setDate(d.getDate() + 1);
+    _loadTodayCallouts(d.toISOString().slice(0, 10));
+  });
+  $("#today-callouts-today-btn")?.addEventListener("click", () => {
+    _loadTodayCallouts(new Date().toISOString().slice(0, 10));
+  });
+
   // Phase 0 type picker
   $("#intake-phase0").addEventListener("click", (e) => {
     const card = e.target.closest(".intake-type-card");
@@ -3842,6 +4200,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!$("#snooze-popup").classList.contains("hidden")) { closeSnoozePopup(); return; }
       if (!$("#subtask-modal-backdrop").classList.contains("hidden")) { closeAddSubtaskModal(); return; }
       if (!$("#blocker-modal-backdrop").classList.contains("hidden")) { closeBlockerModal(); return; }
+      if (!$("#today-callouts-backdrop").classList.contains("hidden")) { closeTodayCalloutsModal(); return; }
       if ($("#search-overlay").classList.contains("open")) { closeSearchOverlay(); return; }
       if (!$("#intake-modal-backdrop").classList.contains("hidden") || !$("#intake-canvas-fs-overlay").classList.contains("hidden")) {
         if (!$("#intake-canvas-fs-overlay").classList.contains("hidden")) {

@@ -996,6 +996,16 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
                 ORDER BY MIN(br.created_at) DESC
             """, (org_id,))
             bills = [dict(r) for r in cur.fetchall()]
+            cur.execute(_TASKS_SELECT + """
+                WHERE NOT t.done AND t.organization_id = %s
+                ORDER BY
+                  CASE WHEN t.deadline IS NULL THEN 1 ELSE 0 END,
+                  t.deadline ASC,
+                  t.created_at DESC
+            """, (org_id,))
+            today_iso = date_cls.today().isoformat()
+            open_tasks = [_task_row_to_task(dict(r), today_iso).as_dict()
+                          for r in cur.fetchall()]
     return {
         "id": org_row["id"],
         "name": org_row["name"],
@@ -1007,6 +1017,7 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
         "triggers": triggers,
         "contacts": contacts_rows,
         "bills": bills,
+        "open_tasks": open_tasks,
     }
 
 
@@ -1467,6 +1478,106 @@ def api_organization_detail(org_id):
 @app.route("/api/organizations/<org_id>/brief")
 def api_organization_brief(org_id):
     return jsonify(db_get_pre_meeting_brief(org_id))
+
+
+@app.route("/api/scan-items")
+def api_scan_items_for_day():
+    """Return all callout scan items for a given date (defaults to today),
+    grouped by meeting. Each item carries linked-task status if applicable."""
+    date_str = (request.args.get("date") or "").strip()
+    try:
+        target = date_cls.fromisoformat(date_str) if date_str else date_cls.today()
+    except ValueError:
+        target = date_cls.today()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT si.id, si.meeting_id, si.callout_type, si.text,
+                       si.task_id, si.accepted,
+                       to_char(si.created_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at_str,
+                       m.topic AS meeting_topic, m.canonical_group AS meeting_group,
+                       m.organization_id, m.file_date,
+                       t.done AS task_done, t.deadline AS task_deadline,
+                       t.priority AS task_priority
+                FROM meeting_scan_items si
+                JOIN meetings m ON m.id = si.meeting_id
+                LEFT JOIN tasks t ON t.id = si.task_id
+                WHERE m.file_date = %s
+                ORDER BY m.file_date DESC, si.created_at ASC
+            """, (target,))
+            rows = [dict(r) for r in cur.fetchall()]
+    # Group by meeting
+    meetings_by_id: Dict[str, dict] = {}
+    for r in rows:
+        mid = r["meeting_id"]
+        if mid not in meetings_by_id:
+            meetings_by_id[mid] = {
+                "meeting_id": mid,
+                "topic": r.get("meeting_topic"),
+                "group": r.get("meeting_group"),
+                "organization_id": r.get("organization_id"),
+                "date": r["file_date"].isoformat() if r.get("file_date") else None,
+                "items": [],
+            }
+        meetings_by_id[mid]["items"].append({
+            "id": r["id"],
+            "type": r["callout_type"],
+            "text": r["text"],
+            "task_id": r.get("task_id"),
+            "accepted": r["accepted"],
+            "task_done": r.get("task_done"),
+            "task_deadline": r["task_deadline"].isoformat() if r.get("task_deadline") else None,
+            "task_priority": r.get("task_priority"),
+        })
+    return jsonify({
+        "date": target.isoformat(),
+        "meetings": list(meetings_by_id.values()),
+    })
+
+
+@app.route("/api/scan-items/<int:item_id>/update", methods=["POST"])
+def api_scan_item_update(item_id):
+    """Edit a scan item's text / type / due-date after the fact.
+    Propagates to the linked task (if any) so the user's task list stays in sync."""
+    data = request.get_json(force=True, silent=True) or {}
+    new_text = (data.get("text") or "").strip() or None
+    new_type = (data.get("type") or "").strip() or None
+    due_raw = data.get("due")
+    new_due = None
+    if due_raw:
+        try:
+            new_due = date_cls.fromisoformat(str(due_raw).strip())
+        except ValueError:
+            return jsonify({"ok": False, "error": "Invalid due date"}), 400
+    accepted = data.get("accepted")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM meeting_scan_items WHERE id = %s", (item_id,))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            sets, params = [], []
+            if new_text is not None:
+                sets.append("text = %s"); params.append(new_text)
+            if new_type is not None:
+                sets.append("callout_type = %s"); params.append(new_type)
+            if accepted is not None:
+                sets.append("accepted = %s"); params.append(bool(accepted))
+            if sets:
+                params.append(item_id)
+                cur.execute(f"UPDATE meeting_scan_items SET {', '.join(sets)} WHERE id = %s", params)
+            task_id = row["task_id"]
+            if task_id:
+                t_sets, t_params = [], []
+                if new_text is not None:
+                    t_sets.append("text = %s"); t_params.append(new_text)
+                if new_due is not None:
+                    t_sets.append("deadline = %s"); t_params.append(new_due)
+                if t_sets:
+                    t_params.append(task_id)
+                    cur.execute(f"UPDATE tasks SET {', '.join(t_sets)} WHERE id = %s", t_params)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/people")
@@ -2473,6 +2584,19 @@ def api_notes_intake():
     # can find what they originally wrote on the canvas.
     callout_source_map: Dict[str, str] = {}
 
+    # Map of item text -> ISO due date set in the review queue ("YYYY-MM-DD").
+    # Applied to created tasks / commitments after import.
+    due_map: Dict[str, str] = {}
+    for _item in confirmed_items:
+        _due = (_item.get("due") or "").strip()
+        _txt = (_item.get("text") or "").strip()
+        if _txt and _due:
+            try:
+                date_cls.fromisoformat(_due)  # validate
+                due_map[_txt] = _due
+            except ValueError:
+                pass
+
     # If canvas items provided, merge them into the body sections.
     # Routing: task + followup -> Action Items (type=action), important -> Reminders.
     if confirmed_items:
@@ -2605,26 +2729,27 @@ def api_notes_intake():
                         if not text:
                             continue
                         cid = _task_id(mid_out, "commitment", text)
+                        c_due = due_map.get(text)
                         cur.execute("""
                             INSERT INTO commitments
-                                (id, meeting_id, text, organization_id, status, source_excerpt)
-                            VALUES (%s, %s, %s, %s, 'open', %s)
+                                (id, meeting_id, text, organization_id, status, source_excerpt, due_date)
+                            VALUES (%s, %s, %s, %s, 'open', %s, %s)
                             ON CONFLICT (id) DO NOTHING
-                        """, (cid, mid_out, text, org_id_out, text))
+                        """, (cid, mid_out, text, org_id_out, text, c_due))
                         # Create a task for the commitment
                         task_tid = _task_id(mid_out, "commitment-task", text)
                         org_ctx = f" (for {note_group})" if note_group and note_group != "intake" else ""
                         cur.execute("""
                             INSERT INTO tasks
                                 (id, text, type, done, backburner, meeting_id, source_filename,
-                                 section, group_name, source_date, priority, commitment_id,
+                                 section, group_name, source_date, deadline, priority, commitment_id,
                                  organization_id, callout_source, created_at)
-                            VALUES (%s,%s,'action',FALSE,FALSE,%s,%s,'action_items',%s,%s,
+                            VALUES (%s,%s,'action',FALSE,FALSE,%s,%s,'action_items',%s,%s,%s,
                                     'normal',%s,%s,'commitment',NOW())
                             ON CONFLICT (id) DO NOTHING
                         """, (
                             task_tid, text + org_ctx, mid_out, filename,
-                            note_group or "", note_date,
+                            note_group or "", note_date, c_due,
                             cid, org_id_out,
                         ))
                         cur.execute("""
@@ -2695,6 +2820,15 @@ def api_notes_intake():
                             UPDATE tasks SET organization_id = %s
                             WHERE meeting_id = %s AND organization_id IS NULL
                         """, (org_id_out, mid_out))
+
+                    # Apply manually-picked due dates from the review queue to the
+                    # tasks created by the markdown import (which only auto-extracts
+                    # "due:"-style deadlines from text).
+                    for _text, _due in due_map.items():
+                        cur.execute("""
+                            UPDATE tasks SET deadline = %s
+                            WHERE meeting_id = %s AND text = %s AND deadline IS NULL
+                        """, (_due, mid_out, _text))
 
         return jsonify({
             "ok": True,
