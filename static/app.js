@@ -1688,9 +1688,11 @@ function _intakeToggleFullscreen() {
     _intakeCanvasFsParent = canvasMode.parentElement;
     overlay.appendChild(canvasMode);
     overlay.classList.remove("hidden");
-    // Give 3 screens of canvas up front so two-finger scroll is immediately useful
+    // Generous-but-not-huge canvas up front; _intakeGrowCanvas extends on demand.
+    // Keeping the bitmap modest matters a lot on iPad Safari — a giant
+    // OffscreenCanvas can defeat `desynchronized: true` and stutter pen input.
     const vh = window.visualViewport?.height ?? window.innerHeight - 110;
-    _intakeCanvasLogicalHeight = Math.max(vh * 3, _intakeCanvasLogicalHeight, 1800);
+    _intakeCanvasLogicalHeight = Math.max(vh * 1.5, _intakeCanvasLogicalHeight, 1400);
     requestAnimationFrame(_intakeResizeCanvas);
   } else {
     // Exit fullscreen: return canvas mode to modal
@@ -1849,6 +1851,21 @@ function _intakePointerMove(e) {
     stroke.lastY = coords[i - 1];
     // Transfer the buffer to the worker zero-copy.
     _intakeWorker.postMessage({ type: "strokePoints", coords }, [coords.buffer]);
+
+    // Apple Pencil predicted events: extend the live ink forward by a few
+    // frames so the stroke visibly keeps up with the pen tip. The worker
+    // snapshots/restores the predicted region so it doesn't pollute the
+    // saved strokes when real points arrive.
+    const predicted = e.getPredictedEvents ? e.getPredictedEvents() : null;
+    if (predicted && predicted.length) {
+      const pcoords = new Float32Array(predicted.length * 2);
+      let j = 0;
+      for (const pv of predicted) {
+        pcoords[j++] = pv.clientX - rect.left;
+        pcoords[j++] = pv.clientY - rect.top;
+      }
+      _intakeWorker.postMessage({ type: "strokePredicted", coords: pcoords }, [pcoords.buffer]);
+    }
   } else {
     const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
     const ctx = _intakeCtxCache;
@@ -2053,31 +2070,6 @@ const _SCAN_LABELS = {
   ask: "Ask", commitment: "Commitment", trigger: "Trigger",
 };
 
-function _editScanItemInline(el, idx) {
-  if (!_intakeScanResult) return;
-  const item = _intakeScanResult.items[idx];
-  const inp = document.createElement("input");
-  inp.type = "text";
-  inp.value = item.text;
-  inp.className = "scan-item-edit";
-  el.replaceWith(inp);
-  inp.focus();
-  inp.select();
-  let done = false;
-  function commit() {
-    if (done) return;
-    done = true;
-    const val = inp.value.trim();
-    if (val) item.text = val;
-    _renderScanResults();
-  }
-  inp.addEventListener("blur", commit);
-  inp.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
-    if (e.key === "Escape") { done = true; _renderScanResults(); }
-  });
-}
-
 function _editScanItemDateInline(anchorEl, idx) {
   if (!_intakeScanResult) return;
   const item = _intakeScanResult.items[idx];
@@ -2110,19 +2102,18 @@ const _SWITCHABLE_CALLOUT_TYPES = ["task", "followup", "important", "ask", "comm
 // Types where setting a due date downstream makes sense.
 const _DATABLE_CALLOUT_TYPES = ["task", "followup", "important", "ask", "commitment", "trigger", "deadline"];
 
-const _SCAN_PENCIL_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
 const _SCAN_CALENDAR_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>';
+const _SCAN_TRASH_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
 
 function _renderScanResults() {
   const queueEl = $("#intake-review-queue");
   if (!_intakeScanResult) { queueEl.classList.add("hidden"); return; }
 
   const { text, items } = _intakeScanResult;
-  const active = items.filter((i) => i.accepted);
 
   $("#scan-result-summary").textContent = items.length === 0
     ? "Transcribed — no callouts detected"
-    : `${active.length} of ${items.length} item${items.length !== 1 ? "s" : ""} kept`;
+    : `${items.length} item${items.length !== 1 ? "s" : ""} kept`;
 
   $("#scan-result-items").innerHTML = items.map((item, idx) => {
     const switchable = _SWITCHABLE_CALLOUT_TYPES.includes(item.type);
@@ -2141,43 +2132,42 @@ function _renderScanResults() {
       ? `<button class="scan-item-action" data-action="date" data-idx="${idx}" title="Set due date">${_SCAN_CALENDAR_SVG}</button>`
       : "";
     return `
-    <div class="scan-item ${item.accepted ? "scan-item--accepted" : "scan-item--dismissed"}">
+    <div class="scan-item scan-item--accepted">
       <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
       <div class="scan-item-body">
         ${typeControl}
-        <div class="scan-item-text" data-idx="${idx}" title="Click to edit">${escapeHtml(item.text)}</div>
+        <input type="text" class="scan-item-text-input" data-idx="${idx}" value="${escapeHtml(item.text)}">
         ${dueChip}
       </div>
       <div class="scan-item-actions">
-        <button class="scan-item-action" data-action="edit" data-idx="${idx}" title="Edit text">${_SCAN_PENCIL_SVG}</button>
         ${dateBtn}
-        <button class="scan-item-action scan-item-dismiss" data-action="dismiss" data-idx="${idx}" title="${item.accepted ? "Remove" : "Restore"}">
-          ${item.accepted ? "×" : "↩"}
-        </button>
+        <button class="scan-item-action" data-action="delete" data-idx="${idx}" title="Delete">${_SCAN_TRASH_SVG}</button>
       </div>
     </div>`;
   }).join("");
 
   const itemsRoot = $("#scan-result-items");
-  itemsRoot.querySelectorAll(".scan-item-action[data-action='dismiss']").forEach((btn) => {
+  itemsRoot.querySelectorAll(".scan-item-action[data-action='delete']").forEach((btn) => {
     btn.addEventListener("click", () => {
       const idx = +btn.dataset.idx;
-      _intakeScanResult.items[idx].accepted = !_intakeScanResult.items[idx].accepted;
+      _intakeScanResult.items.splice(idx, 1);
       _renderScanResults();
     });
   });
-  itemsRoot.querySelectorAll(".scan-item-action[data-action='edit']").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const idx = +btn.dataset.idx;
-      const textEl = itemsRoot.querySelector(`.scan-item-text[data-idx='${idx}']`);
-      if (textEl) _editScanItemInline(textEl, idx);
+  itemsRoot.querySelectorAll(".scan-item-text-input").forEach((inp) => {
+    inp.addEventListener("input", () => {
+      const idx = +inp.dataset.idx;
+      _intakeScanResult.items[idx].text = inp.value;
+    });
+    inp.addEventListener("change", () => {
+      const idx = +inp.dataset.idx;
+      _intakeScanResult.items[idx].text = inp.value;
+      $("#scan-result-summary").textContent =
+        `${_intakeScanResult.items.length} item${_intakeScanResult.items.length !== 1 ? "s" : ""} kept`;
     });
   });
   itemsRoot.querySelectorAll(".scan-item-action[data-action='date']").forEach((btn) => {
     btn.addEventListener("click", () => _editScanItemDateInline(btn, +btn.dataset.idx));
-  });
-  itemsRoot.querySelectorAll(".scan-item-text[data-idx]").forEach((el) => {
-    el.addEventListener("click", () => _editScanItemInline(el, +el.dataset.idx));
   });
   itemsRoot.querySelectorAll(".scan-item-due-chip").forEach((chip) => {
     chip.addEventListener("click", () => _editScanItemDateInline(chip, +chip.dataset.idx));
@@ -2256,12 +2246,12 @@ function _renderTodayCallouts() {
           <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
           <div class="scan-item-body">
             ${typeControl}
-            <div class="scan-item-text" data-item-id="${item.id}" title="Click to edit">${escapeHtml(item.text)}</div>
+            <input type="text" class="scan-item-text-input" data-item-id="${item.id}" value="${escapeHtml(item.text)}">
             ${dueChip}
           </div>
           <div class="scan-item-actions">
-            <button class="scan-item-action" data-action="edit" data-item-id="${item.id}" title="Edit text">${_SCAN_PENCIL_SVG}</button>
             ${dateBtn}
+            <button class="scan-item-action" data-action="delete" data-item-id="${item.id}" title="Delete">${_SCAN_TRASH_SVG}</button>
           </div>
         </div>`;
     }).join("");
@@ -2280,15 +2270,35 @@ function _renderTodayCallouts() {
 
 function _wireTodayCalloutsHandlers() {
   const body = $("#today-callouts-body");
-  body.querySelectorAll(".scan-item-action[data-action='edit']").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const itemId = btn.dataset.itemId;
-      const textEl = body.querySelector(`.scan-item-text[data-item-id='${itemId}']`);
-      if (textEl) _editTodayCalloutText(textEl, itemId);
+  body.querySelectorAll(".scan-item-text-input").forEach((inp) => {
+    const original = inp.value;
+    inp.addEventListener("change", async () => {
+      const itemId = inp.dataset.itemId;
+      const newText = inp.value.trim();
+      if (!newText || newText === original) return;
+      try {
+        await api(`/api/scan-items/${itemId}/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: newText }),
+        });
+      } catch (_) {
+        _loadTodayCallouts(_todayCalloutsDate);
+      }
     });
   });
-  body.querySelectorAll(".scan-item-text[data-item-id]").forEach((el) => {
-    el.addEventListener("click", () => _editTodayCalloutText(el, el.dataset.itemId));
+  body.querySelectorAll(".scan-item-action[data-action='delete']").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const itemId = btn.dataset.itemId;
+      btn.disabled = true;
+      try {
+        await api(`/api/scan-items/${itemId}`, { method: "DELETE" });
+        _loadTodayCallouts(_todayCalloutsDate);
+        await refreshTasks();
+      } catch (_) {
+        btn.disabled = false;
+      }
+    });
   });
   body.querySelectorAll(".scan-item-action[data-action='date']").forEach((btn) => {
     btn.addEventListener("click", () => _editTodayCalloutDate(btn, btn.dataset.itemId));
@@ -2308,41 +2318,9 @@ function _wireTodayCalloutsHandlers() {
         });
         _loadTodayCallouts(_todayCalloutsDate);
       } catch (e) {
-        // revert dropdown visually
         _loadTodayCallouts(_todayCalloutsDate);
       }
     });
-  });
-}
-
-function _editTodayCalloutText(el, itemId) {
-  const inp = document.createElement("input");
-  inp.type = "text";
-  inp.value = el.textContent || "";
-  inp.className = "scan-item-edit";
-  el.replaceWith(inp);
-  inp.focus();
-  inp.select();
-  let done = false;
-  async function commit() {
-    if (done) return;
-    done = true;
-    const val = inp.value.trim();
-    if (val && val !== el.textContent) {
-      try {
-        await api(`/api/scan-items/${itemId}/update`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: val }),
-        });
-      } catch (_) {}
-    }
-    _loadTodayCallouts(_todayCalloutsDate);
-  }
-  inp.addEventListener("blur", commit);
-  inp.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
-    if (e.key === "Escape") { done = true; _renderTodayCallouts(); }
   });
 }
 
@@ -2766,7 +2744,7 @@ async function _intakeSaveNotes() {
         meeting_type: _intakeMeetingType || null,
         purpose_val: $("#intake-purpose").value.trim() || null,
         confirmed_items: _intakeScanResult
-          ? _intakeScanResult.items.filter((i) => i.accepted).map((i) => {
+          ? _intakeScanResult.items.map((i) => {
               const out = { type: i.type, text: i.text };
               if (i.billType) out.billType = i.billType;
               if (i.billNumber) out.billNumber = i.billNumber;

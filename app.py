@@ -1580,6 +1580,21 @@ def api_scan_item_update(item_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/scan-items/<int:item_id>", methods=["DELETE"])
+def api_scan_item_delete(item_id):
+    """Delete a callout (and the task it created, if any)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT task_id FROM meeting_scan_items WHERE id = %s", (item_id,))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            if row["task_id"]:
+                cur.execute("DELETE FROM tasks WHERE id = %s", (row["task_id"],))
+            cur.execute("DELETE FROM meeting_scan_items WHERE id = %s", (item_id,))
+    return jsonify({"ok": True})
+
+
 @app.route("/api/people")
 def api_people():
     with get_db() as conn:
