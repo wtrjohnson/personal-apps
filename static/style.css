@@ -3257,7 +3257,22 @@ table.bills-table tr:last-child td { border-bottom: none; }
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
+  /* Force the canvas onto its own GPU compositor layer so pen strokes
+     don't trigger repaint of any parent (modal background, etc.) */
+  will-change: contents;
+  transform: translateZ(0);
 }
+
+/* iPad Safari pen-input fast path: avoid the modal's backdrop-filter +
+   overflow:hidden combo, which can defeat `desynchronized: true`'s
+   direct front-buffer rendering and force re-blur on every paint. */
+#intake-modal-backdrop {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(15, 23, 42, 0.55);
+}
+.modal-intake { overflow: visible; }
+.intake-canvas-scroll { contain: layout style paint; }
 
 /* Intake canvas fullscreen overlay (body-level, works on iOS Safari) */
 .intake-canvas-fs-overlay {
@@ -3410,6 +3425,16 @@ table.bills-table tr:last-child td { border-bottom: none; }
   border: none; border-bottom: 1.5px solid var(--accent);
   background: transparent; outline: none;
 }
+/* Always-visible inline editor used in the review queue + today's callouts */
+.scan-item-text-input {
+  font-size: 13.5px; color: var(--ink); line-height: 1.4;
+  width: 100%; padding: 3px 6px; margin: 2px 0 0; font-family: inherit;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent; outline: none;
+  transition: border-color 0.12s, background 0.12s;
+}
+.scan-item-text-input:hover { border-color: var(--border); }
+.scan-item-text-input:focus { border-color: var(--accent); background: var(--card); }
 
 .scan-item-actions {
   display: flex; gap: 4px; flex-shrink: 0; align-items: center;
