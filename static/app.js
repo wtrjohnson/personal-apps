@@ -1851,21 +1851,6 @@ function _intakePointerMove(e) {
     stroke.lastY = coords[i - 1];
     // Transfer the buffer to the worker zero-copy.
     _intakeWorker.postMessage({ type: "strokePoints", coords }, [coords.buffer]);
-
-    // Apple Pencil predicted events: extend the live ink forward by a few
-    // frames so the stroke visibly keeps up with the pen tip. The worker
-    // snapshots/restores the predicted region so it doesn't pollute the
-    // saved strokes when real points arrive.
-    const predicted = e.getPredictedEvents ? e.getPredictedEvents() : null;
-    if (predicted && predicted.length) {
-      const pcoords = new Float32Array(predicted.length * 2);
-      let j = 0;
-      for (const pv of predicted) {
-        pcoords[j++] = pv.clientX - rect.left;
-        pcoords[j++] = pv.clientY - rect.top;
-      }
-      _intakeWorker.postMessage({ type: "strokePredicted", coords: pcoords }, [pcoords.buffer]);
-    }
   } else {
     const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
     const ctx = _intakeCtxCache;
