@@ -1570,9 +1570,9 @@ async function submitImport() {
 
 // --- Canvas state ---
 let _intakeMeetingType = null;   // selected type from phase 0 picker
-let _intakeStrokes = [];         // worker mode: [{maxY}]; fallback: [{color,width,points:[{x,y}]}]
+let _intakeStrokes = [];         // [{color, width, points: [{x,y}]}]
 let _intakeCurrentStroke = null;
-let _intakeContentMaxY = 0;      // running max y of any committed stroke (worker mode)
+let _intakeContentMaxY = 0;      // running max y of any committed stroke
 let _intakeTool = "pen";
 let _intakePenColor = "#111111";
 let _intakePenSize = 3;
@@ -1583,10 +1583,8 @@ let _intakeActiveTouches = new Map(); // pointerId -> {x, y}
 let _intakeTouchScrollLast = null;    // {x, y} centroid for delta
 let _intakePenActiveUntil = 0;        // performance.now() ms (palm-rejection grace)
 let _intakeCanvasCache = null;        // cached element ref, set at init
-let _intakeCtxCache = null;           // cached 2d context (fallback only)
+let _intakeCtxCache = null;           // cached 2d context
 let _intakeStrokeRect = null;         // bounding rect cached per-stroke
-let _intakeWorker = null;             // OffscreenCanvas worker (null = main-thread fallback)
-let _intakeExportCallbacks = new Map(); // id → resolve fn for exportBlob promises
 
 function _intakeCanvasEl() { return _intakeCanvasCache || $("#intake-canvas"); }
 function _intakeCtx() { return _intakeCtxCache || _intakeCanvasEl().getContext("2d"); }
@@ -1602,47 +1600,14 @@ function _initIntakeCanvas() {
   _intakeCurrentStroke = null;
   _intakeContentMaxY = 0;
 
-  // Reusing an existing worker: the canvas DOM element has already had
-  // transferControlToOffscreen called on it (which can only happen once per
-  // element, ever). Reset state via the worker instead of re-transferring.
-  if (_intakeWorker) {
-    canvas.style.width = w + "px";
-    canvas.style.height = h + "px";
-    _intakeWorker.postMessage({ type: "clear" });
-    _intakeWorker.postMessage({ type: "resize", width: w, height: h });
-    return;
-  }
-
+  // Setting canvas.width also clears the bitmap, so re-opening the modal
+  // always starts on a blank canvas.
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
   canvas.style.width = w + "px";
   canvas.style.height = h + "px";
 
-  if (canvas.transferControlToOffscreen && window.Worker) {
-    try {
-      const offscreen = canvas.transferControlToOffscreen();
-      _intakeWorker = new Worker("/static/intake-canvas-worker.js");
-      _intakeWorker.onmessage = ({ data }) => {
-        if (data.type === "exportResult") {
-          const resolve = _intakeExportCallbacks.get(data.id);
-          if (resolve) {
-            _intakeExportCallbacks.delete(data.id);
-            const blob = new Blob([data.ab], { type: "image/png" });
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.readAsDataURL(blob);
-          }
-        }
-      };
-      _intakeWorker.postMessage({ type: "init", offscreen, dpr, width: w, height: h }, [offscreen]);
-      return;
-    } catch (err) {
-      _intakeWorker = null;
-    }
-  }
-
-  // Fallback: main-thread rendering (no OffscreenCanvas / no Worker support)
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  _intakeCtxCache = canvas.getContext("2d", { desynchronized: true });
+  _intakeCtxCache = canvas.getContext("2d", { desynchronized: true, alpha: false });
   const ctx = _intakeCtxCache;
   ctx.scale(dpr, dpr);
   ctx.fillStyle = "#ffffff";
@@ -1650,12 +1615,7 @@ function _initIntakeCanvas() {
 }
 
 async function _intakeExportPng() {
-  if (!_intakeWorker) return (_intakeCanvasCache || _intakeCanvasEl()).toDataURL("image/png");
-  return new Promise((resolve) => {
-    const id = performance.now() + Math.random();
-    _intakeExportCallbacks.set(id, resolve);
-    _intakeWorker.postMessage({ type: "exportBlob", id });
-  });
+  return (_intakeCanvasCache || _intakeCanvasEl()).toDataURL("image/png");
 }
 
 let _intakeCanvasFsParent = null; // tracks original parent for restore
@@ -1667,15 +1627,11 @@ function _intakeResizeCanvas() {
   const w = wrap.clientWidth || 680;
   canvas.style.width = w + "px";
   canvas.style.height = _intakeCanvasLogicalHeight + "px";
-  if (_intakeWorker) {
-    _intakeWorker.postMessage({ type: "resize", width: w, height: _intakeCanvasLogicalHeight });
-  } else {
-    canvas.width = w * dpr;
-    canvas.height = _intakeCanvasLogicalHeight * dpr;
-    const ctx = _intakeCtx();
-    ctx.scale(dpr, dpr);
-    _intakeRedraw();
-  }
+  canvas.width = w * dpr;
+  canvas.height = _intakeCanvasLogicalHeight * dpr;
+  _intakeCtxCache = canvas.getContext("2d", { desynchronized: true, alpha: false });
+  _intakeCtxCache.scale(dpr, dpr);
+  _intakeRedraw();
 }
 
 function _intakeToggleFullscreen() {
@@ -1689,8 +1645,6 @@ function _intakeToggleFullscreen() {
     overlay.appendChild(canvasMode);
     overlay.classList.remove("hidden");
     // Generous-but-not-huge canvas up front; _intakeGrowCanvas extends on demand.
-    // Keeping the bitmap modest matters a lot on iPad Safari — a giant
-    // OffscreenCanvas can defeat `desynchronized: true` and stutter pen input.
     const vh = window.visualViewport?.height ?? window.innerHeight - 110;
     _intakeCanvasLogicalHeight = Math.max(vh * 1.5, _intakeCanvasLogicalHeight, 1400);
     requestAnimationFrame(_intakeResizeCanvas);
@@ -1698,12 +1652,10 @@ function _intakeToggleFullscreen() {
     // Exit fullscreen: return canvas mode to modal
     if (_intakeCanvasFsParent) _intakeCanvasFsParent.insertBefore(canvasMode, _intakeCanvasFsParent.querySelector("#card-scan-section"));
     overlay.classList.add("hidden");
-    // Shrink canvas back to content height — keeping the fullscreen size (vh*3) would leave
-    // a huge physical texture that tanks compositing performance even in the modal view.
+    // Shrink canvas back to content height — keeping a huge physical
+    // texture wastes GPU memory and slows compositing in the modal view.
     let contentH = _intakeContentMaxY;
-    if (!_intakeWorker) {
-      for (const s of _intakeStrokes) for (const p of (s.points || [])) if (p.y > contentH) contentH = p.y;
-    }
+    for (const s of _intakeStrokes) for (const p of (s.points || [])) if (p.y > contentH) contentH = p.y;
     _intakeCanvasLogicalHeight = Math.max(contentH + 400, 1200);
     requestAnimationFrame(_intakeResizeCanvas);
   }
@@ -1711,34 +1663,30 @@ function _intakeToggleFullscreen() {
 
 function _intakeGrowCanvas() {
   const canvas = _intakeCanvasCache || _intakeCanvasEl();
+  const oldLogicalH = _intakeCanvasLogicalHeight;
   _intakeCanvasLogicalHeight += 1600;
   canvas.style.height = _intakeCanvasLogicalHeight + "px";
 
-  if (_intakeWorker) {
-    _intakeWorker.postMessage({ type: "grow", newHeight: _intakeCanvasLogicalHeight });
-  } else {
-    const ctx = _intakeCtxCache;
-    const dpr = window.devicePixelRatio || 1;
-    const oldLogicalH = _intakeCanvasLogicalHeight - 1600;
-    const tmp = document.createElement("canvas");
-    tmp.width = canvas.width;
-    tmp.height = canvas.height;
-    tmp.getContext("2d").drawImage(canvas, 0, 0);
-    canvas.height = _intakeCanvasLogicalHeight * dpr;
-    ctx.drawImage(tmp, 0, 0);
-    ctx.scale(dpr, dpr);
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, oldLogicalH, canvas.width / dpr, 1600);
-  }
+  const dpr = window.devicePixelRatio || 1;
+  const tmp = document.createElement("canvas");
+  tmp.width = canvas.width;
+  tmp.height = canvas.height;
+  tmp.getContext("2d").drawImage(canvas, 0, 0);
+  canvas.height = _intakeCanvasLogicalHeight * dpr;
+  _intakeCtxCache = canvas.getContext("2d", { desynchronized: true, alpha: false });
+  const ctx = _intakeCtxCache;
+  ctx.drawImage(tmp, 0, 0);
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, oldLogicalH, canvas.width / dpr, 1600);
 
   const scrollWrap = canvas.parentElement;
   scrollWrap.scrollTop = scrollWrap.scrollHeight;
 }
 
 function _intakeRedraw() {
-  if (_intakeWorker) return; // worker owns all rendering
   const canvas = _intakeCanvasEl();
-  const ctx = _intakeCtx();
+  const ctx = _intakeCtxCache || canvas.getContext("2d", { desynchronized: true, alpha: false });
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.width / dpr;
   const h = canvas.height / dpr;
@@ -1798,23 +1746,16 @@ function _intakePointerDown(e) {
   const isPen = _intakeTool === "pen";
   const color = isPen ? _intakePenColor : "#ffffff";
   const width = isPen ? _intakePenSize : 24;
-  if (_intakeWorker) {
-    // Lightweight stroke handle — worker owns the real geometry. Track lastY
-    // for the grow-canvas check at strokeEnd.
-    _intakeCurrentStroke = { lastY: pos.y };
-    _intakeWorker.postMessage({ type: "strokeStart", color, width, x: pos.x, y: pos.y });
-  } else {
-    _intakeCurrentStroke = { color, width, points: [pos], lastMid: { x: pos.x, y: pos.y } };
-    const ctx = _intakeCtxCache;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = width;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.beginPath();
-    ctx.arc(pos.x, pos.y, width / 2, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
-  }
+  _intakeCurrentStroke = { color, width, points: [pos], lastMid: { x: pos.x, y: pos.y } };
+  const ctx = _intakeCtxCache;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.arc(pos.x, pos.y, width / 2, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
 }
 
 function _intakePointerMove(e) {
@@ -1832,42 +1773,23 @@ function _intakePointerMove(e) {
   }
   if (!_intakeCurrentStroke) return;
   const stroke = _intakeCurrentStroke;
-  const rect = _intakeStrokeRect;
   // Include all coalesced intermediate points plus the dispatched event itself
   // (Safari omits the dispatched event from getCoalescedEvents, so always append e)
-  if (_intakeWorker) {
-    const coalesced = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
-    const n = coalesced ? coalesced.length + 1 : 1;
-    const coords = new Float32Array(n * 2);
-    let i = 0;
-    if (coalesced) {
-      for (const ev of coalesced) {
-        coords[i++] = ev.clientX - rect.left;
-        coords[i++] = ev.clientY - rect.top;
-      }
-    }
-    coords[i++] = e.clientX - rect.left;
-    coords[i++] = e.clientY - rect.top;
-    stroke.lastY = coords[i - 1];
-    // Transfer the buffer to the worker zero-copy.
-    _intakeWorker.postMessage({ type: "strokePoints", coords }, [coords.buffer]);
-  } else {
-    const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
-    const ctx = _intakeCtxCache;
-    ctx.beginPath();
-    ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
-    for (const ev of events) {
-      const pos = _intakePointerPos(ev);
-      const prev = stroke.points[stroke.points.length - 1];
-      stroke.points.push(pos);
-      const mx = (prev.x + pos.x) * 0.5;
-      const my = (prev.y + pos.y) * 0.5;
-      ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
-      stroke.lastMid.x = mx;
-      stroke.lastMid.y = my;
-    }
-    ctx.stroke();
+  const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
+  const ctx = _intakeCtxCache;
+  ctx.beginPath();
+  ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
+  for (const ev of events) {
+    const pos = _intakePointerPos(ev);
+    const prev = stroke.points[stroke.points.length - 1];
+    stroke.points.push(pos);
+    const mx = (prev.x + pos.x) * 0.5;
+    const my = (prev.y + pos.y) * 0.5;
+    ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
+    stroke.lastMid.x = mx;
+    stroke.lastMid.y = my;
   }
+  ctx.stroke();
 }
 
 function _intakePointerUp(e) {
@@ -1879,13 +1801,7 @@ function _intakePointerUp(e) {
   }
   if (!_intakeCurrentStroke) return;
   e.preventDefault();
-  if (_intakeWorker) {
-    const lastY = _intakeCurrentStroke.lastY ?? 0;
-    _intakeStrokes.push({ maxY: lastY });
-    if (lastY > _intakeContentMaxY) _intakeContentMaxY = lastY;
-    if (lastY > _intakeCanvasLogicalHeight - 400) _intakeGrowCanvas();
-    _intakeWorker.postMessage({ type: "strokeEnd" });
-  } else if (_intakeCurrentStroke.points && _intakeCurrentStroke.points.length > 0) {
+  if (_intakeCurrentStroke.points && _intakeCurrentStroke.points.length > 0) {
     _intakeStrokes.push(_intakeCurrentStroke);
     const lastPt = _intakeCurrentStroke.points[_intakeCurrentStroke.points.length - 1];
     if (lastPt && lastPt.y > _intakeContentMaxY) _intakeContentMaxY = lastPt.y;
@@ -1903,25 +1819,19 @@ function _intakeUndo() {
   _intakeStrokes.pop();
   _intakeContentMaxY = 0;
   for (const s of _intakeStrokes) {
-    const y = s.maxY ?? (s.points && s.points.length ? s.points[s.points.length - 1].y : 0);
-    if (y > _intakeContentMaxY) _intakeContentMaxY = y;
+    if (s.points && s.points.length) {
+      const y = s.points[s.points.length - 1].y;
+      if (y > _intakeContentMaxY) _intakeContentMaxY = y;
+    }
   }
-  if (_intakeWorker) {
-    _intakeWorker.postMessage({ type: "undo" });
-  } else {
-    _intakeRedraw();
-  }
+  _intakeRedraw();
 }
 
 function _intakeClearCanvas() {
   _intakeStrokes = [];
   _intakeContentMaxY = 0;
   _intakeScanResult = null;
-  if (_intakeWorker) {
-    _intakeWorker.postMessage({ type: "clear" });
-  } else {
-    _intakeRedraw();
-  }
+  _intakeRedraw();
   $("#intake-review-queue").classList.add("hidden");
 }
 
