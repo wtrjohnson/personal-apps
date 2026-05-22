@@ -50,6 +50,10 @@
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
               Write notes
             </button>
+            <button class="cta-pill ghost" id="hero-today-callouts" onclick="openTodayCalloutsModal()">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+              Today's callouts
+            </button>
           </div>
         </div>
 
@@ -116,6 +120,13 @@
             <div class="recent-stat"><strong id="recent-actions">0</strong>Open actions</div>
             <div class="recent-stat"><strong id="recent-reminders">0</strong>Open reminders</div>
           </div>
+        </div>
+
+        <div class="card card-today-callouts elevated" id="card-today-callouts">
+          <div class="card-title">Today's callouts</div>
+          <div class="today-callouts-summary" id="today-callouts-summary">—</div>
+          <div class="today-callouts-breakdown" id="today-callouts-breakdown"></div>
+          <button class="cta-pill ghost" onclick="openTodayCalloutsModal()" style="margin-top: 12px;">Review now →</button>
         </div>
       </section>
 
@@ -902,6 +913,9 @@
             <span class="callout-legend-marker">[ ]</span><span class="callout-legend-label">Task — action item</span>
             <span class="callout-legend-marker">!!</span><span class="callout-legend-label">Important — high-priority note</span>
             <span class="callout-legend-marker">??</span><span class="callout-legend-label">Follow-up — needs follow-up</span>
+            <span class="callout-legend-marker">~~</span><span class="callout-legend-label">Ask — request from a stakeholder (or "ASK …")</span>
+            <span class="callout-legend-marker">&gt;&gt;&gt;</span><span class="callout-legend-label">Commitment — what I promised (or "COMMIT …")</span>
+            <span class="callout-legend-marker">FU IF</span><span class="callout-legend-label">Trigger — follow up when condition is met</span>
             <span class="callout-legend-marker">@name</span><span class="callout-legend-label">Person — someone mentioned</span>
             <span class="callout-legend-marker">due:</span><span class="callout-legend-label">Deadline — date-bound item</span>
             <span class="callout-legend-marker">H.R. / S.</span><span class="callout-legend-label">Bill — legislative reference (e.g. H.R. 1094)</span>
@@ -937,6 +951,27 @@
 
   <!-- Intake canvas fullscreen overlay — body-level so iOS fixed positioning works -->
   <div id="intake-canvas-fs-overlay" class="intake-canvas-fs-overlay hidden"></div>
+
+  <!-- Today's Callouts modal -->
+  <div id="today-callouts-backdrop" class="modal-backdrop hidden">
+    <div class="modal modal-today-callouts" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <div class="modal-title-block">
+          <h2 id="today-callouts-title">Today's callouts</h2>
+          <div class="today-callouts-date-row">
+            <button class="linkish" id="today-callouts-prev" title="Previous day">←</button>
+            <input type="date" id="today-callouts-date" class="today-callouts-date-input">
+            <button class="linkish" id="today-callouts-next" title="Next day">→</button>
+            <button class="linkish" id="today-callouts-today-btn">Today</button>
+          </div>
+        </div>
+        <button class="modal-close" id="today-callouts-close" title="Close">✕</button>
+      </div>
+      <div class="modal-body" id="today-callouts-body">
+        <div class="detail-empty">Loading…</div>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

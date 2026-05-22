@@ -3411,11 +3411,36 @@ table.bills-table tr:last-child td { border-bottom: none; }
   background: transparent; outline: none;
 }
 
-.scan-item-dismiss {
-  background: none; border: 1px solid var(--border-strong); border-radius: var(--r-pill);
-  color: var(--muted); cursor: pointer; font-size: 14px; padding: 2px 8px; flex-shrink: 0; line-height: 1;
+.scan-item-actions {
+  display: flex; gap: 4px; flex-shrink: 0; align-items: center;
 }
-.scan-item-dismiss:hover { background: var(--card-soft); }
+.scan-item-action {
+  background: none; border: 1px solid var(--border); border-radius: var(--r-pill);
+  color: var(--muted); cursor: pointer; padding: 3px 7px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.scan-item-action:hover { color: var(--accent); border-color: var(--accent); background: var(--card-soft); }
+.scan-item-action svg { display: block; }
+
+.scan-item-dismiss {
+  font-size: 14px; padding: 2px 8px;
+}
+
+.scan-item-due-chip {
+  display: inline-block; margin-top: 2px;
+  font-size: 11px; font-weight: 600;
+  padding: 2px 7px; border-radius: var(--r-pill);
+  background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa;
+  cursor: pointer;
+}
+.scan-item-due-chip:hover { background: #ffedd5; }
+
+.scan-item-date-edit {
+  font-size: 12px; padding: 2px 6px; border: 1px solid var(--accent);
+  border-radius: var(--r-pill); background: var(--card);
+  font-family: inherit; color: var(--ink); outline: none;
+}
 
 .scan-item-type-select {
   font-size: 9.5px; text-transform: uppercase; letter-spacing: .05em;
@@ -3741,6 +3766,8 @@ table.bills-table tr:last-child td { border-bottom: none; }
   font-size: 13px; color: var(--ink);
 }
 .org-entity-row:last-child { border-bottom: none; }
+.org-entity-row--task { cursor: pointer; }
+.org-entity-row--task:hover { background: var(--surface); }
 .org-entity-text, .entity-text { flex: 1; min-width: 0; }
 .org-entity-status, .entity-status {
   padding: 2px 7px; border-radius: var(--r-pill); font-size: 10px; font-weight: 600;
@@ -3832,4 +3859,56 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .brief-label--ask { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
 .brief-label--commitment { background: #ede9fe; color: #5b21b6; border-color: #c4b5fd; }
 .brief-empty { font-size: 12px; color: var(--muted); font-style: italic; }
+
+/* Home: Today's callouts summary card */
+.card-today-callouts {}
+.today-callouts-summary {
+  font-size: 22px; font-weight: 700; color: var(--ink); margin: 2px 0 8px;
+}
+.today-callouts-breakdown {
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.today-callouts-breakdown .chip-mini {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; padding: 3px 9px; border-radius: var(--r-pill);
+  background: var(--surface); border: 1px solid var(--border); color: var(--muted);
+}
+.today-callouts-breakdown .chip-mini strong { color: var(--ink); }
+
+/* Today's callouts modal */
+.modal-today-callouts {
+  max-width: 760px; max-height: 88vh;
+  display: flex; flex-direction: column;
+}
+.modal-today-callouts .modal-title-block { display: flex; flex-direction: column; gap: 8px; }
+.modal-today-callouts .modal-body {
+  overflow-y: auto; flex: 1; padding-top: 12px;
+}
+.today-callouts-date-row {
+  display: flex; align-items: center; gap: 8px; font-size: 13px;
+}
+.today-callouts-date-input {
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 4px 8px; font: inherit; font-size: 13px;
+  background: var(--card); color: var(--ink);
+}
+.today-callouts-meeting-block {
+  margin-bottom: 18px;
+}
+.today-callouts-meeting-header {
+  display: flex; align-items: baseline; gap: 10px;
+  margin-bottom: 8px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.today-callouts-meeting-header h3 {
+  font-size: 14px; font-weight: 600; margin: 0; color: var(--ink);
+}
+.today-callouts-meeting-header .meeting-meta {
+  font-size: 12px; color: var(--muted);
+}
+.today-callouts-empty {
+  padding: 30px 10px; text-align: center; color: var(--muted); font-size: 13px;
+}
+.today-callouts-item-done { opacity: 0.55; }
+.today-callouts-item-done .scan-item-text { text-decoration: line-through; }
 
