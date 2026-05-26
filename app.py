@@ -1359,7 +1359,84 @@ def api_contacts_upsert():
     return jsonify({"ok": True, "id": cid, "name": name})
 
 
-@app.route("/api/meetings/<mid>/contacts", methods=["POST"])
+# --------------------------------------------------
+# BUSINESS CARD SCANNING (Claude Vision → structured contact fields)
+# --------------------------------------------------
+
+def _card_media_type(data_url: str) -> str:
+    if data_url.startswith("data:image/png"):
+        return "image/png"
+    if data_url.startswith("data:image/gif"):
+        return "image/gif"
+    if data_url.startswith("data:image/webp"):
+        return "image/webp"
+    return "image/jpeg"
+
+
+@app.route("/api/contacts/scan", methods=["POST"])
+def api_contacts_scan():
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return jsonify({"ok": False, "error": "Card scanning not configured"}), 503
+
+    data = request.get_json(force=True, silent=True) or {}
+    raw_image = data.get("image", "")
+    if not raw_image:
+        return jsonify({"ok": False, "error": "image required"}), 400
+
+    media_type = _card_media_type(raw_image)
+    image_data = raw_image.split(",", 1)[1] if "," in raw_image else raw_image
+
+    prompt = (
+        "Extract the contact information from this business card. "
+        "Return ONLY a JSON object with these exact keys (empty string if not found): "
+        "name, company, title, email, phone. "
+        'Example: {"name": "Jane Smith", "company": "Acme Corp", '
+        '"title": "Director", "email": "jane@acme.com", "phone": "555-1234"}'
+    )
+
+    try:
+        import anthropic as _anthropic
+        import json as _json
+        client = _anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=256,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": image_data,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        raw = message.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        fields = _json.loads(raw.strip())
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Scan failed: {e}"}), 500
+
+    return jsonify({
+        "ok":      True,
+        "name":    str(fields.get("name", "")),
+        "company": str(fields.get("company", "")),
+        "title":   str(fields.get("title", "")),
+        "email":   str(fields.get("email", "")),
+        "phone":   str(fields.get("phone", "")),
+    })
+
+
+
 def api_meeting_link_contact(mid: str):
     data = request.get_json(force=True, silent=True) or {}
     cid = (data.get("contact_id") or "").strip()
@@ -2508,59 +2585,7 @@ def api_import_notes():
 
 
 # --------------------------------------------------
-# CLAUDE VISION TRANSCRIPTION
-# --------------------------------------------------
-
-@app.route("/api/notes/transcribe", methods=["POST"])
-def api_notes_transcribe():
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return jsonify({"ok": False, "error": "Transcription not configured"}), 503
-
-    data = request.get_json(force=True, silent=True) or {}
-    image_data = data.get("image", "")
-    if not image_data:
-        return jsonify({"ok": False, "error": "image required"}), 400
-
-    if "," in image_data:
-        image_data = image_data.split(",", 1)[1]
-
-    prompt = (
-        "Transcribe all handwritten text from this image exactly as written. "
-        "Preserve line breaks — output one line of text per line of handwriting. "
-        "Return only the transcribed text, nothing else."
-    )
-
-    try:
-        import anthropic as _anthropic
-        client = _anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": image_data,
-                        },
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }],
-        )
-        text = message.content[0].text.strip()
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"Transcription failed: {e}"}), 500
-
-    return jsonify({"ok": True, "text": text})
-
-
-# --------------------------------------------------
-# HANDWRITING INTAKE (canvas image + confirmed items → meeting note)
+# INTAKE (text notes + confirmed items → meeting note)
 # --------------------------------------------------
 
 @app.route("/api/notes/intake", methods=["POST"])
