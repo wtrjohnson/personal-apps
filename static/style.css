@@ -3246,6 +3246,7 @@ table.bills-table tr:last-child td { border-bottom: none; }
   border: 1.5px solid var(--border-strong);
   border-radius: var(--r-sm);
   overscroll-behavior: contain;
+  position: relative;
 }
 
 .intake-canvas {
@@ -3259,6 +3260,19 @@ table.bills-table tr:last-child td { border-bottom: none; }
   -webkit-touch-callout: none;
   /* Force the canvas onto its own GPU compositor layer so pen strokes
      don't trigger repaint of any parent (modal background, etc.) */
+  will-change: contents;
+  transform: translateZ(0);
+}
+
+/* Predict overlay: layered above the main canvas, scrolls with it, never
+   receives pointer input. Drawn-to with getPredictedEvents() for visual lead. */
+.intake-canvas-predict {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  pointer-events: none;
+  background: transparent;
   will-change: contents;
   transform: translateZ(0);
 }
