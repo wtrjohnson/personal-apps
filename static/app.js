@@ -1781,7 +1781,7 @@ function _intakePointerDown(e) {
   const isPen = _intakeTool === "pen";
   const color = isPen ? _intakePenColor : "#ffffff";
   const width = isPen ? _intakePenSize : 24;
-  _intakeCurrentStroke = { color, width, points: [pos], lastMid: { x: pos.x, y: pos.y } };
+  _intakeCurrentStroke = { color, width, points: [pos], lastMid: { x: pos.x, y: pos.y }, pointerId: e.pointerId };
   const ctx = _intakeCtxCache;
   ctx.strokeStyle = color;
   ctx.lineWidth = width;
@@ -1807,7 +1807,9 @@ function _intakePointerMove(e) {
     }
     return;
   }
-  if (!_intakeCurrentStroke) return;
+  if (!_intakeCurrentStroke || _intakeCurrentStroke.pointerId !== e.pointerId) return;
+  // Prevent iOS Safari from starting a scroll/swipe gesture while pen is down.
+  if (e.pointerType === "pen") e.preventDefault();
   const stroke = _intakeCurrentStroke;
   // Safari omits the dispatched event from getCoalescedEvents, so always append e.
   const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
@@ -1840,7 +1842,7 @@ function _intakePointerUp(e) {
     if (_intakeActiveTouches.size < 2) _intakeTouchScrollLast = null;
     return;
   }
-  if (!_intakeCurrentStroke) return;
+  if (!_intakeCurrentStroke || _intakeCurrentStroke.pointerId !== e.pointerId) return;
   e.preventDefault();
   let needsGrow = false;
   if (_intakeCurrentStroke.points && _intakeCurrentStroke.points.length > 0) {
@@ -4092,10 +4094,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Canvas pointer + touch events
   const intakeCanvas = $("#intake-canvas");
   intakeCanvas.addEventListener("pointerdown", _intakePointerDown);
-  intakeCanvas.addEventListener("pointermove", _intakePointerMove, { passive: true });
+  intakeCanvas.addEventListener("pointermove", _intakePointerMove, { passive: false });
   intakeCanvas.addEventListener("pointerup", _intakePointerUp);
   intakeCanvas.addEventListener("pointercancel", _intakePointerUp);
-  intakeCanvas.addEventListener("lostpointercapture", _intakePointerUp);
+  // lostpointercapture is intentionally NOT wired to _intakePointerUp: on iPad
+  // with Apple Pencil (fixed pointer ID), lostpointercapture for the previous
+  // stroke fires *after* the next stroke's pointerdown, which would destroy
+  // the new stroke. pointerup + pointercancel cover all real stroke-end cases.
   intakeCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
   intakeCanvas.addEventListener("selectstart", (e) => e.preventDefault());
   // Import modal

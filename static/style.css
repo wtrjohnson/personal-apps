@@ -3237,6 +3237,8 @@ table.bills-table tr:last-child td { border-bottom: none; }
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
+  /* Prevent iOS Safari from intercepting pen gestures as app/system swipes at this level. */
+  touch-action: none;
 }
 
 /* Scrollable canvas wrapper */
@@ -3247,6 +3249,8 @@ table.bills-table tr:last-child td { border-bottom: none; }
   border-radius: var(--r-sm);
   overscroll-behavior: contain;
   position: relative;
+  /* Two-finger scroll is handled in JS; tell iOS not to use pen gestures for native scroll. */
+  touch-action: none;
 }
 
 .intake-canvas {
@@ -3272,6 +3276,7 @@ table.bills-table tr:last-child td { border-bottom: none; }
   left: 0;
   width: 100%;
   pointer-events: none;
+  touch-action: none;
   background: transparent;
   will-change: contents;
   transform: translateZ(0);
