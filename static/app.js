@@ -1566,378 +1566,11 @@ async function submitImport() {
   }
 }
 
-// ===== Handwriting Intake =====
+// ===== Intake Notes =====
 
-// --- Canvas state ---
-let _intakeMeetingType = null;   // selected type from phase 0 picker
-let _intakeStrokes = [];         // worker mode: [{maxY}]; fallback: [{color,width,points:[{x,y}]}]
-let _intakeCurrentStroke = null;
-let _intakeContentMaxY = 0;      // running max y of any committed stroke (worker mode)
-let _intakeTool = "pen";
-let _intakePenColor = "#111111";
-let _intakePenSize = 3;
+let _intakeMeetingType = null;
 let _intakeScanResult = null; // {text, items: [{type, text, accepted}]}
 let _intakeLinkedContacts = []; // [{id, name, company, title, email, phone}]
-let _intakeCanvasLogicalHeight = 1200; // grows as user writes near the bottom
-let _intakeActiveTouches = new Map(); // pointerId -> {x, y}
-let _intakeTouchScrollLast = null;    // {x, y} centroid for delta
-let _intakePenActiveUntil = 0;        // performance.now() ms (palm-rejection grace)
-let _intakeCanvasCache = null;        // cached main canvas element ref
-let _intakeCtxCache = null;           // cached main 2d context
-let _intakePredictCanvasCache = null; // cached predict overlay canvas element
-let _intakePredictCtxCache = null;    // cached predict overlay 2d context
-let _intakeStrokeRect = null;         // bounding rect cached per-stroke
-let _intakePendingGrow = false;       // defer canvas growth until current stroke ends
-
-function _intakeCanvasEl() { return _intakeCanvasCache || $("#intake-canvas"); }
-function _intakeCtx() { return _intakeCtxCache; }
-function _intakePredictEl() { return _intakePredictCanvasCache || $("#intake-canvas-predict"); }
-
-function _initIntakeCanvas() {
-  const canvas = _intakeCanvasCache = $("#intake-canvas");
-  const predict = _intakePredictCanvasCache = $("#intake-canvas-predict");
-  const wrap = canvas.parentElement;
-  const dpr = window.devicePixelRatio || 1;
-  const w = wrap.clientWidth || 680;
-  const h = _intakeCanvasLogicalHeight;
-
-  _intakeStrokes = [];
-  _intakeCurrentStroke = null;
-  _intakeContentMaxY = 0;
-  _intakePendingGrow = false;
-
-  canvas.style.width = w + "px";
-  canvas.style.height = h + "px";
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  _intakeCtxCache = canvas.getContext("2d", { desynchronized: true, alpha: false });
-  const ctx = _intakeCtxCache;
-  ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, w, h);
-
-  predict.style.width = w + "px";
-  predict.style.height = h + "px";
-  predict.width = w * dpr;
-  predict.height = h * dpr;
-  _intakePredictCtxCache = predict.getContext("2d", { desynchronized: true });
-  _intakePredictCtxCache.scale(dpr, dpr);
-}
-
-function _intakeExportPng() {
-  return (_intakeCanvasCache || _intakeCanvasEl()).toDataURL("image/png");
-}
-
-let _intakeCanvasFsParent = null; // tracks original parent for restore
-
-function _intakeResizeCanvas() {
-  const canvas = _intakeCanvasEl();
-  const predict = _intakePredictEl();
-  const dpr = window.devicePixelRatio || 1;
-  const wrap = canvas.parentElement; // .intake-canvas-scroll
-  const w = wrap.clientWidth || 680;
-  const h = _intakeCanvasLogicalHeight;
-
-  canvas.style.width = w + "px";
-  canvas.style.height = h + "px";
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  _intakeCtxCache = canvas.getContext("2d", { desynchronized: true, alpha: false });
-  _intakeCtxCache.scale(dpr, dpr);
-
-  predict.style.width = w + "px";
-  predict.style.height = h + "px";
-  predict.width = w * dpr;
-  predict.height = h * dpr;
-  _intakePredictCtxCache = predict.getContext("2d", { desynchronized: true });
-  _intakePredictCtxCache.scale(dpr, dpr);
-
-  _intakeRedraw();
-}
-
-function _intakeToggleFullscreen() {
-  const overlay = $("#intake-canvas-fs-overlay");
-  const canvasMode = $("#intake-canvas-mode");
-  const isFullscreen = !overlay.classList.contains("hidden");
-
-  if (!isFullscreen) {
-    // Enter fullscreen: move canvas mode into body-level overlay
-    _intakeCanvasFsParent = canvasMode.parentElement;
-    overlay.appendChild(canvasMode);
-    overlay.classList.remove("hidden");
-    // Generous-but-not-huge canvas up front; _intakeGrowCanvas extends on demand.
-    // Keeping the bitmap modest matters a lot on iPad Safari — a giant
-    // OffscreenCanvas can defeat `desynchronized: true` and stutter pen input.
-    const vh = window.visualViewport?.height ?? window.innerHeight - 110;
-    _intakeCanvasLogicalHeight = Math.max(vh * 1.5, _intakeCanvasLogicalHeight, 1400);
-    requestAnimationFrame(_intakeResizeCanvas);
-  } else {
-    // Exit fullscreen: return canvas mode to modal
-    if (_intakeCanvasFsParent) _intakeCanvasFsParent.insertBefore(canvasMode, _intakeCanvasFsParent.querySelector("#card-scan-section"));
-    overlay.classList.add("hidden");
-    // Shrink canvas back to content height — keeping the fullscreen size (vh*3) would leave
-    // a huge physical texture that tanks compositing performance even in the modal view.
-    let contentH = _intakeContentMaxY;
-    for (const s of _intakeStrokes) for (const p of (s.points || [])) if (p.y > contentH) contentH = p.y;
-    _intakeCanvasLogicalHeight = Math.max(contentH + 400, 1200);
-    requestAnimationFrame(_intakeResizeCanvas);
-  }
-}
-
-function _intakeGrowCanvas() {
-  // Reallocating the bitmap clears the context — never do this mid-stroke.
-  // Defer until _intakePointerUp drains _intakePendingGrow.
-  if (_intakeCurrentStroke) { _intakePendingGrow = true; return; }
-
-  const canvas = _intakeCanvasCache || _intakeCanvasEl();
-  const predict = _intakePredictCanvasCache || _intakePredictEl();
-  const dpr = window.devicePixelRatio || 1;
-  const oldLogicalH = _intakeCanvasLogicalHeight;
-  _intakeCanvasLogicalHeight += 1600;
-  canvas.style.height = _intakeCanvasLogicalHeight + "px";
-  predict.style.height = _intakeCanvasLogicalHeight + "px";
-
-  // Snapshot the committed ink, resize, and restore.
-  const tmp = document.createElement("canvas");
-  tmp.width = canvas.width;
-  tmp.height = canvas.height;
-  tmp.getContext("2d").drawImage(canvas, 0, 0);
-  canvas.height = _intakeCanvasLogicalHeight * dpr;
-  _intakeCtxCache = canvas.getContext("2d", { desynchronized: true, alpha: false });
-  const ctx = _intakeCtxCache;
-  ctx.scale(dpr, dpr);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width / dpr, _intakeCanvasLogicalHeight);
-  ctx.drawImage(tmp, 0, 0, canvas.width / dpr, oldLogicalH);
-
-  // Predict overlay just gets resized + recontext-ed; nothing to preserve.
-  predict.height = _intakeCanvasLogicalHeight * dpr;
-  _intakePredictCtxCache = predict.getContext("2d", { desynchronized: true });
-  _intakePredictCtxCache.scale(dpr, dpr);
-
-  const scrollWrap = canvas.parentElement;
-  scrollWrap.scrollTop = scrollWrap.scrollHeight;
-}
-
-function _intakeRedraw() {
-  const canvas = _intakeCanvasEl();
-  const ctx = _intakeCtx();
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.width / dpr;
-  const h = canvas.height / dpr;
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, w, h);
-  for (const stroke of _intakeStrokes) {
-    const pts = stroke.points;
-    if (pts.length < 2) continue;
-    ctx.beginPath();
-    ctx.strokeStyle = stroke.color;
-    ctx.lineWidth = stroke.width;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.moveTo((pts[0].x + pts[1].x) * 0.5, (pts[0].y + pts[1].y) * 0.5);
-    for (let i = 1; i < pts.length - 1; i++) {
-      const mid = { x: (pts[i].x + pts[i + 1].x) * 0.5, y: (pts[i].y + pts[i + 1].y) * 0.5 };
-      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mid.x, mid.y);
-    }
-    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
-    ctx.stroke();
-  }
-}
-
-function _intakePointerPos(e) {
-  const rect = _intakeStrokeRect || (_intakeCanvasCache || _intakeCanvasEl()).getBoundingClientRect();
-  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-}
-
-function _intakePenIsActive() {
-  return _intakeCurrentStroke !== null || performance.now() < _intakePenActiveUntil;
-}
-
-function _intakeTouchCentroid() {
-  let sx = 0, sy = 0, n = 0;
-  for (const p of _intakeActiveTouches.values()) {
-    sx += p.x; sy += p.y; n++;
-  }
-  return n ? { x: sx / n, y: sy / n } : null;
-}
-
-function _intakePointerDown(e) {
-  if (e.pointerType === "touch") {
-    if (_intakePenIsActive()) return;
-    (_intakeCanvasCache || _intakeCanvasEl()).setPointerCapture(e.pointerId);
-    _intakeActiveTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (_intakeActiveTouches.size >= 2) {
-      _intakeTouchScrollLast = _intakeTouchCentroid();
-    }
-    return;
-  }
-  if (e.pointerType !== "pen") return;
-  e.preventDefault();
-  const canvas = _intakeCanvasCache || _intakeCanvasEl();
-  canvas.setPointerCapture(e.pointerId);
-  _intakeStrokeRect = canvas.getBoundingClientRect();
-  const pos = _intakePointerPos(e);
-  const isPen = _intakeTool === "pen";
-  const color = isPen ? _intakePenColor : "#ffffff";
-  const width = isPen ? _intakePenSize : 24;
-  _intakeCurrentStroke = { color, width, points: [pos], lastMid: { x: pos.x, y: pos.y }, pointerId: e.pointerId };
-  const ctx = _intakeCtxCache;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = width;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.beginPath();
-  ctx.arc(pos.x, pos.y, width / 2, 0, Math.PI * 2);
-  ctx.fillStyle = color;
-  ctx.fill();
-  _intakeClearPredict();
-}
-
-function _intakePointerMove(e) {
-  if (e.pointerType === "touch") {
-    if (!_intakeActiveTouches.has(e.pointerId)) return;
-    _intakeActiveTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (_intakeActiveTouches.size >= 2 && _intakeTouchScrollLast) {
-      const cur = _intakeTouchCentroid();
-      const dy = _intakeTouchScrollLast.y - cur.y;
-      const wrap = (_intakeCanvasCache || _intakeCanvasEl()).parentElement;
-      if (wrap) wrap.scrollTop += dy;
-      _intakeTouchScrollLast = cur;
-    }
-    return;
-  }
-  if (!_intakeCurrentStroke || _intakeCurrentStroke.pointerId !== e.pointerId) return;
-  // Prevent iOS Safari from starting a scroll/swipe gesture while pen is down.
-  if (e.pointerType === "pen") e.preventDefault();
-  const stroke = _intakeCurrentStroke;
-  // Safari omits the dispatched event from getCoalescedEvents, so always append e.
-  const events = e.getCoalescedEvents ? [...e.getCoalescedEvents(), e] : [e];
-  const ctx = _intakeCtxCache;
-  ctx.beginPath();
-  ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
-  let appended = false;
-  for (const ev of events) {
-    const pos = _intakePointerPos(ev);
-    const prev = stroke.points[stroke.points.length - 1];
-    // Skip sub-pixel duplicates — kills stationary-pen jitter blobs and trims ~15% of points.
-    const dx = pos.x - prev.x, dy = pos.y - prev.y;
-    if (dx * dx + dy * dy < 0.25) continue;
-    stroke.points.push(pos);
-    const mx = (prev.x + pos.x) * 0.5;
-    const my = (prev.y + pos.y) * 0.5;
-    ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
-    stroke.lastMid.x = mx;
-    stroke.lastMid.y = my;
-    appended = true;
-  }
-  if (appended) ctx.stroke();
-  _intakeDrawPredicted(e, stroke);
-}
-
-function _intakePointerUp(e) {
-  if (e.pointerType === "touch") {
-    if (!_intakeActiveTouches.has(e.pointerId)) return;
-    _intakeActiveTouches.delete(e.pointerId);
-    if (_intakeActiveTouches.size < 2) _intakeTouchScrollLast = null;
-    return;
-  }
-  if (!_intakeCurrentStroke || _intakeCurrentStroke.pointerId !== e.pointerId) return;
-  e.preventDefault();
-  let needsGrow = false;
-  if (_intakeCurrentStroke.points && _intakeCurrentStroke.points.length > 0) {
-    _intakeStrokes.push(_intakeCurrentStroke);
-    const lastPt = _intakeCurrentStroke.points[_intakeCurrentStroke.points.length - 1];
-    if (lastPt && lastPt.y > _intakeContentMaxY) _intakeContentMaxY = lastPt.y;
-    if (lastPt && lastPt.y > _intakeCanvasLogicalHeight - 400) needsGrow = true;
-  }
-  _intakeCurrentStroke = null;
-  _intakeStrokeRect = null;
-  _intakePenActiveUntil = performance.now() + 700;
-  _intakeClearPredict();
-  if (needsGrow || _intakePendingGrow) {
-    _intakePendingGrow = false;
-    _intakeGrowCanvas();
-  }
-}
-
-function _intakeUndo() {
-  if (_intakeStrokes.length === 0) return;
-  _intakeStrokes.pop();
-  _intakeContentMaxY = 0;
-  for (const s of _intakeStrokes) {
-    const pts = s.points;
-    if (pts && pts.length) {
-      const y = pts[pts.length - 1].y;
-      if (y > _intakeContentMaxY) _intakeContentMaxY = y;
-    }
-  }
-  _intakeRedraw();
-}
-
-function _intakeClearCanvas() {
-  _intakeStrokes = [];
-  _intakeContentMaxY = 0;
-  _intakeScanResult = null;
-  _intakeRedraw();
-  _intakeClearPredict();
-  $("#intake-review-queue").classList.add("hidden");
-}
-
-function _intakeSetTool(tool) {
-  _intakeTool = tool;
-  $("#intake-tool-pen").classList.toggle("active", tool === "pen");
-  $("#intake-tool-eraser").classList.toggle("active", tool === "eraser");
-}
-
-function _intakeSetColor(color) {
-  _intakePenColor = color;
-  document.querySelectorAll(".color-swatch-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.color === color);
-  });
-}
-
-function _intakeSetSize(size) {
-  _intakePenSize = parseFloat(size);
-  document.querySelectorAll(".pen-size-btn").forEach((btn) => {
-    btn.classList.toggle("active", parseFloat(btn.dataset.size) === _intakePenSize);
-  });
-}
-
-// Predict overlay: a separate canvas layered above the main canvas. We never
-// touch the committed bitmap to render predictions, so `getImageData` (which
-// stalls a `desynchronized: true` canvas with a GPU readback) is never needed.
-function _intakeClearPredict() {
-  const ctx = _intakePredictCtxCache;
-  if (!ctx) return;
-  const canvas = _intakePredictCanvasCache;
-  const dpr = window.devicePixelRatio || 1;
-  ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
-}
-
-function _intakeDrawPredicted(e, stroke) {
-  const ctx = _intakePredictCtxCache;
-  if (!ctx) return;
-  // Always wipe last frame's prediction before drawing the new one.
-  _intakeClearPredict();
-  const predicted = e.getPredictedEvents ? e.getPredictedEvents() : null;
-  if (!predicted || predicted.length === 0) return;
-  ctx.strokeStyle = stroke.color;
-  ctx.lineWidth = stroke.width;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.beginPath();
-  ctx.moveTo(stroke.lastMid.x, stroke.lastMid.y);
-  let prev = stroke.points[stroke.points.length - 1];
-  for (const ev of predicted) {
-    const pos = _intakePointerPos(ev);
-    const mx = (prev.x + pos.x) * 0.5;
-    const my = (prev.y + pos.y) * 0.5;
-    ctx.quadraticCurveTo(prev.x, prev.y, mx, my);
-    prev = pos;
-  }
-  ctx.stroke();
-}
 
 const _BILL_RE = /\b(H\.R\.|S\.|H\.Res\.|S\.Res\.|H\.Con\.Res\.|S\.Con\.Res\.|H\.J\.Res\.|S\.J\.Res\.)\s*(\d+)\b/gi;
 
@@ -1994,42 +1627,11 @@ function _extractCallouts(text) {
   return items;
 }
 
-async function _intakeScan() {
-  const scanBtn = $("#intake-rescan-btn");
-  const scanSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>';
-
-  if (_intakeStrokes.length === 0) {
-    return;
-  }
-
-  if (scanBtn) { scanBtn.disabled = true; scanBtn.innerHTML = `${scanSvg} Transcribing…`; }
-
-  try {
-    const res = await fetch("/api/notes/transcribe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: await _intakeExportPng() }),
-    });
-    const data = await res.json();
-
-    if (!data.ok) {
-      if (scanBtn) {
-        scanBtn.innerHTML = `${scanSvg} ${escapeHtml(data.error || "Failed")}`;
-        setTimeout(() => { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Re-scan`; }, 3000);
-      }
-      return;
-    }
-
-    const items = _extractCallouts(data.text || "").map((item) => ({ ...item, accepted: true }));
-    _intakeScanResult = { text: data.text || "", items };
-    _renderScanResults();
-    if (scanBtn) { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Re-scan`; }
-  } catch (err) {
-    if (scanBtn) {
-      scanBtn.innerHTML = `${scanSvg} Error`;
-      setTimeout(() => { scanBtn.disabled = false; scanBtn.innerHTML = `${scanSvg} Re-scan`; }, 3000);
-    }
-  }
+function _intakeScan() {
+  const text = ($("#intake-notes-text").value || "").trim();
+  const items = _extractCallouts(text).map((item) => ({ ...item, accepted: true }));
+  _intakeScanResult = { text, items };
+  _renderScanResults();
 }
 
 const _SCAN_ICONS = {
@@ -2091,7 +1693,7 @@ function _renderScanResults() {
   const { text, items } = _intakeScanResult;
 
   $("#scan-result-summary").textContent = items.length === 0
-    ? "Transcribed — no callouts detected"
+    ? "Scanned — no callouts detected"
     : `${items.length} item${items.length !== 1 ? "s" : ""} kept`;
 
   $("#scan-result-items").innerHTML = items.map((item, idx) => {
@@ -2532,19 +2134,15 @@ function openIntakeModal() {
     opt.value = g;
     dl.appendChild(opt);
   });
-  _intakeSetTool("pen");
   _intakeScanResult = null;
   _intakeLinkedContacts = [];
-  _intakeCanvasLogicalHeight = 1200;
+  $("#intake-notes-text").value = "";
   $("#intake-review-queue").classList.add("hidden");
   $("#card-preview").classList.add("hidden");
   $("#card-saved-contacts").innerHTML = "";
-  requestAnimationFrame(() => _initIntakeCanvas());
 }
 
 function closeIntakeModal() {
-  // Exit fullscreen first if active
-  if (!$("#intake-canvas-fs-overlay").classList.contains("hidden")) _intakeToggleFullscreen();
   $("#intake-modal-backdrop").classList.add("hidden");
   $("#intake-modal-backdrop").classList.remove("intake-open");
   document.body.style.overflow = "";
@@ -2681,22 +2279,15 @@ function _intakeStartMeeting() {
   $("#intake-modal-submit").disabled = false;
   $("#intake-modal-cancel").textContent = "← Back";
   _intakeBuildChips();
-  requestAnimationFrame(() => _intakeResizeCanvas());
+  setTimeout(() => $("#intake-notes-text").focus(), 50);
 }
 
 async function _intakeSaveNotes() {
-  const transcription = (_intakeScanResult?.text || "").trim();
+  const transcription = (_intakeScanResult?.text || ($("#intake-notes-text").value || "")).trim();
 
-  const hasCanvasContent = _intakeStrokes.length > 0;
-
-  if (!hasCanvasContent && !transcription && !_intakeScanResult) {
-    alert("Nothing to save — draw some notes or add tasks first.");
+  if (!transcription && !_intakeScanResult) {
+    alert("Nothing to save — add some notes or tasks first.");
     return;
-  }
-
-  let canvasImage = null;
-  if (hasCanvasContent) {
-    canvasImage = await _intakeExportPng();
   }
 
   const btn = $("#intake-modal-submit");
@@ -2719,7 +2310,6 @@ async function _intakeSaveNotes() {
         body: transcription,
         action_items: "",
         reminders: "",
-        canvas_image: canvasImage,
         meeting_type: _intakeMeetingType || null,
         purpose_val: $("#intake-purpose").value.trim() || null,
         confirmed_items: _intakeScanResult
@@ -2795,45 +2385,20 @@ async function _intakeSaveNotes() {
   }
 }
 
-// Phase 2 → Phase 3 transition: run transcription, then reveal review queue
-async function _intakeFinalizeNotes() {
+// Phase 2 → Phase 3 transition: extract callouts from textarea, reveal review queue
+function _intakeFinalizeNotes() {
   const modal = $(".modal-intake");
   modal.dataset.phase = "3";
   $("#intake-modal-title").textContent = "Post-meeting";
-  const submitBtn = $("#intake-modal-submit");
-  submitBtn.textContent = "End Meeting";
-  const cancelBtn = $("#intake-modal-cancel");
-  cancelBtn.textContent = "← Back";
+  $("#intake-modal-submit").textContent = "End Meeting";
+  $("#intake-modal-cancel").textContent = "← Back";
 
-  if (_intakeStrokes.length === 0) {
-    // No drawing — skip transcription, just reveal phase 2 UI
-    return;
+  const text = ($("#intake-notes-text").value || "").trim();
+  if (text) {
+    const items = _extractCallouts(text).map((item) => ({ ...item, accepted: true }));
+    _intakeScanResult = { text, items };
+    _renderScanResults();
   }
-
-  const loadingEl = $("#intake-transcription-loading");
-  loadingEl.classList.remove("hidden");
-  submitBtn.disabled = true;
-
-  try {
-    const res = await fetch("/api/notes/transcribe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: await _intakeExportPng() }),
-    });
-    const data = await res.json();
-    loadingEl.classList.add("hidden");
-    if (data.ok) {
-      const items = _extractCallouts(data.text || "").map((item) => ({ ...item, accepted: true }));
-      _intakeScanResult = { text: data.text || "", items };
-      _renderScanResults();
-    } else {
-      _intakeScanResult = { text: "", items: [] };
-      _renderScanResults();
-    }
-  } catch (_err) {
-    loadingEl.classList.add("hidden");
-  }
-  submitBtn.disabled = false;
 }
 
 async function submitIntake() {
@@ -2842,7 +2407,7 @@ async function submitIntake() {
   if (phase === "1") {
     _intakeStartMeeting();
   } else if (phase === "2") {
-    await _intakeFinalizeNotes();
+    _intakeFinalizeNotes();
   } else {
     await _intakeSaveNotes();
   }
@@ -4068,41 +3633,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     _intakeBriefTimeout = setTimeout(_fetchIntakeBrief, 400);
   });
 
-  // Canvas toolbar
-  $("#intake-tool-pen").addEventListener("click", () => _intakeSetTool("pen"));
-  $("#intake-tool-eraser").addEventListener("click", () => _intakeSetTool("eraser"));
-  $("#intake-undo").addEventListener("click", _intakeUndo);
-  $("#intake-clear").addEventListener("click", _intakeClearCanvas);
+  // Re-scan button
   $("#intake-rescan-btn").addEventListener("click", _intakeScan);
-
-  // Fullscreen canvas toggle — only #intake-canvas-mode fills the screen
-  $("#intake-fullscreen-btn").addEventListener("click", _intakeToggleFullscreen);
-
-  document.querySelectorAll(".pen-size-btn").forEach((btn) => {
-    btn.addEventListener("click", () => _intakeSetSize(btn.dataset.size));
-  });
-  document.querySelectorAll(".color-swatch-btn").forEach((btn) => {
-    btn.addEventListener("click", () => _intakeSetColor(btn.dataset.color));
-  });
 
   // Scan result clear
   $("#review-queue-clear").addEventListener("click", () => {
     _intakeScanResult = null;
     _renderScanResults();
   });
-
-  // Canvas pointer + touch events
-  const intakeCanvas = $("#intake-canvas");
-  intakeCanvas.addEventListener("pointerdown", _intakePointerDown);
-  intakeCanvas.addEventListener("pointermove", _intakePointerMove, { passive: false });
-  intakeCanvas.addEventListener("pointerup", _intakePointerUp);
-  intakeCanvas.addEventListener("pointercancel", _intakePointerUp);
-  // lostpointercapture is intentionally NOT wired to _intakePointerUp: on iPad
-  // with Apple Pencil (fixed pointer ID), lostpointercapture for the previous
-  // stroke fires *after* the next stroke's pointerdown, which would destroy
-  // the new stroke. pointerup + pointercancel cover all real stroke-end cases.
-  intakeCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
-  intakeCanvas.addEventListener("selectstart", (e) => e.preventDefault());
   // Import modal
   $("#import-modal-close").addEventListener("click",  closeImportModal);
   $("#import-modal-cancel").addEventListener("click", closeImportModal);
@@ -4162,12 +3700,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!$("#blocker-modal-backdrop").classList.contains("hidden")) { closeBlockerModal(); return; }
       if (!$("#today-callouts-backdrop").classList.contains("hidden")) { closeTodayCalloutsModal(); return; }
       if ($("#search-overlay").classList.contains("open")) { closeSearchOverlay(); return; }
-      if (!$("#intake-modal-backdrop").classList.contains("hidden") || !$("#intake-canvas-fs-overlay").classList.contains("hidden")) {
-        if (!$("#intake-canvas-fs-overlay").classList.contains("hidden")) {
-          _intakeToggleFullscreen();
-        } else {
-          closeIntakeModal();
-        }
+      if (!$("#intake-modal-backdrop").classList.contains("hidden")) {
+        closeIntakeModal();
         return;
       }
       if (!$("#import-modal-backdrop").classList.contains("hidden"))  { closeImportModal(); return; }

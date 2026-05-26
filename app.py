@@ -2644,7 +2644,7 @@ def api_notes_intake():
 
     has_new_items = any(i.get("type") in ("ask", "commitment", "trigger")
                         for i in confirmed_items)
-    if not any([note_body, action_items_raw, reminders_raw, canvas_image, has_new_items]):
+    if not any([note_body, action_items_raw, reminders_raw, has_new_items]):
         return jsonify({"ok": False, "error": "Nothing to save — add some notes or tasks"}), 400
 
     # Build body with sections the existing parser understands

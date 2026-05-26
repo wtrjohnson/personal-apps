@@ -817,59 +817,8 @@
         <div id="intake-brief" class="intake-brief hidden"></div>
         <!-- Phase 2: meeting — metadata chips + canvas -->
         <div id="intake-meta-chips" class="intake-meta-chips"></div>
-        <!-- Canvas — always visible, sizing differs per phase -->
-        <div id="intake-canvas-mode">
-          <div class="intake-toolbar">
-            <!-- Tool -->
-            <div class="toolbar-group">
-              <button id="intake-tool-pen" class="tool-icon-btn active" title="Pen">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
-              </button>
-              <button id="intake-tool-eraser" class="tool-icon-btn" title="Eraser">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>
-              </button>
-            </div>
-            <div class="toolbar-divider"></div>
-            <!-- Size -->
-            <div class="toolbar-group" id="intake-size-btns">
-              <button class="pen-size-btn" data-size="1.5" title="Fine"><span class="pen-size-dot" style="width:4px;height:4px"></span></button>
-              <button class="pen-size-btn active" data-size="3" title="Medium"><span class="pen-size-dot" style="width:7px;height:7px"></span></button>
-              <button class="pen-size-btn" data-size="6" title="Thick"><span class="pen-size-dot" style="width:11px;height:11px"></span></button>
-              <button class="pen-size-btn" data-size="14" title="Brush"><span class="pen-size-dot" style="width:17px;height:17px"></span></button>
-            </div>
-            <div class="toolbar-divider"></div>
-            <!-- Color -->
-            <div class="toolbar-group" id="intake-color-btns">
-              <button class="color-swatch-btn active" data-color="#111111" title="Black" style="background:#111111"></button>
-              <button class="color-swatch-btn" data-color="#1a4fa0" title="Blue" style="background:#1a4fa0"></button>
-              <button class="color-swatch-btn" data-color="#d92b2b" title="Red" style="background:#d92b2b"></button>
-              <button class="color-swatch-btn" data-color="#1a8a3a" title="Green" style="background:#1a8a3a"></button>
-              <button class="color-swatch-btn" data-color="#d96c00" title="Orange" style="background:#d96c00"></button>
-              <button class="color-swatch-btn" data-color="#7c2fa0" title="Purple" style="background:#7c2fa0"></button>
-            </div>
-            <span class="toolbar-spacer"></span>
-            <!-- Actions -->
-            <div class="toolbar-group">
-              <button id="intake-undo" class="tool-icon-btn" title="Undo">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
-              </button>
-              <button id="intake-clear" class="tool-icon-btn" title="Clear canvas">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-              </button>
-              <button id="intake-fullscreen-btn" class="tool-icon-btn" title="Fullscreen canvas (Esc to exit)">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
-              </button>
-              <button id="intake-rescan-btn" class="scan-action-btn intake-phase3-only">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                Re-scan
-              </button>
-            </div>
-          </div>
-          <div class="intake-canvas-scroll">
-            <canvas id="intake-canvas" class="intake-canvas"></canvas>
-            <canvas id="intake-canvas-predict" class="intake-canvas-predict"></canvas>
-          </div>
-          <!-- Always-visible callout key, hidden in fullscreen -->
+        <!-- Phase 2: notes textarea with Apple Scribble support -->
+        <div id="intake-canvas-mode" class="intake-notes-mode">
           <div class="intake-legend-strip">
             <span class="intake-legend-item"><span class="intake-legend-sym">[ ]</span> Task</span>
             <span class="intake-legend-item"><span class="intake-legend-sym">!!</span> Important</span>
@@ -881,6 +830,12 @@
             <span class="intake-legend-item"><span class="intake-legend-sym">due:</span> Deadline</span>
             <span class="intake-legend-item"><span class="intake-legend-sym">H.R./S.</span> Bill</span>
           </div>
+          <textarea id="intake-notes-text" class="intake-notes-textarea"
+            placeholder="Type notes — or write with Apple Pencil (Scribble)&#10;&#10;[ ] task   !! important   ?? followup   ~~ ask   >>> commitment   @name   due:date"></textarea>
+          <button id="intake-rescan-btn" class="scan-action-btn intake-phase3-only">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            Re-scan
+          </button>
         </div>
         <!-- Phase 3: post-meeting only — transcription status -->
         <div id="intake-transcription-status" class="intake-transcription-status">
@@ -933,7 +888,7 @@
           </div>
           <div id="scan-result-items"></div>
           <details class="scan-transcription-details" id="scan-transcription-details">
-            <summary>Show full transcription</summary>
+            <summary>Show full notes</summary>
             <pre id="scan-transcription-text"></pre>
           </details>
         </div>
@@ -952,9 +907,6 @@
     <img id="canvas-fullscreen-img" src="" alt="Handwritten note fullscreen">
     <button id="canvas-fullscreen-close" title="Close (or triple-tap)">✕</button>
   </div>
-
-  <!-- Intake canvas fullscreen overlay — body-level so iOS fixed positioning works -->
-  <div id="intake-canvas-fs-overlay" class="intake-canvas-fs-overlay hidden"></div>
 
   <!-- Today's Callouts modal -->
   <div id="today-callouts-backdrop" class="modal-backdrop hidden">
