@@ -1054,9 +1054,16 @@ function renderDetail(m) {
   if (m.raw_group && m.raw_group !== m.group)
     meta.push(`<span style="color:var(--muted)"><em>raw: ${escapeHtml(m.raw_group)}</em></span>`);
 
-  const listOrNone = (items) =>
+  const taskById = (text, type) =>
+    (m.tasks_full || []).find((t) => t.text === text && t.type === type);
+
+  const listOrNone = (items, type) =>
     items?.length
-      ? `<ul>${items.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul>`
+      ? `<ul>${items.map((i) => {
+          const t = taskById(i, type);
+          const tid = t ? `data-task-id="${escapeHtml(t.id)}"` : "";
+          return `<li class="callout-item" ${tid}><span class="callout-item-text">${escapeHtml(i)}</span><button class="callout-edit-btn" title="Edit">✎</button></li>`;
+        }).join("")}</ul>`
       : `<p style="color:var(--muted); margin:4px 0 8px;">None</p>`;
 
   $("#detail").innerHTML = `
@@ -1079,9 +1086,9 @@ function renderDetail(m) {
     ${m.canvas_image ? `<img class="canvas-note-image" src="${m.canvas_image}" alt="Handwritten note" title="Tap to expand">` : ""}
     <div class="tasks-panel">
       <h3>Open Action Items</h3>
-      ${listOrNone(m.action_items_open)}
+      ${listOrNone(m.action_items_open, "action")}
       <h3>Open Reminders</h3>
-      ${listOrNone(m.reminders_open)}
+      ${listOrNone(m.reminders_open, "reminder")}
     </div>
     ${(m.contacts || []).length ? `
     <div class="detail-contacts">
@@ -1110,6 +1117,43 @@ function renderDetail(m) {
       const { cid, mid } = card.dataset;
       await fetch(`/api/meetings/${mid}/contacts/${cid}`, { method: "DELETE" });
       selectMeeting(mid);
+    });
+  });
+
+  $("#detail").querySelectorAll(".callout-edit-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const li = btn.closest(".callout-item");
+      const taskId = li.dataset.taskId;
+      const textSpan = li.querySelector(".callout-item-text");
+      const oldText = textSpan.textContent;
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = oldText;
+      input.className = "callout-inline-input";
+      textSpan.replaceWith(input);
+      btn.textContent = "✓";
+      btn.title = "Save";
+      input.focus();
+      input.select();
+
+      const save = async () => {
+        const newText = input.value.trim();
+        if (!newText || newText === oldText) { selectMeeting(m.id); return; }
+        const body = { new_text: newText };
+        if (taskId) body.id = taskId;
+        else body.old_text = oldText;
+        await fetch("/api/tasks/edit", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        selectMeeting(m.id);
+      };
+
+      btn.onclick = (e) => { e.stopPropagation(); save(); };
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") save();
+        if (e.key === "Escape") selectMeeting(m.id);
+      });
     });
   });
 }
@@ -1310,7 +1354,7 @@ async function selectOrg(orgId) {
       </div>`).join("");
 
     const meetingsHtml = (org.meetings || []).slice(0, 8).map((m) =>
-      `<div class="org-meeting-row">
+      `<div class="org-meeting-row org-meeting-row--link" data-mid="${escapeHtml(m.id)}">
          <span class="org-meeting-date">${escapeHtml(m.date || "—")}</span>
          <span class="org-meeting-topic">${escapeHtml(m.topic || m.canonical_group || "Meeting")}</span>
        </div>`).join("");
@@ -1377,6 +1421,12 @@ async function selectOrg(orgId) {
         const taskId = row.dataset.taskId;
         const task = openTasks.find((t) => t.id === taskId);
         if (task) openDrawer(task);
+      });
+    });
+    content.querySelectorAll(".org-meeting-row--link").forEach((row) => {
+      row.addEventListener("click", () => {
+        switchTab("meetings");
+        selectMeeting(row.dataset.mid);
       });
     });
   } catch {

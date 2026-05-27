@@ -3640,8 +3640,24 @@ table.bills-table tr:last-child td { border-bottom: none; }
   padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px;
 }
 .org-meeting-row:last-child { border-bottom: none; }
+.org-meeting-row--link { cursor: pointer; border-radius: 4px; padding: 6px 4px; }
+.org-meeting-row--link:hover { background: var(--hover); }
 .org-meeting-date { color: var(--muted); font-size: 11px; }
 .org-meeting-topic { font-size: 13px; color: var(--ink); }
+
+.callout-item { display: flex; align-items: baseline; gap: 6px; }
+.callout-item-text { flex: 1; }
+.callout-edit-btn {
+  flex-shrink: 0; background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 13px; padding: 0 2px; opacity: 0;
+  transition: opacity 0.1s;
+}
+.callout-item:hover .callout-edit-btn { opacity: 1; }
+.callout-inline-input {
+  flex: 1; font: inherit; font-size: 13px; padding: 1px 4px;
+  border: 1px solid var(--accent); border-radius: 3px; outline: none;
+  background: var(--surface);
+}
 
 .org-contact-chip {
   display: inline-flex; align-items: center; gap: 5px;
