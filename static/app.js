@@ -1355,18 +1355,50 @@ function renderOrgsTable(orgs) {
 async function selectOrg(orgId) {
   $$("#orgs-body .stakeholder-row").forEach((r) =>
     r.classList.toggle("active", r.dataset.orgId === orgId));
-  const panel = $("#org-detail-panel");
+
+  // Filter meeting list to this org
+  const label = $("#rel-meetings-label");
+  const badges = $("#rel-org-badges");
+  const orgDetail = $("#rel-org-detail");
   const content = $("#org-detail-content");
-  if (!panel || !content) return;
-  panel.classList.remove("hidden");
-  content.innerHTML = `<div class="detail-empty">Loading…</div>`;
+
+  if (!orgId) {
+    // Deselect: show all meetings
+    state.meetingFilters.group = "";
+    if (label) label.textContent = "All Meetings";
+    if (badges) badges.innerHTML = "";
+    if (orgDetail) orgDetail.classList.add("hidden");
+    refreshMeetings();
+    return;
+  }
+
+  if (label) label.textContent = "Loading…";
+  if (content) content.innerHTML = `<div class="detail-empty">Loading…</div>`;
+  if (orgDetail) orgDetail.classList.remove("hidden");
+
   try {
     const org = await api(`/api/organizations/${orgId}`);
     const openAsks = (org.asks || []).filter((a) =>
       !["completed","declined","no_action"].includes(a.status));
     const openCommits = (org.commitments || []).filter((c) =>
       ["open","needs_review","task_created"].includes(c.status));
+    const openTasks = org.open_tasks || [];
 
+    // Update meeting list header
+    if (label) label.textContent = escapeHtml(org.name);
+    if (badges) {
+      const parts = [];
+      if (openAsks.length)   parts.push(`${openAsks.length} ask${openAsks.length > 1 ? "s" : ""}`);
+      if (openCommits.length) parts.push(`${openCommits.length} commitment${openCommits.length > 1 ? "s" : ""}`);
+      if (openTasks.length)  parts.push(`${openTasks.length} task${openTasks.length > 1 ? "s" : ""}`);
+      badges.innerHTML = parts.map((p) => `<span class="rel-org-badge">${p}</span>`).join("");
+    }
+
+    // Filter meeting list to this org
+    state.meetingFilters.group = org.name;
+    refreshMeetings();
+
+    // Build org detail panel (asks / commitments / tasks / bills / contacts)
     const asksHtml = openAsks.length
       ? openAsks.map((a) => `
           <div class="org-entity-row">
@@ -1375,7 +1407,7 @@ async function selectOrg(orgId) {
             <span class="entity-status status-${a.status}">${escapeHtml(a.status.replace("_"," "))}</span>
             <button class="entity-status-btn" data-ask-id="${a.id}" data-status="completed">✓</button>
           </div>`).join("")
-      : `<p class="detail-empty-inline">No open asks.</p>`;
+      : "";
 
     const commitsHtml = openCommits.length
       ? openCommits.map((c) => `
@@ -1385,13 +1417,22 @@ async function selectOrg(orgId) {
             <span class="entity-status status-${c.status}">${escapeHtml(c.status.replace("_"," "))}</span>
             ${!c.task_id ? `<button class="create-task-btn" data-commit-id="${c.id}">+ Task</button>` : ""}
           </div>`).join("")
-      : `<p class="detail-empty-inline">No open commitments.</p>`;
+      : "";
 
-    const billsHtml = (org.bills || []).length
-      ? (org.bills || []).map((b) =>
-          `<span class="bill-pill">${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}</span>`
-        ).join("")
-      : `<span style="color:var(--muted)">None</span>`;
+    const tasksHtml = openTasks.length
+      ? openTasks.map((t) => {
+          const deadline = t.deadline ? `<span class="entity-status">${escapeHtml(t.deadline)}</span>` : "";
+          const priority = t.priority === "high" ? `<span class="entity-status status-task_created">high</span>` : "";
+          return `<div class="org-entity-row org-entity-row--task" data-task-id="${escapeHtml(t.id)}">
+            <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
+            <span class="entity-text">${escapeHtml(t.text)}</span>${deadline}${priority}
+          </div>`;
+        }).join("")
+      : "";
+
+    const billsHtml = (org.bills || []).map((b) =>
+      `<span class="bill-pill">${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}</span>`
+    ).join("");
 
     const contactsHtml = (org.contacts || []).map((c) => `
       <div class="drawer-card">
@@ -1403,53 +1444,24 @@ async function selectOrg(orgId) {
         </div>
       </div>`).join("");
 
-    const meetingsHtml = (org.meetings || []).slice(0, 8).map((m) =>
-      `<div class="org-meeting-row org-meeting-row--link" data-mid="${escapeHtml(m.id)}">
-         <span class="org-meeting-date">${escapeHtml(m.date || "—")}</span>
-         <span class="org-meeting-topic">${escapeHtml(m.topic || m.canonical_group || "Meeting")}</span>
-       </div>`).join("");
+    const sections = [
+      asksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Asks</div>${asksHtml}</div>`,
+      commitsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Commitments</div>${commitsHtml}</div>`,
+      tasksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Tasks</div>${tasksHtml}</div>`,
+      billsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Bills</div><div class="bill-pills-row">${billsHtml}</div></div>`,
+      contactsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Contacts</div><div class="drawer-cards">${contactsHtml}</div></div>`,
+    ].filter(Boolean).join("");
 
-    const openTasks = org.open_tasks || [];
-    const tasksHtml = openTasks.length
-      ? openTasks.map((t) => {
-          const deadline = t.deadline ? `<span class="entity-status">${escapeHtml(t.deadline)}</span>` : "";
-          const priority = t.priority === "high" ? `<span class="entity-status status-task_created">high</span>` : "";
-          return `
-            <div class="org-entity-row org-entity-row--task" data-task-id="${escapeHtml(t.id)}">
-              <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
-              <span class="entity-text">${escapeHtml(t.text)}</span>
-              ${deadline}
-              ${priority}
-            </div>`;
-        }).join("")
-      : `<p class="detail-empty-inline">No open tasks.</p>`;
+    if (content) {
+      if (sections) {
+        content.innerHTML = sections;
+      } else {
+        orgDetail.classList.add("hidden");
+      }
+    }
 
-    content.innerHTML = `
-      <div class="org-detail-header">
-        <h2>${escapeHtml(org.name)}</h2>
-      </div>
-      <div class="org-detail-section">
-        <div class="drawer-section-label">Open Asks</div>
-        ${asksHtml}
-      </div>
-      <div class="org-detail-section">
-        <div class="drawer-section-label">Open Commitments</div>
-        ${commitsHtml}
-      </div>
-      <div class="org-detail-section">
-        <div class="drawer-section-label">Open Tasks</div>
-        ${tasksHtml}
-      </div>
-      <div class="org-detail-section">
-        <div class="drawer-section-label">Bills Raised</div>
-        <div class="bill-pills-row">${billsHtml}</div>
-      </div>
-      ${contactsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Contacts</div><div class="drawer-cards">${contactsHtml}</div></div>` : ""}
-      ${meetingsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Meeting History</div>${meetingsHtml}</div>` : ""}
-    `;
-
-    // Wire status change buttons
-    content.querySelectorAll(".entity-status-btn").forEach((btn) => {
+    // Wire interactive buttons
+    content?.querySelectorAll(".entity-status-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
         await api(`/api/asks/${btn.dataset.askId}/status`, {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: btn.dataset.status }),
@@ -1457,7 +1469,7 @@ async function selectOrg(orgId) {
         selectOrg(orgId);
       });
     });
-    content.querySelectorAll(".create-task-btn").forEach((btn) => {
+    content?.querySelectorAll(".create-task-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
         await api(`/api/commitments/${btn.dataset.commitId}/create-task`, {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
@@ -1466,21 +1478,14 @@ async function selectOrg(orgId) {
         await refreshTasks();
       });
     });
-    content.querySelectorAll(".org-entity-row--task").forEach((row) => {
+    content?.querySelectorAll(".org-entity-row--task").forEach((row) => {
       row.addEventListener("click", () => {
-        const taskId = row.dataset.taskId;
-        const task = openTasks.find((t) => t.id === taskId);
+        const task = openTasks.find((t) => t.id === row.dataset.taskId);
         if (task) openDrawer(task);
       });
     });
-    content.querySelectorAll(".org-meeting-row--link").forEach((row) => {
-      row.addEventListener("click", () => {
-        switchTab("meetings");
-        selectMeeting(row.dataset.mid);
-      });
-    });
   } catch {
-    content.innerHTML = `<div class="detail-empty">Couldn't load organization.</div>`;
+    if (content) content.innerHTML = `<div class="detail-empty">Couldn't load organization.</div>`;
   }
 }
 
@@ -1548,7 +1553,7 @@ async function selectPerson(contactId) {
 }
 
 // ---------- Radial menu ----------
-const TRIG_CX = 35;   // trigger center x in view-meetings coords (14 + 21)
+const TRIG_CX = 35;   // trigger center x in view-groups coords (14 + 21)
 const TRIG_CY = 35;   // trigger center y
 const MAIN_RADIUS = 138; // needs ≥138px for 44px circles at 20° steps with 4px gap
 const SUB_RADIUS  = 95;
@@ -2490,7 +2495,7 @@ async function _intakeSaveNotes() {
       resultEl.innerHTML = `<strong>Saved!</strong> ${chips}
         <button class="intake-view-btn" id="intake-view-meeting">View note →</button>`;
       $("#intake-view-meeting").addEventListener("click", () => {
-        switchTab("meetings");
+        switchTab("groups");
         closeIntakeModal();
       });
       await refreshMeetings();
@@ -2582,7 +2587,7 @@ function renderBillsTable(bills) {
   }).join("");
   tbody.querySelectorAll(".bill-meeting-link").forEach((btn) => {
     btn.addEventListener("click", () => {
-      switchTab("meetings");
+      switchTab("groups");
       selectMeeting(btn.dataset.meetingId);
     });
   });
@@ -2601,6 +2606,18 @@ async function loadGroups() {
 
 async function selectMeeting(id) {
   state.selectedMeetingId = id;
+  // If meeting isn't in the current filtered list, clear the org filter so it appears
+  if (id && !state.meetings.find((m) => m.id === id)) {
+    state.meetingFilters.group = "";
+    $$("#orgs-body .stakeholder-row").forEach((r) => r.classList.remove("active"));
+    const label = $("#rel-meetings-label");
+    const badges = $("#rel-org-badges");
+    const orgDetail = $("#rel-org-detail");
+    if (label) label.textContent = "All Meetings";
+    if (badges) badges.innerHTML = "";
+    if (orgDetail) orgDetail.classList.add("hidden");
+    await refreshMeetings();
+  }
   $$("#meetings li").forEach((li) => li.classList.toggle("active", id && li.dataset.id === id));
   if (!id) { renderDetail(null); return; }
   const m = await api(`/api/meetings/${id}`);
@@ -2627,15 +2644,13 @@ function switchTab(tab) {
 
   const input = $("#q");
   if (input) input.placeholder = tab === "tasks" ? "Search tasks…"
-    : tab === "meetings" ? "Search notes…"
-    : tab === "groups" ? "Search groups…"
+    : tab === "groups" ? "Search notes…"
     : "Search…";
 
-  if (tab === "home")     renderHome();
-  if (tab === "groups")   loadGroups();
-  if (tab === "meetings" && !state.meetings.length) refreshMeetings();
-  if (tab === "tasks")    refreshTasks();
-  if (tab === "smart")    loadSmartView(state.smartView);
+  if (tab === "home")   renderHome();
+  if (tab === "groups") { loadGroups(); if (!state.meetings.length) refreshMeetings(); }
+  if (tab === "tasks")  refreshTasks();
+  if (tab === "smart")  loadSmartView(state.smartView);
 }
 
 // ---------- Search overlay ----------
@@ -2856,7 +2871,7 @@ function _renderFocusModeCurrent() {
 const CMD_STATIC = [
   { label: "Go to Home",        icon: "🏠", action: () => { closeCommandPalette(); switchTab("home"); } },
   { label: "Go to Tasks",       icon: "✓",  action: () => { closeCommandPalette(); switchTab("tasks"); } },
-  { label: "Go to Meetings",    icon: "📅", action: () => { closeCommandPalette(); switchTab("meetings"); } },
+  { label: "Go to Relationships", icon: "🤝", action: () => { closeCommandPalette(); switchTab("groups"); } },
   { label: "Go to Smart Views", icon: "⚡", action: () => { closeCommandPalette(); switchTab("smart"); } },
   { label: "Add new task",      icon: "+",  action: () => { closeCommandPalette(); openNLModal(); } },
   { label: "Focus Mode",        icon: "🎯", action: () => { closeCommandPalette(); openFocusMode(state.stats?.top_urgency?.[0]); } },
@@ -3110,7 +3125,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Global search
   $("#q").addEventListener("input", () => {
     if (state.tab === "tasks") refreshTasksDebounced();
-    else if (state.tab === "meetings") refreshMeetingsDebounced();
+    else if (state.tab === "groups") refreshMeetingsDebounced();
   });
 
   // Tasks filters
@@ -3209,7 +3224,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const mid = link.dataset.mid;
     if (!mid) return;
     closeDrawer();
-    switchTab("meetings");
+    switchTab("groups");
     await refreshMeetings();
     await selectMeeting(mid);
   });
@@ -3285,7 +3300,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#recent-meeting-card").addEventListener("click", async () => {
     const mid = $("#recent-meeting-card").dataset.meetingId;
     if (!mid) return;
-    switchTab("meetings");
+    switchTab("groups");
     await refreshMeetings();
     await selectMeeting(mid);
   });
@@ -3657,7 +3672,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
 
-  // Groups sub-tab toggle (Groups / Bills)
+  // Groups sub-tab toggle
   document.querySelectorAll(".groups-subtab").forEach((btn) => {
     btn.addEventListener("click", () => {
       document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
@@ -3665,6 +3680,18 @@ document.addEventListener("DOMContentLoaded", async () => {
       const subtab = btn.dataset.subtab;
       document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
       $(`#groups-panel-${subtab}`).classList.remove("hidden");
+      // Clear org filter when leaving orgs subtab
+      if (subtab !== "orgs") {
+        $$("#orgs-body .stakeholder-row").forEach((r) => r.classList.remove("active"));
+        state.meetingFilters.group = "";
+        const label = $("#rel-meetings-label");
+        const badges = $("#rel-org-badges");
+        const orgDetail = $("#rel-org-detail");
+        if (label) label.textContent = "All Meetings";
+        if (badges) badges.innerHTML = "";
+        if (orgDetail) orgDetail.classList.add("hidden");
+        refreshMeetings();
+      }
     });
   });
 
@@ -3871,9 +3898,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.key === "/") { e.preventDefault(); openSearchOverlay(); return; }
     if (e.key === "1") { e.preventDefault(); switchTab("home"); return; }
     if (e.key === "2") { e.preventDefault(); switchTab("tasks"); return; }
-    if (e.key === "3") { e.preventDefault(); switchTab("meetings"); return; }
-    if (e.key === "4") { e.preventDefault(); switchTab("groups"); return; }
-    if (e.key === "5") { e.preventDefault(); switchTab("smart"); return; }
+    if (e.key === "3") { e.preventDefault(); switchTab("groups"); return; }
+    if (e.key === "4") { e.preventDefault(); switchTab("smart"); return; }
     if (e.key === "f") { e.preventDefault(); openFocusMode(state.stats?.top_urgency?.[0]); return; }
     if (e.key === "w") { e.preventDefault(); openIntakeModal(); return; }
 
@@ -3902,7 +3928,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         e.preventDefault();
         openNLModal();
       }
-    } else if (state.tab === "meetings") {
+    } else if (state.tab === "groups") {
       if ((e.key === "j" || e.key === "k") && state.meetings.length) {
         e.preventDefault();
         const ids = state.meetings.map((m) => m.id);

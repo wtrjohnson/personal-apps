@@ -226,23 +226,17 @@
         </div>
       </section>
 
-      <!-- MEETINGS -->
-      <section class="view" id="view-meetings">
+      <!-- RELATIONSHIPS (merged meetings + groups) -->
+      <section class="view" id="view-groups">
 
-        <!-- Floating radial menu -->
+        <!-- Floating radial filter menu (position: absolute within this view) -->
         <div class="radial-root" id="radial-root">
-
-          <!-- Trigger button -->
           <button class="radial-trigger" id="radial-trigger" aria-label="Filters &amp; Import" title="Filters &amp; Import">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
               <line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="10" y1="18" x2="14" y2="18"/>
             </svg>
           </button>
-
-          <!-- Clear-all badge: hidden until filters are active -->
           <button class="radial-clear-btn" id="radial-clear-btn" hidden title="Clear all filters">×</button>
-
-          <!-- Main ring: 6 items (positions set by JS) -->
           <button class="radial-item" data-radial="group" data-label="Group">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.2"/><path d="M2.8 19.5c.8-3.2 3.3-5 6.2-5s5.4 1.8 6.2 5"/><circle cx="17" cy="8" r="2.5"/><path d="M15 13.5c2.5 0 4.4 1.3 5.2 4"/></svg>
           </button>
@@ -261,104 +255,99 @@
           <button class="radial-item" data-radial="import" data-label="Import notes">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           </button>
-
-          <!-- Sub-rings (populated dynamically by JS) -->
           <div class="radial-sub-ring" id="rsub-group"></div>
           <div class="radial-sub-ring" id="rsub-purpose"></div>
-
-          <!-- Attendee popup -->
           <div class="radial-popup" id="rpop-attendee">
             <div class="rpop-label">Filter by attendee</div>
             <input id="rpop-attendee-input" type="text" placeholder="Search by name…" autocomplete="off">
           </div>
-
-          <!-- Date popup -->
           <div class="radial-popup" id="rpop-date">
             <div class="rpop-date-grid">
               <label>From</label><input id="rpop-date-from" type="date">
               <label>To</label><input id="rpop-date-to" type="date">
             </div>
           </div>
-
         </div>
 
-        <!-- Meeting list + detail (fills full height) -->
-        <div class="meetings-body">
-          <div class="list-card">
+        <!-- 3-column layout -->
+        <div class="rel-layout">
+
+          <!-- Column 1: Org / People / Bills list -->
+          <div class="rel-col-list">
+            <div class="groups-subtabs-bar">
+              <button class="groups-subtab active" data-subtab="orgs">Organizations</button>
+              <button class="groups-subtab" data-subtab="people">People</button>
+              <button class="groups-subtab" data-subtab="bills">Bills</button>
+            </div>
+            <div class="groups-panel rel-list-panel" id="groups-panel-orgs">
+              <table class="groups">
+                <thead>
+                  <tr>
+                    <th>Organization</th>
+                    <th class="num">Meetings</th>
+                    <th>Last met</th>
+                    <th class="num">Asks</th>
+                    <th class="num">Commits</th>
+                    <th class="num">Tasks</th>
+                  </tr>
+                </thead>
+                <tbody id="orgs-body"></tbody>
+              </table>
+            </div>
+            <div class="groups-panel rel-list-panel hidden" id="groups-panel-people">
+              <div class="stakeholders-layout">
+                <div class="stakeholders-list">
+                  <table class="groups">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Organization</th>
+                        <th>Last seen</th>
+                        <th class="num">Meetings</th>
+                      </tr>
+                    </thead>
+                    <tbody id="people-body"></tbody>
+                  </table>
+                </div>
+                <div class="stakeholders-detail hidden" id="person-detail-panel">
+                  <div id="person-detail-content"></div>
+                </div>
+              </div>
+            </div>
+            <div class="groups-panel rel-list-panel hidden" id="groups-panel-bills">
+              <div class="groups-wrap">
+                <table class="bills-table">
+                  <thead>
+                    <tr>
+                      <th>Bill</th>
+                      <th>Meetings Referenced</th>
+                      <th>Organizations</th>
+                      <th>Last Seen</th>
+                    </tr>
+                  </thead>
+                  <tbody id="bills-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Column 2: Meeting timeline -->
+          <div class="rel-col-meetings" id="rel-col-meetings">
+            <div class="rel-meetings-header" id="rel-meetings-header">
+              <span id="rel-meetings-label">All Meetings</span>
+              <div id="rel-org-badges" class="rel-org-badges"></div>
+            </div>
+            <div id="rel-org-detail" class="rel-org-detail hidden">
+              <div id="org-detail-content"></div>
+            </div>
             <ul id="meetings" class="meetings"></ul>
           </div>
+
+          <!-- Column 3: Note detail -->
           <aside id="detail">
             <div class="detail-empty">Select a meeting to see the full note.</div>
           </aside>
-        </div>
 
-      </section>
-
-      <!-- GROUPS -->
-      <section class="view" id="view-groups">
-        <div class="groups-subtabs-bar">
-          <button class="groups-subtab active" data-subtab="orgs">Organizations</button>
-          <button class="groups-subtab" data-subtab="people">People</button>
-          <button class="groups-subtab" data-subtab="bills">Bills</button>
-        </div>
-
-        <!-- Organizations subtab -->
-        <div class="groups-panel stakeholders-layout" id="groups-panel-orgs">
-          <div class="stakeholders-list">
-            <table class="groups">
-              <thead>
-                <tr>
-                  <th>Organization</th>
-                  <th class="num">Meetings</th>
-                  <th>Last met</th>
-                  <th class="num">Open asks</th>
-                  <th class="num">Commitments</th>
-                  <th class="num">Open tasks</th>
-                </tr>
-              </thead>
-              <tbody id="orgs-body"></tbody>
-            </table>
-          </div>
-          <div class="stakeholders-detail hidden" id="org-detail-panel">
-            <div id="org-detail-content"></div>
-          </div>
-        </div>
-
-        <!-- People subtab -->
-        <div class="groups-panel stakeholders-layout hidden" id="groups-panel-people">
-          <div class="stakeholders-list">
-            <table class="groups">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Organization</th>
-                  <th>Last seen</th>
-                  <th class="num">Meetings</th>
-                </tr>
-              </thead>
-              <tbody id="people-body"></tbody>
-            </table>
-          </div>
-          <div class="stakeholders-detail hidden" id="person-detail-panel">
-            <div id="person-detail-content"></div>
-          </div>
-        </div>
-
-        <!-- Bills subtab -->
-        <div class="groups-panel hidden" id="groups-panel-bills">
-          <div class="groups-wrap">
-            <table class="bills-table">
-              <thead>
-                <tr>
-                  <th>Bill</th>
-                  <th>Meetings Referenced</th>
-                  <th>Organizations</th>
-                  <th>Last Seen</th>
-                </tr>
-              </thead>
-              <tbody id="bills-body"></tbody>
-            </table>
-          </div>
         </div>
       </section>
 
@@ -706,18 +695,15 @@
         <button class="dock-sub-item" onclick="openNLModal()">+ Add task</button>
       </div>
     </div>
-    <button class="dock-btn" data-tab="meetings" title="Meetings (3)">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17"/><path d="M8 3v4M16 3v4"/></svg>
-    </button>
     <div class="dock-btn-wrap">
-      <button class="dock-btn" data-tab="groups" title="Groups (4)">
+      <button class="dock-btn" data-tab="groups" title="Relationships (3)">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.2"/><path d="M2.8 19.5c.8-3.2 3.3-5 6.2-5s5.4 1.8 6.2 5"/><circle cx="17" cy="8" r="2.5"/><path d="M15 13.5c2.5 0 4.4 1.3 5.2 4"/></svg>
       </button>
       <div class="dock-submenu">
         <button class="dock-sub-item" id="dock-sub-bills">Bills</button>
       </div>
     </div>
-    <button class="dock-btn" data-tab="smart" title="Smart Views (5)">
+    <button class="dock-btn" data-tab="smart" title="Smart Views (4)">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
     </button>
     <div class="dock-divider"></div>

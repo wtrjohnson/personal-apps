@@ -1150,15 +1150,7 @@ input, select, textarea { font-family: inherit; }
 /* =========================================================
    MEETINGS view
    ========================================================= */
-#view-meetings {
-  display: none;
-  grid-template-columns: 1fr;
-  grid-template-rows: 1fr;
-  height: 100%;
-  min-height: 0;
-  position: relative; /* anchor for floating radial menu */
-}
-#view-meetings.active { display: grid; }
+#view-meetings { display: none; }
 
 /* =========================================================
    RADIAL MENU
@@ -1680,22 +1672,7 @@ input, select, textarea { font-family: inherit; }
   color: var(--accent-ink);
 }
 
-/* Meetings body: list rail + detail */
-.meetings-body {
-  display: grid;
-  grid-template-columns: 260px 1fr;
-  gap: 14px;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.list-card {
-  background: var(--card);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-sm);
-  overflow-y: auto;
-  min-width: 0;
-}
+.meetings { overflow-y: auto; flex: 1; }
 
 .meetings { list-style: none; padding: 0; margin: 0; }
 .meetings li {
@@ -1782,13 +1759,84 @@ input, select, textarea { font-family: inherit; }
 /* =========================================================
    GROUPS view
    ========================================================= */
-#view-groups { grid-template-columns: 1fr; display: none; }
-#view-groups.active { display: block; }
+#view-groups { display: none; position: relative; }
+#view-groups.active { display: flex; flex-direction: column; height: 100%; }
+
+.rel-layout {
+  display: grid;
+  grid-template-columns: 230px 260px 1fr;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rel-col-list {
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.rel-list-panel {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.rel-col-meetings {
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.rel-meetings-header {
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
+  flex-shrink: 0;
+}
+
+#rel-meetings-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.rel-org-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.rel-org-badge {
+  font-size: 11px; padding: 1px 7px; border-radius: 10px;
+  background: var(--card); border: 1px solid var(--border);
+  color: var(--ink); white-space: nowrap;
+}
+
+.rel-org-detail {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card-soft);
+  flex-shrink: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.rel-org-detail.hidden { display: none; }
+
+#view-groups #detail {
+  overflow-y: auto;
+  background: var(--card);
+}
 
 .groups-subtabs-bar {
   display: flex;
   gap: 4px;
-  padding: 0 0 10px;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--canvas);
 }
 
 .groups-subtab {
