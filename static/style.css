@@ -1769,23 +1769,26 @@ input, select, textarea { font-family: inherit; }
   overflow: hidden;
 }
 
-/* Col 1: fills full width at depth-0, shrinks to 230px when panels open */
+/* All three columns are flex:1 1 0 always — only max-width caps differ per depth.
+   This lets the flex algorithm redistribute space smoothly as max-widths animate. */
 .rel-col-list {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   max-width: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
-  transition: max-width 0.24s cubic-bezier(0.4, 0, 0.2, 1),
-              flex 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+  border-right: 1px solid var(--border);
+  transition: max-width 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+              border-right-color 0.28s linear;
+}
+.rel-layout.depth-0 .rel-col-list {
+  border-right-color: transparent;
 }
 .rel-layout.depth-1 .rel-col-list,
 .rel-layout.depth-2 .rel-col-list {
-  flex: 0 0 230px;
   max-width: 230px;
-  border-right: 1px solid var(--border);
 }
 
 .rel-list-panel {
@@ -1794,39 +1797,35 @@ input, select, textarea { font-family: inherit; }
   min-height: 0;
 }
 
-/* Col 2: hidden at depth-0, fills remaining at depth-1, fixed at depth-2 */
 .rel-col-meetings {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   max-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
-  transition: max-width 0.24s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.rel-layout.depth-1 .rel-col-meetings {
-  max-width: 9999px;
-}
-.rel-layout.depth-2 .rel-col-meetings {
-  flex: 0 0 260px;
-  max-width: 260px;
   border-right: 1px solid var(--border);
+  transition: max-width 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+              border-right-color 0.28s linear;
 }
+.rel-layout.depth-0 .rel-col-meetings,
+.rel-layout.depth-1 .rel-col-meetings {
+  border-right-color: transparent;
+}
+.rel-layout.depth-1 .rel-col-meetings { max-width: 9999px; }
+.rel-layout.depth-2 .rel-col-meetings { max-width: 260px; }
 
-/* Col 3: hidden until depth-2 */
 .rel-col-detail {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   max-width: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  transition: max-width 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: max-width 0.28s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.rel-layout.depth-2 .rel-col-detail {
-  max-width: 9999px;
-}
+.rel-layout.depth-2 .rel-col-detail { max-width: 9999px; }
 
 .rel-meetings-header {
   padding: 10px 14px 8px;

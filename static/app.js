@@ -1363,42 +1363,41 @@ function renderOrgsTable(orgs) {
   });
 }
 
-async function selectOrg(orgId) {
+async function selectOrg(orgId, { skipToggle = false } = {}) {
   // Toggle-deselect: clicking active org collapses the panel
-  if (orgId && orgId === state.selectedOrgId) {
+  if (!skipToggle && orgId && orgId === state.selectedOrgId) {
     orgId = null;
   }
 
-  state.selectedOrgId = orgId || null;
-  state.selectedMeetingId = orgId ? state.selectedMeetingId : null;
-
+  // Immediate visual feedback so the click feels responsive while we fetch.
   $$("#orgs-body .stakeholder-row").forEach((r) =>
-    r.classList.toggle("active", r.dataset.orgId === orgId));
+    r.classList.toggle("active", orgId && r.dataset.orgId === orgId));
 
-  // Filter meeting list to this org
   const label = $("#rel-meetings-label");
   const badges = $("#rel-org-badges");
   const orgDetail = $("#rel-org-detail");
   const content = $("#org-detail-content");
 
   if (!orgId) {
-    // Deselect: collapse to list only
-    state.meetingFilters.group = "";
+    // Collapse: flip depth first so panels slide out, then clear content
+    // after the transition completes — keeps content visible during slide-out.
+    state.selectedOrgId = null;
     state.selectedMeetingId = null;
-    if (label) label.textContent = "All Meetings";
-    if (badges) badges.innerHTML = "";
-    if (orgDetail) orgDetail.classList.add("hidden");
-    renderDetail(null);
-    refreshMeetings();
+    state.meetingFilters.group = "";
     updateRelDepth();
+    setTimeout(() => {
+      if (state.selectedOrgId !== null) return;  // user re-selected mid-animation
+      if (label) label.textContent = "All Meetings";
+      if (badges) badges.innerHTML = "";
+      if (orgDetail) orgDetail.classList.add("hidden");
+      renderDetail(null);
+      refreshMeetingsNow();
+    }, 300);
     return;
   }
 
-  if (label) label.textContent = "Loading…";
-  if (content) content.innerHTML = `<div class="detail-empty">Loading…</div>`;
-  if (orgDetail) orgDetail.classList.remove("hidden");
-
   try {
+    // Fetch org data first — panels stay hidden until everything is ready.
     const org = await api(`/api/organizations/${orgId}`);
     const openAsks = (org.asks || []).filter((a) =>
       !["completed","declined","no_action"].includes(a.status));
@@ -1406,19 +1405,9 @@ async function selectOrg(orgId) {
       ["open","needs_review","task_created"].includes(c.status));
     const openTasks = org.open_tasks || [];
 
-    // Update meeting list header
-    if (label) label.textContent = escapeHtml(org.name);
-    if (badges) {
-      const parts = [];
-      if (openAsks.length)   parts.push(`${openAsks.length} ask${openAsks.length > 1 ? "s" : ""}`);
-      if (openCommits.length) parts.push(`${openCommits.length} commitment${openCommits.length > 1 ? "s" : ""}`);
-      if (openTasks.length)  parts.push(`${openTasks.length} task${openTasks.length > 1 ? "s" : ""}`);
-      badges.innerHTML = parts.map((p) => `<span class="rel-org-badge">${p}</span>`).join("");
-    }
-
-    // Filter meeting list to this org
+    // Filter the meeting list and re-render it (still inside hidden col-2).
     state.meetingFilters.group = org.name;
-    refreshMeetings();
+    await refreshMeetingsNow();
 
     // Build org detail panel (asks / commitments / tasks / bills / contacts)
     const asksHtml = openAsks.length
@@ -1474,13 +1463,17 @@ async function selectOrg(orgId) {
       contactsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Contacts</div><div class="drawer-cards">${contactsHtml}</div></div>`,
     ].filter(Boolean).join("");
 
-    if (content) {
-      if (sections) {
-        content.innerHTML = sections;
-      } else {
-        orgDetail.classList.add("hidden");
-      }
+    // Populate all of col-2's contents (header, badges, org-detail block) while still hidden.
+    if (label) label.textContent = org.name;
+    if (badges) {
+      const parts = [];
+      if (openAsks.length)   parts.push(`${openAsks.length} ask${openAsks.length > 1 ? "s" : ""}`);
+      if (openCommits.length) parts.push(`${openCommits.length} commitment${openCommits.length > 1 ? "s" : ""}`);
+      if (openTasks.length)  parts.push(`${openTasks.length} task${openTasks.length > 1 ? "s" : ""}`);
+      badges.innerHTML = parts.map((p) => `<span class="rel-org-badge">${escapeHtml(p)}</span>`).join("");
     }
+    if (content) content.innerHTML = sections;
+    if (orgDetail) orgDetail.classList.toggle("hidden", !sections);
 
     // Wire interactive buttons
     content?.querySelectorAll(".entity-status-btn").forEach((btn) => {
@@ -1488,7 +1481,7 @@ async function selectOrg(orgId) {
         await api(`/api/asks/${btn.dataset.askId}/status`, {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: btn.dataset.status }),
         });
-        selectOrg(orgId);
+        selectOrg(orgId, { skipToggle: true });
       });
     });
     content?.querySelectorAll(".create-task-btn").forEach((btn) => {
@@ -1496,7 +1489,7 @@ async function selectOrg(orgId) {
         await api(`/api/commitments/${btn.dataset.commitId}/create-task`, {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
         });
-        selectOrg(orgId);
+        selectOrg(orgId, { skipToggle: true });
         await refreshTasks();
       });
     });
@@ -1506,10 +1499,16 @@ async function selectOrg(orgId) {
         if (task) openDrawer(task);
       });
     });
+
+    // Reveal col-2 — its content is already populated.
+    state.selectedOrgId = orgId;
+    updateRelDepth();
   } catch {
     if (content) content.innerHTML = `<div class="detail-empty">Couldn't load organization.</div>`;
+    if (orgDetail) orgDetail.classList.remove("hidden");
+    state.selectedOrgId = orgId;
+    updateRelDepth();
   }
-  updateRelDepth();
 }
 
 function renderPeopleTable(people) {
@@ -2589,6 +2588,18 @@ const refreshMeetingsDebounced = debounce(async () => {
 
 async function refreshMeetings() { return refreshMeetingsDebounced(); }
 
+async function refreshMeetingsNow() {
+  const qs = meetingsFilters();
+  const data = await api("/api/meetings?" + qs);
+  state.meetings = data.meetings;
+  if (state.selectedMeetingId && !state.meetings.find((m) => m.id === state.selectedMeetingId)) {
+    state.selectedMeetingId = null;
+    renderDetail(null);
+    updateRelDepth();
+  }
+  renderMeetingsList();
+}
+
 async function loadFacets() {
   state.facets = await api("/api/facets");
 }
@@ -2629,18 +2640,29 @@ async function loadGroups() {
 }
 
 async function selectMeeting(id) {
-  // Toggle-deselect
+  // Toggle-deselect: slide col-3 closed first, clear content after the transition
   if (id && id === state.selectedMeetingId) {
     state.selectedMeetingId = null;
     $$("#meetings li").forEach((li) => li.classList.remove("active"));
-    renderDetail(null);
     updateRelDepth();
+    setTimeout(() => {
+      if (state.selectedMeetingId === null) renderDetail(null);
+    }, 300);
     return;
   }
 
-  state.selectedMeetingId = id;
-  // If meeting isn't in the current filtered list, clear the org filter so it appears
-  if (id && !state.meetings.find((m) => m.id === id)) {
+  if (!id) {
+    state.selectedMeetingId = null;
+    updateRelDepth();
+    setTimeout(() => {
+      if (state.selectedMeetingId === null) renderDetail(null);
+    }, 300);
+    return;
+  }
+
+  // If meeting isn't in the current filtered list, clear the org filter and
+  // re-render the meeting list BEFORE revealing anything.
+  if (!state.meetings.find((m) => m.id === id)) {
     state.meetingFilters.group = "";
     state.selectedOrgId = null;
     $$("#orgs-body .stakeholder-row").forEach((r) => r.classList.remove("active"));
@@ -2650,13 +2672,17 @@ async function selectMeeting(id) {
     if (label) label.textContent = "All Meetings";
     if (badges) badges.innerHTML = "";
     if (orgDetail) orgDetail.classList.add("hidden");
-    await refreshMeetings();
+    await refreshMeetingsNow();
   }
-  $$("#meetings li").forEach((li) => li.classList.toggle("active", id && li.dataset.id === id));
-  if (!id) { renderDetail(null); updateRelDepth(); return; }
-  updateRelDepth();
+
+  // Immediate visual feedback so the click feels responsive.
+  $$("#meetings li").forEach((li) => li.classList.toggle("active", li.dataset.id === id));
+
+  // Fetch meeting detail BEFORE flipping depth — col-3 reveals already populated.
   const m = await api(`/api/meetings/${id}`);
+  state.selectedMeetingId = id;
   renderDetail(m);
+  updateRelDepth();
 }
 
 function selectTask(idx) {
