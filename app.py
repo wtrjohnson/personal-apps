@@ -914,7 +914,7 @@ def db_get_meeting(mid: str) -> Optional[Meeting]:
             """, (mid,))
             contact_rows = [dict(r) for r in cur.fetchall()]
             cur.execute("""
-                SELECT bill_type, bill_number
+                SELECT id, bill_type, bill_number
                 FROM bill_references
                 WHERE meeting_id = %s
                 ORDER BY id
@@ -1562,6 +1562,25 @@ def api_bills():
         "meetings": r["meetings"],
         "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
     } for r in rows])
+
+
+@app.route("/api/bills/<int:bill_id>", methods=["PUT"])
+def api_bill_update(bill_id: int):
+    data = request.get_json(force=True, silent=True) or {}
+    bill_type = (data.get("bill_type") or "").strip()
+    bill_number = (data.get("bill_number") or "").strip()
+    if not bill_number:
+        return jsonify({"ok": False, "error": "bill_number required"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM bill_references WHERE id = %s", (bill_id,))
+            if not cur.fetchone():
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            cur.execute(
+                "UPDATE bill_references SET bill_type = %s, bill_number = %s WHERE id = %s",
+                (bill_type, bill_number, bill_id),
+            )
+    return jsonify({"ok": True})
 
 
 @app.route("/api/organizations")

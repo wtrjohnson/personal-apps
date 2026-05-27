@@ -3650,16 +3650,23 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .callout-item-text { flex: 1; }
 .callout-edit-btn {
   flex-shrink: 0; background: none; border: none; cursor: pointer;
-  color: var(--muted); font-size: 13px; padding: 0 2px; opacity: 0;
+  color: var(--muted); font-size: 13px; padding: 0 2px; opacity: 0.35;
   transition: opacity 0.1s;
 }
 .callout-item:hover .callout-edit-btn { opacity: 1; }
-@media (hover: none) { .callout-edit-btn { opacity: 1; } }
 .callout-inline-input {
   flex: 1; font: inherit; font-size: 13px; padding: 1px 4px;
   border: 1px solid var(--accent); border-radius: 3px; outline: none;
   background: var(--surface);
 }
+
+.detail-bill-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.bill-pill--editable { display: inline-flex; align-items: center; gap: 4px; cursor: default; }
+.bill-edit-btn {
+  background: none; border: none; cursor: pointer; padding: 0 2px;
+  color: var(--muted); font-size: 12px; opacity: 0.35; transition: opacity 0.1s;
+}
+.bill-pill--editable:hover .bill-edit-btn { opacity: 1; }
 
 .org-contact-chip {
   display: inline-flex; align-items: center; gap: 5px;

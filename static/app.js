@@ -1090,6 +1090,17 @@ function renderDetail(m) {
       <h3>Open Reminders</h3>
       ${listOrNone(m.reminders_open, "reminder")}
     </div>
+    ${(m.bill_references || []).length ? `
+    <div class="detail-bills">
+      <h3>Bills Referenced</h3>
+      <div class="detail-bill-list">
+        ${(m.bill_references || []).map((b) => `
+        <span class="bill-pill bill-pill--editable" data-bill-id="${b.id}" data-bill-type="${escapeHtml(b.bill_type)}" data-bill-number="${escapeHtml(b.bill_number)}">
+          <span class="bill-pill-text">${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}</span>
+          <button class="bill-edit-btn" title="Edit">✎</button>
+        </span>`).join("")}
+      </div>
+    </div>` : ""}
     ${(m.contacts || []).length ? `
     <div class="detail-contacts">
       <h3>Contacts</h3>
@@ -1154,6 +1165,45 @@ function renderDetail(m) {
         if (e.key === "Enter") save();
         if (e.key === "Escape") selectMeeting(m.id);
       });
+    });
+  });
+
+  $("#detail").querySelectorAll(".bill-edit-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pill = btn.closest(".bill-pill--editable");
+      const billId = pill.dataset.billId;
+      const textSpan = pill.querySelector(".bill-pill-text");
+      const typeInput = document.createElement("input");
+      typeInput.type = "text";
+      typeInput.value = pill.dataset.billType;
+      typeInput.className = "callout-inline-input";
+      typeInput.style.width = "48px";
+      const numInput = document.createElement("input");
+      numInput.type = "text";
+      numInput.value = pill.dataset.billNumber;
+      numInput.className = "callout-inline-input";
+      numInput.style.width = "80px";
+      textSpan.replaceWith(typeInput, document.createTextNode(" "), numInput);
+      btn.textContent = "✓";
+      typeInput.focus();
+      typeInput.select();
+
+      const save = async () => {
+        const bt = typeInput.value.trim();
+        const bn = numInput.value.trim();
+        if (!bn) { selectMeeting(m.id); return; }
+        await fetch(`/api/bills/${billId}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ bill_type: bt, bill_number: bn }),
+        });
+        selectMeeting(m.id);
+      };
+
+      btn.onclick = (e) => { e.stopPropagation(); save(); };
+      [typeInput, numInput].forEach((inp) => inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") save();
+        if (e.key === "Escape") selectMeeting(m.id);
+      }));
     });
   });
 }
