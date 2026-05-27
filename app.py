@@ -1322,7 +1322,7 @@ def api_meeting_update(mid: str):
     note_outcome = (data.get("outcome") or "").strip()
     if not note_group:
         return jsonify({"ok": False, "error": "Group required"}), 400
-    canon = canonical_group(note_group)
+    canon = note_group  # user explicitly set this name, treat it as canonical directly
     org_id_new = _org_slug(note_group)
     with get_db() as conn:
         with conn.cursor() as cur:
