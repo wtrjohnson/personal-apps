@@ -3654,6 +3654,7 @@ table.bills-table tr:last-child td { border-bottom: none; }
   transition: opacity 0.1s;
 }
 .callout-item:hover .callout-edit-btn { opacity: 1; }
+@media (hover: none) { .callout-edit-btn { opacity: 1; } }
 .callout-inline-input {
   flex: 1; font: inherit; font-size: 13px; padding: 1px 4px;
   border: 1px solid var(--accent); border-radius: 3px; outline: none;
