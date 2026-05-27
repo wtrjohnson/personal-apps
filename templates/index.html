@@ -334,6 +334,7 @@
           <!-- Column 2: Meeting timeline -->
           <div class="rel-col-meetings" id="rel-col-meetings">
             <div class="rel-meetings-header" id="rel-meetings-header">
+              <button class="rel-back-btn" id="rel-back-to-list" aria-label="Back to list">&#8249;</button>
               <span id="rel-meetings-label">All Meetings</span>
               <div id="rel-org-badges" class="rel-org-badges"></div>
             </div>
@@ -344,9 +345,14 @@
           </div>
 
           <!-- Column 3: Note detail -->
-          <aside id="detail">
-            <div class="detail-empty">Select a meeting to see the full note.</div>
-          </aside>
+          <div class="rel-col-detail">
+            <div class="rel-detail-header">
+              <button class="rel-back-btn" id="rel-back-to-meetings" aria-label="Back to meetings">&#8249;</button>
+            </div>
+            <aside id="detail">
+              <div class="detail-empty">Select a meeting to see the full note.</div>
+            </aside>
+          </div>
 
         </div>
       </section>

@@ -1763,19 +1763,29 @@ input, select, textarea { font-family: inherit; }
 #view-groups.active { display: flex; flex-direction: column; height: 100%; }
 
 .rel-layout {
-  display: grid;
-  grid-template-columns: 230px 260px 1fr;
+  display: flex;
   flex: 1;
   min-height: 0;
   overflow: hidden;
 }
 
+/* Col 1: fills full width at depth-0, shrinks to 230px when panels open */
 .rel-col-list {
-  border-right: 1px solid var(--border);
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  transition: max-width 0.24s cubic-bezier(0.4, 0, 0.2, 1),
+              flex 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.rel-layout.depth-1 .rel-col-list,
+.rel-layout.depth-2 .rel-col-list {
+  flex: 0 0 230px;
+  max-width: 230px;
+  border-right: 1px solid var(--border);
 }
 
 .rel-list-panel {
@@ -1784,12 +1794,38 @@ input, select, textarea { font-family: inherit; }
   min-height: 0;
 }
 
+/* Col 2: hidden at depth-0, fills remaining at depth-1, fixed at depth-2 */
 .rel-col-meetings {
-  border-right: 1px solid var(--border);
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  transition: max-width 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.rel-layout.depth-1 .rel-col-meetings {
+  max-width: 9999px;
+}
+.rel-layout.depth-2 .rel-col-meetings {
+  flex: 0 0 260px;
+  max-width: 260px;
+  border-right: 1px solid var(--border);
+}
+
+/* Col 3: hidden until depth-2 */
+.rel-col-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: max-width 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.rel-layout.depth-2 .rel-col-detail {
+  max-width: 9999px;
 }
 
 .rel-meetings-header {
@@ -1797,15 +1833,22 @@ input, select, textarea { font-family: inherit; }
   border-bottom: 1px solid var(--border);
   background: var(--canvas);
   flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 #rel-meetings-label {
-  display: block;
+  flex: 1;
   font-size: 11px;
   font-weight: 600;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
+}
+
+#rel-org-badges {
+  width: 100%;
 }
 
 .rel-org-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
@@ -1825,7 +1868,35 @@ input, select, textarea { font-family: inherit; }
 }
 .rel-org-detail.hidden { display: none; }
 
+.rel-detail-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 8px 14px 0;
+}
+
+.rel-back-btn {
+  display: none;
+  align-items: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 0 8px 0 0;
+  flex-shrink: 0;
+}
+.rel-back-btn:hover { color: var(--ink); }
+.rel-layout.depth-1 #rel-back-to-list,
+.rel-layout.depth-2 #rel-back-to-list,
+.rel-layout.depth-2 #rel-back-to-meetings {
+  display: inline-flex;
+}
+
 #view-groups #detail {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   background: var(--card);
 }

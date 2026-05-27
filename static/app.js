@@ -11,6 +11,7 @@ const state = {
   paperOrder: ["active", "backburner", "done"],
   drawerTask: null,
   selectedMeetingId: null,
+  selectedOrgId: null,
   selectedTaskIdx: -1,
   facets: { groups: [], purposes: [], attendees: [], unaliased_raw_groups: [] },
   stats: null,
@@ -1018,6 +1019,16 @@ async function submitNLModal() {
 const openAddModal = openNLModal;
 const closeAddModal = closeNLModal;
 
+function updateRelDepth() {
+  const layout = document.querySelector(".rel-layout");
+  if (!layout) return;
+  const depth = state.selectedMeetingId !== null ? 2
+              : state.selectedOrgId    !== null ? 1
+              : 0;
+  layout.classList.remove("depth-0", "depth-1", "depth-2");
+  layout.classList.add("depth-" + depth);
+}
+
 // ---------- Render: Meetings ----------
 function renderMeetingsList() {
   const ul = $("#meetings");
@@ -1353,6 +1364,14 @@ function renderOrgsTable(orgs) {
 }
 
 async function selectOrg(orgId) {
+  // Toggle-deselect: clicking active org collapses the panel
+  if (orgId && orgId === state.selectedOrgId) {
+    orgId = null;
+  }
+
+  state.selectedOrgId = orgId || null;
+  state.selectedMeetingId = orgId ? state.selectedMeetingId : null;
+
   $$("#orgs-body .stakeholder-row").forEach((r) =>
     r.classList.toggle("active", r.dataset.orgId === orgId));
 
@@ -1363,12 +1382,15 @@ async function selectOrg(orgId) {
   const content = $("#org-detail-content");
 
   if (!orgId) {
-    // Deselect: show all meetings
+    // Deselect: collapse to list only
     state.meetingFilters.group = "";
+    state.selectedMeetingId = null;
     if (label) label.textContent = "All Meetings";
     if (badges) badges.innerHTML = "";
     if (orgDetail) orgDetail.classList.add("hidden");
+    renderDetail(null);
     refreshMeetings();
+    updateRelDepth();
     return;
   }
 
@@ -1487,6 +1509,7 @@ async function selectOrg(orgId) {
   } catch {
     if (content) content.innerHTML = `<div class="detail-empty">Couldn't load organization.</div>`;
   }
+  updateRelDepth();
 }
 
 function renderPeopleTable(people) {
@@ -2559,6 +2582,7 @@ const refreshMeetingsDebounced = debounce(async () => {
   if (state.selectedMeetingId && !state.meetings.find((m) => m.id === state.selectedMeetingId)) {
     state.selectedMeetingId = null;
     renderDetail(null);
+    updateRelDepth();
   }
   renderMeetingsList();
 }, 120);
@@ -2605,10 +2629,20 @@ async function loadGroups() {
 }
 
 async function selectMeeting(id) {
+  // Toggle-deselect
+  if (id && id === state.selectedMeetingId) {
+    state.selectedMeetingId = null;
+    $$("#meetings li").forEach((li) => li.classList.remove("active"));
+    renderDetail(null);
+    updateRelDepth();
+    return;
+  }
+
   state.selectedMeetingId = id;
   // If meeting isn't in the current filtered list, clear the org filter so it appears
   if (id && !state.meetings.find((m) => m.id === id)) {
     state.meetingFilters.group = "";
+    state.selectedOrgId = null;
     $$("#orgs-body .stakeholder-row").forEach((r) => r.classList.remove("active"));
     const label = $("#rel-meetings-label");
     const badges = $("#rel-org-badges");
@@ -2619,7 +2653,8 @@ async function selectMeeting(id) {
     await refreshMeetings();
   }
   $$("#meetings li").forEach((li) => li.classList.toggle("active", id && li.dataset.id === id));
-  if (!id) { renderDetail(null); return; }
+  if (!id) { renderDetail(null); updateRelDepth(); return; }
+  updateRelDepth();
   const m = await api(`/api/meetings/${id}`);
   renderDetail(m);
 }
@@ -2648,7 +2683,16 @@ function switchTab(tab) {
     : "Search…";
 
   if (tab === "home")   renderHome();
-  if (tab === "groups") { loadGroups(); if (!state.meetings.length) refreshMeetings(); }
+  if (tab === "groups") {
+    loadGroups();
+    if (!state.meetings.length) refreshMeetings();
+    updateRelDepth();
+  } else {
+    // Reset relationship panel state when leaving groups
+    state.selectedOrgId = null;
+    state.selectedMeetingId = null;
+    updateRelDepth();
+  }
   if (tab === "tasks")  refreshTasks();
   if (tab === "smart")  loadSmartView(state.smartView);
 }
@@ -3658,6 +3702,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     refreshMeetings();
   });
 
+  // Relationships back buttons
+  document.querySelector("#rel-back-to-list")?.addEventListener("click", () => selectOrg(null));
+  document.querySelector("#rel-back-to-meetings")?.addEventListener("click", () => selectMeeting(null));
+
   // Close ring when clicking outside radial root
   document.addEventListener("click", (e) => {
     if (!e.target.closest("#radial-root") && $("#radial-root")?.classList.contains("open")) {
@@ -3680,18 +3728,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const subtab = btn.dataset.subtab;
       document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
       $(`#groups-panel-${subtab}`).classList.remove("hidden");
-      // Clear org filter when leaving orgs subtab
-      if (subtab !== "orgs") {
-        $$("#orgs-body .stakeholder-row").forEach((r) => r.classList.remove("active"));
-        state.meetingFilters.group = "";
-        const label = $("#rel-meetings-label");
-        const badges = $("#rel-org-badges");
-        const orgDetail = $("#rel-org-detail");
-        if (label) label.textContent = "All Meetings";
-        if (badges) badges.innerHTML = "";
-        if (orgDetail) orgDetail.classList.add("hidden");
-        refreshMeetings();
-      }
+      if (subtab !== "orgs") selectOrg(null);
     });
   });
 
