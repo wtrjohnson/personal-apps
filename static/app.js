@@ -2085,12 +2085,12 @@ function closeIntakeModal() {
 }
 
 const _intakeTypePresets = {
-  "1on1":       { group: "",          topic: "1:1",                constituent: false },
-  "staff":      { group: "Staff",     topic: "Staff Meeting",      constituent: false },
-  "legteam":    { group: "Leg. Team", topic: "Leg. Team Meeting",  constituent: false },
-  "constituent":{ group: "",          topic: "",                   constituent: true  },
-  "briefing":   { group: "",          topic: "",                   constituent: false },
-  "other":      { group: "",          topic: "",                   constituent: false },
+  "1on1":       { group: "Rebekah",   topic: "1:1",                attendees: "", skipPremeeting: true,  constituent: false },
+  "staff":      { group: "Staff",     topic: "Staff Meeting",      attendees: "", skipPremeeting: true,  constituent: false },
+  "legteam":    { group: "Leg. Team", topic: "Leg. Team Meeting",  attendees: "", skipPremeeting: true,  constituent: false },
+  "constituent":{ group: "",          topic: "",                                  skipPremeeting: false, constituent: true  },
+  "briefing":   { group: "",          topic: "",                                  skipPremeeting: false, constituent: false },
+  "other":      { group: "",          topic: "",                                  skipPremeeting: false, constituent: false },
 };
 
 function _intakeSelectType(type) {
@@ -2101,6 +2101,7 @@ function _intakeSelectType(type) {
   // Pre-fill fields
   if (preset.group !== undefined) $("#intake-group").value = preset.group;
   if (preset.topic !== undefined) $("#intake-topic").value = preset.topic;
+  if (preset.attendees !== undefined) $("#intake-attendees").value = preset.attendees;
 
   // Show/hide constituent-only purpose row
   const purposeRow = $("#intake-purpose-row");
@@ -2109,6 +2110,12 @@ function _intakeSelectType(type) {
   } else {
     purposeRow.classList.remove("intake-show");
     $("#intake-purpose").value = "";
+  }
+
+  // For fixed-info meeting types, skip straight to in-meeting notes
+  if (preset.skipPremeeting) {
+    _intakeStartMeeting();
+    return;
   }
 
   // Advance to phase 1 (pre-meeting)
