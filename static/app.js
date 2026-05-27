@@ -1063,10 +1063,16 @@ function renderDetail(m) {
     <header>
       <div class="detail-header-row">
         <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
-        <button class="detail-delete-btn" data-mid="${escapeHtml(m.id)}" title="Delete note">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
-          Delete
-        </button>
+        <div style="display: flex; gap: 8px;">
+          <button class="detail-edit-btn" data-mid="${escapeHtml(m.id)}" title="Edit meeting metadata">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L21 3"/></svg>
+            Edit
+          </button>
+          <button class="detail-delete-btn" data-mid="${escapeHtml(m.id)}" title="Delete note">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+            Delete
+          </button>
+        </div>
       </div>
       <div class="meta">${meta.join("")}</div>
     </header>
@@ -1108,25 +1114,111 @@ function renderDetail(m) {
   });
 }
 
+// Meeting edit modal
+let _meetingEditGroups = null;
+async function _loadCanonicalGroups() {
+  if (_meetingEditGroups) return _meetingEditGroups;
+  try {
+    const res = await fetch("/api/groups/canonical");
+    const data = await res.json();
+    _meetingEditGroups = data.groups || [];
+    return _meetingEditGroups;
+  } catch {
+    return [];
+  }
+}
+
+async function _openMeetingEditModal(mid) {
+  const m = db_get_meeting(mid);
+  if (!m) return;
+  const backdrop = $("#meeting-edit-backdrop");
+  const groupInput = $("#meeting-edit-group");
+  const topicInput = $("#meeting-edit-topic");
+  const attendeesInput = $("#meeting-edit-attendees");
+  const deadlineInput = $("#meeting-edit-deadline");
+  const outcomeInput = $("#meeting-edit-outcome");
+
+  groupInput.value = m.raw_group || m.group || "";
+  topicInput.value = m.topic || "";
+  attendeesInput.value = m.attendees || "";
+  deadlineInput.value = m.deadline || "";
+  outcomeInput.value = m.outcome || "";
+
+  // Load and populate canonical groups datalist
+  const groups = await _loadCanonicalGroups();
+  const datalist = $("#meeting-edit-group-list");
+  datalist.innerHTML = groups.map(g => `<option value="${escapeHtml(g)}">`).join("");
+
+  backdrop.classList.remove("hidden");
+  groupInput.focus();
+  groupInput.dataset.mid = mid;
+}
+
+async function _saveMeetingEdit() {
+  const groupInput = $("#meeting-edit-group");
+  const mid = groupInput.dataset.mid;
+  const group = groupInput.value.trim();
+  if (!group) { alert("Group is required"); return; }
+
+  const btn = $("#meeting-edit-save");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const res = await fetch(`/api/meetings/${mid}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        group: group,
+        topic: $("#meeting-edit-topic").value.trim(),
+        attendees: $("#meeting-edit-attendees").value.trim(),
+        deadline: $("#meeting-edit-deadline").value.trim(),
+        outcome: $("#meeting-edit-outcome").value.trim(),
+      }),
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(data.error || "Save failed"); btn.disabled = false; return; }
+
+    // Close modal and refresh
+    $("#meeting-edit-backdrop").classList.add("hidden");
+    await refreshMeetings();
+    selectMeeting(mid);
+    btn.disabled = false;
+    btn.textContent = "Save";
+  } catch (e) {
+    alert("Save failed");
+    btn.disabled = false;
+    btn.textContent = "Save";
+  }
+}
+
 // Delete note handler (delegated from #detail)
 $("#detail").addEventListener("click", async (e) => {
-  const btn = e.target.closest(".detail-delete-btn");
-  if (!btn) return;
-  const mid = btn.dataset.mid;
-  if (!confirm("Delete this note? This also removes all its tasks.")) return;
-  btn.disabled = true;
-  btn.textContent = "Deleting…";
-  try {
-    const res = await fetch(`/api/meetings/${mid}`, { method: "DELETE" });
-    const data = await res.json();
-    if (!data.ok) { alert(data.error || "Delete failed"); btn.disabled = false; return; }
-    state.selectedMeetingId = null;
-    renderDetail(null);
-    await refreshMeetings();
-    await loadFacets();
-  } catch {
-    alert("Delete failed");
-    btn.disabled = false;
+  const deleteBtn = e.target.closest(".detail-delete-btn");
+  if (deleteBtn) {
+    const mid = deleteBtn.dataset.mid;
+    if (!confirm("Delete this note? This also removes all its tasks.")) return;
+    deleteBtn.disabled = true;
+    deleteBtn.textContent = "Deleting…";
+    try {
+      const res = await fetch(`/api/meetings/${mid}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!data.ok) { alert(data.error || "Delete failed"); deleteBtn.disabled = false; return; }
+      state.selectedMeetingId = null;
+      renderDetail(null);
+      await refreshMeetings();
+      await loadFacets();
+    } catch {
+      alert("Delete failed");
+      deleteBtn.disabled = false;
+    }
+    return;
+  }
+
+  const editBtn = e.target.closest(".detail-edit-btn");
+  if (editBtn) {
+    const mid = editBtn.dataset.mid;
+    await _openMeetingEditModal(mid);
+    return;
   }
 });
 
@@ -3504,6 +3596,30 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   // No backdrop-tap-to-close: too easy to accidentally dismiss with a resting palm on iPad
   $("#intake-modal-submit").addEventListener("click", submitIntake);
+
+  // Meeting edit modal
+  $("#meeting-edit-close").addEventListener("click", () => {
+    $("#meeting-edit-backdrop").classList.add("hidden");
+  });
+  $("#meeting-edit-cancel").addEventListener("click", () => {
+    $("#meeting-edit-backdrop").classList.add("hidden");
+  });
+  $("#meeting-edit-save").addEventListener("click", _saveMeetingEdit);
+  $("#meeting-edit-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "meeting-edit-backdrop") {
+      $("#meeting-edit-backdrop").classList.add("hidden");
+    }
+  });
+
+  // Populate intake group autocomplete on first focus
+  let _intakeGroupsLoaded = false;
+  $("#intake-group").addEventListener("focus", async () => {
+    if (_intakeGroupsLoaded) return;
+    _intakeGroupsLoaded = true;
+    const groups = await _loadCanonicalGroups();
+    const datalist = $("#intake-group-list");
+    datalist.innerHTML = groups.map(g => `<option value="${escapeHtml(g)}">`).join("");
+  });
 
   // Today's Callouts modal
   $("#today-callouts-close")?.addEventListener("click", closeTodayCalloutsModal);
