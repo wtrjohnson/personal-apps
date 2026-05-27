@@ -3906,3 +3906,47 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .today-callouts-item-done { opacity: 0.55; }
 .today-callouts-item-done .scan-item-text { text-decoration: line-through; }
 
+
+
+/* =====================================================
+   Upcoming Meetings Card
+   ===================================================== */
+.card-upcoming { grid-column: span 2; padding: 20px; }
+.upcoming-item {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.upcoming-item:last-child { border-bottom: none; }
+.upcoming-meta {
+  font-size: 12px; color: var(--muted); margin-bottom: 3px;
+}
+.upcoming-title {
+  font-size: 15px; font-weight: 600; color: var(--ink); margin-bottom: 8px;
+  display: flex; align-items: center; gap: 8px;
+}
+.upcoming-badge {
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.5px; padding: 2px 7px; border-radius: var(--r-pill);
+}
+.upcoming-badge.in-progress {
+  background: var(--accent-soft); color: var(--accent);
+}
+.upcoming-actions {
+  display: flex; gap: 8px; align-items: center;
+}
+.upcoming-join-btn {
+  display: inline-flex; align-items: center;
+  font-size: 12px; font-weight: 600; padding: 5px 12px;
+  border-radius: var(--r-pill); border: 1px solid var(--accent);
+  background: var(--accent-soft); color: var(--accent);
+  text-decoration: none; cursor: pointer;
+  transition: background 0.15s;
+}
+.upcoming-join-btn:hover { background: var(--accent); color: #fff; }
+.upcoming-start-btn {
+  font-size: 12px; padding: 5px 14px; border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong); background: var(--surface);
+  color: var(--ink); cursor: pointer; font-weight: 500;
+  transition: background 0.15s;
+}
+.upcoming-start-btn:hover { background: var(--card-blue); color: #fff; border-color: var(--card-blue); }
