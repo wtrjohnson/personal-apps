@@ -895,6 +895,45 @@
     </div>
   </div>
 
+  <!-- Meeting edit modal -->
+  <div id="meeting-edit-backdrop" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2 id="meeting-edit-title">Edit meeting</h2>
+        <button class="modal-close" id="meeting-edit-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="meeting-edit-form">
+          <div class="modal-row">
+            <label for="meeting-edit-group">Group</label>
+            <input id="meeting-edit-group" type="text" list="meeting-edit-group-list" placeholder="e.g. Rebekah…" autocomplete="off">
+            <datalist id="meeting-edit-group-list"></datalist>
+          </div>
+          <div class="modal-row">
+            <label for="meeting-edit-topic">Topic</label>
+            <input id="meeting-edit-topic" type="text" placeholder="Meeting topic or title…" autocomplete="off">
+          </div>
+          <div class="modal-row">
+            <label for="meeting-edit-attendees">Attendees</label>
+            <input id="meeting-edit-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off">
+          </div>
+          <div class="modal-row">
+            <label for="meeting-edit-deadline">Deadline</label>
+            <input id="meeting-edit-deadline" type="text" placeholder="e.g. 2025-06-15" autocomplete="off">
+          </div>
+          <div class="modal-row">
+            <label for="meeting-edit-outcome">Outcome</label>
+            <input id="meeting-edit-outcome" type="text" placeholder="Summary or outcome…" autocomplete="off">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary-btn" id="meeting-edit-cancel">Cancel</button>
+        <button class="primary-btn" id="meeting-edit-save">Save</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Canvas fullscreen overlay -->
   <div id="canvas-fullscreen-overlay" class="hidden" role="dialog" aria-modal="true">
     <img id="canvas-fullscreen-img" src="" alt="Handwritten note fullscreen">

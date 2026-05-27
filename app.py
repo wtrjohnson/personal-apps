@@ -1312,6 +1312,53 @@ def api_meeting_delete(mid: str):
     return jsonify({"ok": True})
 
 
+@app.route("/api/meetings/<mid>", methods=["PUT"])
+def api_meeting_update(mid: str):
+    data = request.get_json(force=True, silent=True) or {}
+    note_group = (data.get("group") or "").strip()
+    note_topic = (data.get("topic") or "").strip()
+    note_attendees = (data.get("attendees") or "").strip()
+    note_deadline = (data.get("deadline") or "").strip()
+    note_outcome = (data.get("outcome") or "").strip()
+    if not note_group:
+        return jsonify({"ok": False, "error": "Group required"}), 400
+    canon = canonical_group(note_group)
+    org_id_new = _org_slug(note_group)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM meetings WHERE id = %s", (mid,))
+            if not cur.fetchone():
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            cur.execute("""
+                INSERT INTO organizations (id, name, created_at, updated_at)
+                VALUES (%s, %s, NOW(), NOW())
+                ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
+            """, (org_id_new, note_group))
+            cur.execute("""
+                UPDATE meetings
+                SET raw_group = %s, canonical_group = %s, topic = %s,
+                    attendees = %s, deadline = %s, outcome = %s,
+                    organization_id = %s
+                WHERE id = %s
+            """, (note_group, canon, note_topic, note_attendees,
+                  note_deadline, note_outcome, org_id_new, mid))
+    return jsonify({"ok": True, "org_id": org_id_new})
+
+
+@app.route("/api/groups/canonical")
+def api_groups_canonical():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT canonical_group
+                FROM meetings
+                WHERE canonical_group IS NOT NULL AND canonical_group != ''
+                ORDER BY canonical_group
+            """)
+            groups = [r["canonical_group"] for r in cur.fetchall()]
+    return jsonify({"groups": groups})
+
+
 @app.route("/api/contacts", methods=["GET"])
 def api_contacts_list():
     q = request.args.get("q", "").lower()
@@ -2722,7 +2769,9 @@ def api_notes_intake():
         fm_parts.append("purpose: [" + ", ".join(f'"{p}"' for p in note_purpose) + "]")
 
     content = "---\n" + "\n".join(fm_parts) + "\n---\n\n" + body
-    filename = f"{note_date} - {safe_group}.md"
+    now = datetime.now()
+    time_suffix = now.strftime("%H%M%S")
+    filename = f"{note_date} - {safe_group} [{time_suffix}].md"
 
     try:
         summary = import_meeting_from_content(
