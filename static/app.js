@@ -1178,7 +1178,8 @@ async function _saveMeetingEdit() {
     const data = await res.json();
     if (!data.ok) { alert(data.error || "Save failed"); btn.disabled = false; return; }
 
-    // Close modal and refresh
+    // Close modal and refresh (clear group cache so datalist reflects new names)
+    _meetingEditGroups = null;
     $("#meeting-edit-backdrop").classList.add("hidden");
     await refreshMeetings();
     selectMeeting(mid);
