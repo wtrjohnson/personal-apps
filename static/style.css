@@ -3402,12 +3402,13 @@ table.bills-table tr:last-child td { border-bottom: none; }
   display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
 }
 .detail-header-row h1 { flex: 1; min-width: 0; }
-.detail-delete-btn {
+.detail-edit-btn, .detail-delete-btn {
   display: flex; align-items: center; gap: 5px; flex-shrink: 0;
   padding: 4px 10px; font-size: 12px; border-radius: var(--r-sm);
   border: 1px solid var(--border-strong); background: none; color: var(--muted);
   cursor: pointer; white-space: nowrap; margin-top: 2px;
 }
+.detail-edit-btn:hover { background: #f0f4ff; color: #4f6ef7; border-color: #a5d3ff; }
 .detail-delete-btn:hover { background: #fef2f2; color: #dc2626; border-color: #fca5a5; }
 
 /* Result banner */
