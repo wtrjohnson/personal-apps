@@ -3144,8 +3144,8 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .intake-notes-textarea {
   display: block;
   width: 100%;
-  min-height: 200px;
-  max-height: 55vh;
+  min-height: 300px;
+  max-height: 70vh;
   padding: 14px;
   font-size: 17px;
   line-height: 1.6;

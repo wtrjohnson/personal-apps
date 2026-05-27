@@ -953,8 +953,6 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM organizations WHERE id = %s", (org_id,))
             org_row = cur.fetchone()
-            if not org_row:
-                return None
             cur.execute("""
                 SELECT m.id, m.topic, to_char(m.file_date,'YYYY-MM-DD') AS date,
                        m.attendees, m.canonical_group
@@ -962,6 +960,9 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
                 ORDER BY m.file_date DESC NULLS LAST
             """, (org_id,))
             meetings = [dict(r) for r in cur.fetchall()]
+            # Return None only if there's truly no data for this org
+            if not org_row and not meetings:
+                return None
             cur.execute("""
                 SELECT a.*, to_char(a.created_at,'YYYY-MM-DD') AS created_at_str
                 FROM asks a WHERE a.organization_id = %s
@@ -1006,11 +1007,13 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
             today_iso = date_cls.today().isoformat()
             open_tasks = [_task_row_to_task(dict(r), today_iso).as_dict()
                           for r in cur.fetchall()]
+    # Derive org name from meetings if no org row exists
+    fallback_name = meetings[0]["canonical_group"] if meetings else org_id
     return {
-        "id": org_row["id"],
-        "name": org_row["name"],
-        "type": org_row["type"],
-        "notes": org_row["notes"],
+        "id": org_id,
+        "name": org_row["name"] if org_row else fallback_name,
+        "type": org_row["type"] if org_row else None,
+        "notes": org_row["notes"] if org_row else None,
         "meetings": meetings,
         "asks": asks,
         "commitments": commitments_rows,
@@ -2577,6 +2580,25 @@ def api_import_notes():
         try:
             content = f.read().decode("utf-8")
             summary = import_meeting_from_content(fname, content)
+            mid = summary.get("id")
+            # Ensure org row exists and meeting is linked so brief lookup works
+            if mid:
+                post = frontmatter.loads(content)
+                raw_group = (post.metadata or {}).get("group") or fname.split(" - ", 1)[-1].replace(".md", "")
+                raw_group = str(raw_group).strip()
+                if raw_group and raw_group != "intake":
+                    org_id_imp = _org_slug(raw_group)
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                INSERT INTO organizations (id, name, created_at, updated_at)
+                                VALUES (%s, %s, NOW(), NOW())
+                                ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
+                            """, (org_id_imp, raw_group))
+                            cur.execute("""
+                                UPDATE meetings SET organization_id = %s
+                                WHERE id = %s AND organization_id IS NULL
+                            """, (org_id_imp, mid))
             results.append({"filename": fname, "ok": True, "task_count": summary["tasks"]})
         except Exception as e:
             results.append({"filename": fname, "ok": False, "error": str(e)})
