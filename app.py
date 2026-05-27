@@ -2722,7 +2722,9 @@ def api_notes_intake():
         fm_parts.append("purpose: [" + ", ".join(f'"{p}"' for p in note_purpose) + "]")
 
     content = "---\n" + "\n".join(fm_parts) + "\n---\n\n" + body
-    filename = f"{note_date} - {safe_group}.md"
+    now = datetime.now()
+    time_suffix = now.strftime("%H%M%S")
+    filename = f"{note_date} - {safe_group} [{time_suffix}].md"
 
     try:
         summary = import_meeting_from_content(
