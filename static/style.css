@@ -2177,7 +2177,8 @@ table.bills-table tr:last-child td { border-bottom: none; }
 /* =========================================================
    SMART VIEWS
    ========================================================= */
-#view-smart { display: block; padding: 0; overflow: hidden; }
+#view-smart { padding: 0; overflow: hidden; }
+#view-smart.active { display: block; }
 .smart-views-layout {
   display: grid;
   grid-template-columns: 168px 1fr;
