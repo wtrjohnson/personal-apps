@@ -405,6 +405,7 @@ class Meeting:
     action_items_done: List[str]
     reminders_open: List[str]
     reminders_done: List[str]
+    _tasks_full: List[dict] = None  # [{id, text, type, done}] for editing
     body: str
     body_html: str
     mtime: Optional[float]
@@ -438,6 +439,7 @@ class Meeting:
             "canvas_image": self.canvas_image,
             "contacts": getattr(self, "_contacts", []),
             "bill_references": getattr(self, "_bill_references", []),
+            "tasks_full": self._tasks_full or [],
         }
 
 
@@ -831,6 +833,7 @@ def _row_to_meeting(row: dict, task_rows: List[dict]) -> Meeting:
         action_items_done=[t["text"] for t in task_rows if t["type"] == "action" and t["done"]],
         reminders_open=[t["text"] for t in task_rows if t["type"] == "reminder" and not t["done"]],
         reminders_done=[t["text"] for t in task_rows if t["type"] == "reminder" and t["done"]],
+        _tasks_full=[{"id": t["id"], "text": t["text"], "type": t["type"], "done": t["done"]} for t in task_rows],
         body=row["body"] or "",
         body_html=row["body_html"] or "",
         mtime=row["mtime"],
