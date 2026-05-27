@@ -1129,7 +1129,7 @@ async function _loadCanonicalGroups() {
 }
 
 async function _openMeetingEditModal(mid) {
-  const m = db_get_meeting(mid);
+  const m = state.meetings.find((x) => x.id === mid);
   if (!m) return;
   const backdrop = $("#meeting-edit-backdrop");
   const groupInput = $("#meeting-edit-group");
