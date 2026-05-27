@@ -405,11 +405,11 @@ class Meeting:
     action_items_done: List[str]
     reminders_open: List[str]
     reminders_done: List[str]
-    _tasks_full: List[dict] = None  # [{id, text, type, done}] for editing
     body: str
     body_html: str
     mtime: Optional[float]
     canvas_image: Optional[str] = None
+    _tasks_full: List[dict] = None  # [{id, text, type, done}] for editing
 
     def summary(self) -> Dict[str, Any]:
         return {
