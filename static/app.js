@@ -148,61 +148,6 @@ async function renderHome() {
   drawSparkline(s.completions_per_day || []);
   $("#spark-total").textContent = s.completions_30d || 0;
 
-  const odCard = $("#card-overdue");
-  const odList = $("#overdue-list");
-  const odPill = $("#overdue-count-pill");
-  if (!s.overdue_top || s.overdue_top.length === 0) {
-    if (odCard) odCard.style.display = "none";
-  } else {
-    if (odCard) odCard.style.display = "";
-    odPill.style.display = "";
-    odPill.textContent = `${s.overdue_count} total`;
-    odList.innerHTML = s.overdue_top.map((t) => {
-      const days = t.days_overdue;
-      const label = days === 0 ? "today" : `${days}d`;
-      const groupLine = t.group ? `<span style="color:var(--muted); font-size:11px;">${escapeHtml(t.group)}</span>` : "";
-      return `
-        <li data-overdue-id="${escapeHtml(t.id)}">
-          <div>
-            <div class="od-text">${escapeHtml(t.text)}</div>
-            ${groupLine}
-          </div>
-          <span class="od-days">${label}</span>
-        </li>`;
-    }).join("");
-  }
-
-  const bgEl = $("#group-bars");
-  const maxGroup = Math.max(0, ...((s.by_group || []).map((g) => g.count)));
-  if (!s.by_group || !s.by_group.length) {
-    bgEl.innerHTML = `<div style="color:var(--muted); font-size:13px; text-align:center; padding:18px 0;">No open tasks with a group yet.</div>`;
-  } else {
-    bgEl.innerHTML = s.by_group.map((g) => {
-      const pctW = maxGroup ? Math.round((g.count / maxGroup) * 100) : 0;
-      return `
-        <div class="group-bar" data-group="${escapeHtml(g.group)}">
-          <span class="group-bar-name">${escapeHtml(g.group)}</span>
-          <span class="group-bar-num">${g.count}</span>
-          <div class="group-bar-fill" style="--pct: ${pctW}%;"></div>
-        </div>`;
-    }).join("");
-  }
-
-  if (s.recent_meeting) {
-    const rm = s.recent_meeting;
-    $("#recent-title").textContent = rm.group + (rm.topic ? ` — ${rm.topic}` : "");
-    $("#recent-meta").textContent = rm.date || "";
-    $("#recent-actions").textContent = rm.open_actions || 0;
-    $("#recent-reminders").textContent = rm.open_reminders || 0;
-    $("#recent-meeting-card").dataset.meetingId = rm.id;
-  } else {
-    $("#recent-title").textContent = "—";
-    $("#recent-meta").textContent = "No meetings yet.";
-    $("#recent-actions").textContent = "0";
-    $("#recent-reminders").textContent = "0";
-    delete $("#recent-meeting-card").dataset.meetingId;
-  }
-
   _renderFocusPanel(s.top_urgency || []);
 
   // Today's callouts summary card
@@ -636,6 +581,8 @@ function showUndoToast(task) {
 
 // ---------- Context menu ----------
 let _ctxTask = null;
+let _ctxMeeting = null;
+let _ctxOrg = null;
 
 function openContextMenu(e, task) {
   e.preventDefault();
@@ -685,6 +632,8 @@ function closeContextMenu() {
   menu.classList.remove("visible");
   menu.classList.add("hidden");
   _ctxTask = null;
+  _ctxMeeting = null;
+  _ctxOrg = null;
 }
 
 document.addEventListener("click", (e) => {
@@ -3385,20 +3334,44 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Context menu actions
   $("#ctx-menu").addEventListener("click", async (e) => {
-    const item = e.target.closest(".ctx-item");
-    if (!item || !_ctxTask) return;
+    const item = e.target.closest(".ctx-item[data-action]");
+    if (!item) return;
     const action = item.dataset.action;
-    const task = _ctxTask;
-    closeContextMenu();
-    if (action === "toggle-done")  { await toggleTaskDone(task); }
-    if (action === "edit")         { openEditModal(task); }
-    if (action === "delete")       { await deleteTask(task); }
-    if (action === "view-note")    { openDrawer(task); }
-    if (action === "backburner")   { await toggleTaskBackburner(task); }
-    if (action === "set-priority") { await setPriority(task, item.dataset.priority); }
-    if (action === "snooze")       { openSnoozePopup(task); }
-    if (action === "add-subtask")  { openAddSubtaskModal(task); }
-    if (action === "add-blocker")  { openBlockerModal(task); }
+
+    if (_ctxTask) {
+      const task = _ctxTask;
+      closeContextMenu();
+      if (action === "toggle-done")  { await toggleTaskDone(task); }
+      if (action === "edit")         { openEditModal(task); }
+      if (action === "delete")       { await deleteTask(task); }
+      if (action === "view-note")    { openDrawer(task); }
+      if (action === "backburner")   { await toggleTaskBackburner(task); }
+      if (action === "set-priority") { await setPriority(task, item.dataset.priority); }
+      if (action === "snooze")       { openSnoozePopup(task); }
+      if (action === "add-subtask")  { openAddSubtaskModal(task); }
+      if (action === "add-blocker")  { openBlockerModal(task); }
+    } else if (_ctxMeeting) {
+      const meeting = _ctxMeeting;
+      closeContextMenu();
+      if (action === "open") {
+        await selectMeeting(meeting.id);
+      } else if (action === "delete") {
+        if (!confirm(`Delete "${meeting.group}${meeting.topic ? " — " + meeting.topic : ""}"? This cannot be undone.`)) return;
+        const res = await fetch(`/api/meetings/${meeting.id}`, { method: "DELETE" });
+        const data = await res.json();
+        if (data.ok) { await refreshMeetings(); }
+        else alert(data.error || "Delete failed.");
+      }
+    } else if (_ctxOrg) {
+      const org = _ctxOrg;
+      closeContextMenu();
+      if (action === "view-meetings") {
+        state.meetingFilters = { ...state.meetingFilters, group: org.name };
+        const sel = $("#m-group");
+        if (sel) sel.value = org.name;
+        await refreshMeetings();
+      }
+    }
   });
 
   // Edit modal
@@ -3464,47 +3437,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     switchTab("tasks");
     $("#q").value = day.dataset.date;
     refreshTasks();
-  });
-
-  // Overdue list
-  $("#overdue-list").addEventListener("click", async (e) => {
-    const li = e.target.closest("li[data-overdue-id]");
-    if (!li) return;
-    const tid = li.dataset.overdueId;
-    switchTab("tasks");
-    $("#t-overdue").checked = true;
-    if (state.paperOrder[0] !== "active") bringToFront("active");
-    await refreshTasks();
-    const idx = state.tasksByStatus.active.findIndex((t) => t.id === tid);
-    if (idx >= 0) {
-      selectTask(idx);
-      const el = document.querySelector(`ul[data-paper-list="active"] li[data-idx="${idx}"]`);
-      if (el) el.scrollIntoView({ block: "nearest" });
-    }
-  });
-
-  // By-group
-  $("#group-bars").addEventListener("click", (e) => {
-    const g = e.target.closest(".group-bar");
-    if (!g) return;
-    switchTab("tasks");
-    const want = g.dataset.group;
-    refreshTasks().then(() => {
-      const sel = $("#t-group");
-      if (Array.from(sel.options).some((o) => o.value === want)) {
-        sel.value = want;
-        refreshTasks();
-      }
-    });
-  });
-
-  // Recent meeting
-  $("#recent-meeting-card").addEventListener("click", async () => {
-    const mid = $("#recent-meeting-card").dataset.meetingId;
-    if (!mid) return;
-    switchTab("groups");
-    await refreshMeetings();
-    await selectMeeting(mid);
   });
 
   // NL modal
@@ -3877,6 +3809,41 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (li) selectMeeting(li.dataset.id);
   });
 
+  $("#meetings").addEventListener("contextmenu", (e) => {
+    const li = e.target.closest("li[data-id]");
+    if (!li) return;
+    e.preventDefault();
+    _ctxMeeting = state.meetings.find(m => m.id === li.dataset.id) || { id: li.dataset.id };
+    _ctxTask = null;
+    _ctxOrg = null;
+    const menu = $("#ctx-menu");
+    menu.innerHTML = `
+      <div class="ctx-item" data-action="open">↗ Open / Edit</div>
+      <div class="ctx-divider"></div>
+      <div class="ctx-item ctx-danger" data-action="delete">Delete meeting</div>
+    `;
+    const x = e.clientX, y = e.clientY;
+    menu.style.left = (x + 180 > window.innerWidth ? x - 180 : x) + "px";
+    menu.style.top  = (y + 80 > window.innerHeight ? y - 80 : y) + "px";
+    menu.classList.remove("hidden");
+    menu.classList.add("visible");
+  });
+
+  document.addEventListener("contextmenu", (e) => {
+    const row = e.target.closest("#orgs-body .stakeholder-row");
+    if (!row) return;
+    e.preventDefault();
+    _ctxOrg = { id: row.dataset.orgId, name: row.querySelector("strong")?.textContent?.trim() || row.dataset.orgId };
+    _ctxTask = null;
+    _ctxMeeting = null;
+    const menu = $("#ctx-menu");
+    menu.innerHTML = `<div class="ctx-item" data-action="view-meetings">↗ View meetings</div>`;
+    const x = e.clientX, y = e.clientY;
+    menu.style.left = (x + 180 > window.innerWidth ? x - 180 : x) + "px";
+    menu.style.top  = (y + 40 > window.innerHeight ? y - 40 : y) + "px";
+    menu.classList.remove("hidden");
+    menu.classList.add("visible");
+  });
 
   // Groups sub-tab toggle
   document.querySelectorAll(".groups-subtab").forEach((btn) => {
