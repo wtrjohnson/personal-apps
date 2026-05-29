@@ -32,7 +32,6 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
 AUTH_USERNAME = os.environ.get("DASHBOARD_USERNAME", "admin")
 AUTH_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 SHORTCUT_API_KEY = os.environ.get("SHORTCUT_API_KEY", "")
-INBOUND_WEBHOOK_SECRET = os.environ.get("INBOUND_WEBHOOK_SECRET", "")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = SECRET_KEY
@@ -413,7 +412,7 @@ if DATABASE_URL:
 def require_login() -> Optional[Any]:
     if request.path.startswith("/static/"):
         return None
-    if request.endpoint in ("login", "logout", "shortcut_add_task", "api_inbound_email"):
+    if request.endpoint in ("login", "logout", "shortcut_add_task"):
         return None
     if not session.get("logged_in"):
         return redirect(url_for("login"))
@@ -3032,7 +3031,7 @@ def api_notes_intake():
 
 
 # --------------------------------------------------
-# CALENDAR / INBOUND EMAIL
+# CALENDAR / ICS UPLOAD
 # --------------------------------------------------
 
 _TEAMS_RE = re.compile(r'https://teams\.microsoft\.com/l/meetup-join/[^\s<>"\']+')
@@ -3209,32 +3208,11 @@ def _create_or_update_prepared_meeting(event: dict, ece_id: int) -> str:
     return mid
 
 
-@app.route("/api/inbound/email", methods=["POST"])
-def api_inbound_email():
-    if INBOUND_WEBHOOK_SECRET:
-        if request.headers.get("X-Webhook-Secret", "") != INBOUND_WEBHOOK_SECRET:
-            return jsonify({"ok": False, "error": "Unauthorized"}), 401
-
-    content_type = request.content_type or ''
-    if 'calendar' in content_type or content_type.startswith('text/plain'):
-        raw_ics = request.get_data()
-    elif request.is_json:
-        import base64
-        data = request.get_json(silent=True) or {}
-        ics_b64 = data.get('ics', '')
-        try:
-            raw_ics = base64.b64decode(ics_b64)
-        except Exception:
-            return jsonify({"ok": False, "error": "Invalid base64 in ics field"}), 400
-    else:
-        raw_ics = request.get_data()
-
-    if not raw_ics:
-        return jsonify({"ok": False, "error": "Empty body"}), 400
-
+def _ingest_ics_bytes(raw_ics: bytes) -> dict:
+    """Parse ICS bytes and upsert ECE + prepared meeting. Returns result dict."""
     event = parse_ics_content(raw_ics)
     if not event:
-        return jsonify({"ok": False, "error": "Could not parse ICS content"}), 400
+        return {"ok": False, "error": "Could not parse ICS content"}
 
     uid = event['uid']
     recurrence_id = event.get('recurrence_id') or None
@@ -3243,72 +3221,85 @@ def api_inbound_email():
     status = event.get('status') or 'CONFIRMED'
     is_cancelled = method == 'CANCEL' or status == 'CANCELLED'
 
-    try:
-        ece_id: Optional[int] = None
-        linked_meeting_id: Optional[str] = None
+    ece_id: Optional[int] = None
 
-        with get_db() as conn:
-            with conn.cursor() as cur:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, sequence, meeting_id FROM external_calendar_events
+                WHERE user_id = 'default' AND ics_uid = %s
+                  AND (recurrence_id IS NOT DISTINCT FROM %s)
+            """, (uid, recurrence_id))
+            existing_ece = cur.fetchone()
+
+            if existing_ece:
+                if sequence <= existing_ece['sequence'] and not is_cancelled:
+                    return {"ok": True, "action": "skipped", "reason": "stale_sequence",
+                            "meeting_id": existing_ece.get('meeting_id')}
                 cur.execute("""
-                    SELECT id, sequence, meeting_id FROM external_calendar_events
-                    WHERE user_id = 'default' AND ics_uid = %s
-                      AND (recurrence_id IS NOT DISTINCT FROM %s)
-                """, (uid, recurrence_id))
-                existing_ece = cur.fetchone()
-
-                if existing_ece:
-                    if sequence <= existing_ece['sequence'] and not is_cancelled:
-                        return jsonify({"ok": True, "action": "skipped", "reason": "stale_sequence"})
+                    UPDATE external_calendar_events SET
+                        sequence = %s, method = %s, status = %s,
+                        summary = %s, description = %s, location = %s,
+                        dtstart = %s, dtend = %s, organizer = %s,
+                        attendees = %s, rrule = %s, raw_ics = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                """, (
+                    sequence, method, status,
+                    event.get('summary'), event.get('description'), event.get('location'),
+                    event.get('dtstart'), event.get('dtend'), event.get('organizer'),
+                    json.dumps(event.get('attendees', [])), event.get('rrule'),
+                    raw_ics.decode('utf-8', errors='replace'),
+                    existing_ece['id'],
+                ))
+                ece_id = existing_ece['id']
+                linked_mid = existing_ece.get('meeting_id')
+                if is_cancelled and linked_mid:
                     cur.execute("""
-                        UPDATE external_calendar_events SET
-                            sequence = %s, method = %s, status = %s,
-                            summary = %s, description = %s, location = %s,
-                            dtstart = %s, dtend = %s, organizer = %s,
-                            attendees = %s, rrule = %s, raw_ics = %s,
-                            updated_at = NOW()
-                        WHERE id = %s
-                    """, (
-                        sequence, method, status,
-                        event.get('summary'), event.get('description'), event.get('location'),
-                        event.get('dtstart'), event.get('dtend'), event.get('organizer'),
-                        json.dumps(event.get('attendees', [])), event.get('rrule'),
-                        raw_ics.decode('utf-8', errors='replace'),
-                        existing_ece['id'],
-                    ))
-                    ece_id = existing_ece['id']
-                    linked_meeting_id = existing_ece.get('meeting_id')
-                    if is_cancelled and linked_meeting_id:
-                        cur.execute("""
-                            UPDATE meetings SET status = 'cancelled'
-                            WHERE id = %s AND status = 'prepared'
-                        """, (linked_meeting_id,))
-                    action = "cancelled" if is_cancelled else "updated"
-                else:
-                    if is_cancelled:
-                        return jsonify({"ok": True, "action": "skipped", "reason": "cancel_for_unknown"})
-                    cur.execute("""
-                        INSERT INTO external_calendar_events
-                            (user_id, ics_uid, recurrence_id, sequence, method, status,
-                             summary, description, location, dtstart, dtend, organizer,
-                             attendees, rrule, raw_ics)
-                        VALUES ('default',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        RETURNING id
-                    """, (
-                        uid, recurrence_id, sequence, method, status,
-                        event.get('summary'), event.get('description'), event.get('location'),
-                        event.get('dtstart'), event.get('dtend'), event.get('organizer'),
-                        json.dumps(event.get('attendees', [])), event.get('rrule'),
-                        raw_ics.decode('utf-8', errors='replace'),
-                    ))
-                    ece_id = cur.fetchone()['id']
-                    action = "created"
+                        UPDATE meetings SET status = 'cancelled'
+                        WHERE id = %s AND status = 'prepared'
+                    """, (linked_mid,))
+                action = "cancelled" if is_cancelled else "updated"
+            else:
+                if is_cancelled:
+                    return {"ok": True, "action": "skipped", "reason": "cancel_for_unknown"}
+                cur.execute("""
+                    INSERT INTO external_calendar_events
+                        (user_id, ics_uid, recurrence_id, sequence, method, status,
+                         summary, description, location, dtstart, dtend, organizer,
+                         attendees, rrule, raw_ics)
+                    VALUES ('default',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING id
+                """, (
+                    uid, recurrence_id, sequence, method, status,
+                    event.get('summary'), event.get('description'), event.get('location'),
+                    event.get('dtstart'), event.get('dtend'), event.get('organizer'),
+                    json.dumps(event.get('attendees', [])), event.get('rrule'),
+                    raw_ics.decode('utf-8', errors='replace'),
+                ))
+                ece_id = cur.fetchone()['id']
+                action = "created"
 
-        mid = None
-        if not is_cancelled and ece_id is not None:
-            mid = _create_or_update_prepared_meeting(event, ece_id)
+    mid = None
+    if not is_cancelled and ece_id is not None:
+        mid = _create_or_update_prepared_meeting(event, ece_id)
 
-        return jsonify({"ok": True, "action": action, "meeting_id": mid, "ece_id": ece_id})
+    return {"ok": True, "action": action, "meeting_id": mid, "ece_id": ece_id,
+            "summary": event.get('summary'), "dtstart": event.get('dtstart')}
 
+
+@app.route("/api/calendar/upload", methods=["POST"])
+def api_calendar_upload():
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"ok": False, "error": "No file uploaded"}), 400
+    raw_ics = f.read()
+    if not raw_ics:
+        return jsonify({"ok": False, "error": "Empty file"}), 400
+    try:
+        result = _ingest_ics_bytes(raw_ics)
+        status_code = 200 if result.get("ok") else 400
+        return jsonify(result), status_code
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

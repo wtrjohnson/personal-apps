@@ -1,8 +1,0 @@
-name = "calendar-email-worker"
-main = "email-inbound.js"
-compatibility_date = "2024-01-01"
-
-[vars]
-# WEBHOOK_URL and WEBHOOK_SECRET should be set as encrypted secrets:
-#   wrangler secret put WEBHOOK_URL
-#   wrangler secret put WEBHOOK_SECRET

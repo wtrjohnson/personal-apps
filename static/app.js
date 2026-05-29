@@ -278,6 +278,36 @@ async function loadUpcomingMeetings() {
   }
 }
 
+async function uploadICS(file) {
+  const form = new FormData();
+  form.append("file", file);
+  const btn = $("#hero-upload-ics");
+  const orig = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Adding…"; }
+  try {
+    const res = await fetch("/api/calendar/upload", { method: "POST", body: form });
+    const data = await res.json();
+    if (data.ok && data.action !== "skipped") {
+      loadUpcomingMeetings();
+      if (btn) {
+        btn.textContent = "Added!";
+        setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 2000);
+      }
+    } else if (data.action === "skipped") {
+      if (btn) { btn.disabled = false; btn.textContent = orig; }
+    } else {
+      alert(data.error || "Could not parse ICS file.");
+      if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+  } catch (e) {
+    alert("Upload failed: " + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
+  // Reset file input so the same file can be re-uploaded if needed
+  const inp = $("#ics-upload-input");
+  if (inp) inp.value = "";
+}
+
 function openIntakeModalForMeeting({ topic, attendees, date, preparedMeetingId } = {}) {
   openIntakeModal();
   if (topic) $("#intake-topic").value = topic;
@@ -3418,6 +3448,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Home cards
   $("#hero-add-task").addEventListener("click", openNLModal);
   $("#hero-view-tasks").addEventListener("click", () => switchTab("tasks"));
+  $("#hero-upload-ics").addEventListener("click", () => $("#ics-upload-input").click());
+  $("#ics-upload-input").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (file) uploadICS(file);
+  });
 
   // Deadline strip
   $("#deadlines-strip").addEventListener("click", (e) => {
