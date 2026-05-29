@@ -3161,9 +3161,14 @@ def _create_or_update_prepared_meeting(event: dict, ece_id: int) -> str:
     filename = f"{date_str} - {safe_summary} [cal-{uid_hash}].md"
     mid = hashlib.sha1(filename.encode()).hexdigest()[:16]
 
-    attendees_str = ', '.join(
-        a.get('name') or a.get('email', '') for a in (event.get('attendees') or [])
-    )
+    _ATTENDEE_COLLAPSE_THRESHOLD = 8
+    attendees_list = event.get('attendees') or []
+    if len(attendees_list) <= _ATTENDEE_COLLAPSE_THRESHOLD:
+        attendees_str = ', '.join(
+            a.get('name') or a.get('email', '') for a in attendees_list
+        )
+    else:
+        attendees_str = f"Large meeting ({len(attendees_list)} attendees)"
     meeting_link = extract_meeting_link(event)
 
     try:

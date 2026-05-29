@@ -324,6 +324,9 @@ function openIntakeModalForMeeting({ topic, attendees, date, preparedMeetingId }
     }
     inp.value = preparedMeetingId;
   }
+  // Skip type picker + pre-meeting form — metadata is already known from ICS
+  _intakeMeetingType = "other";
+  _intakeStartMeeting();
 }
 
 async function _refreshTodayCalloutsSummary() {
