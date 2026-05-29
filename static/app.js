@@ -213,6 +213,120 @@ async function renderHome() {
   if (localStorage.getItem("last_plan_date") !== today && s.open_count > 0) {
     openDailyPlan();
   }
+
+  loadUpcomingMeetings();
+}
+
+async function loadUpcomingMeetings() {
+  const card = $("#card-upcoming-meetings");
+  const list = $("#upcoming-meetings-list");
+  if (!card || !list) return;
+  try {
+    const data = await api("/api/meetings/upcoming");
+    const meetings = data.meetings || [];
+    if (!meetings.length) { card.style.display = "none"; return; }
+    card.style.display = "";
+    list.innerHTML = meetings.map((m) => {
+      const dt = m.dtstart ? new Date(m.dtstart) : null;
+      const dateStr = dt
+        ? dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
+          + " · " + dt.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+        : "—";
+      const organizer = m.organizer ? `<span class="upcoming-organizer">${escapeHtml(m.organizer)}</span>` : "";
+      const attendees = Array.isArray(m.cal_attendees)
+        ? m.cal_attendees.length
+        : (typeof m.cal_attendees === "string" ? JSON.parse(m.cal_attendees || "[]").length : 0);
+      const linkBtn = m.meeting_link
+        ? `<a href="${escapeHtml(m.meeting_link)}" target="_blank" rel="noopener" class="upcoming-join-btn">Join</a>`
+        : "";
+      const statusBadge = m.status === "in_progress"
+        ? `<span class="upcoming-badge in-progress">In progress</span>`
+        : "";
+      return `<div class="upcoming-item" data-id="${escapeHtml(m.id)}">
+        <div class="upcoming-meta">${dateStr}${organizer ? " · " + organizer : ""}${attendees > 0 ? ` · ${attendees} attendees` : ""}</div>
+        <div class="upcoming-title">${escapeHtml(m.topic || "Untitled Meeting")} ${statusBadge}</div>
+        <div class="upcoming-actions">
+          ${linkBtn}
+          <button class="cta-pill ghost upcoming-start-btn" data-id="${escapeHtml(m.id)}"
+                  data-topic="${escapeHtml(m.topic || "")}"
+                  data-attendees="${escapeHtml(m.attendees || "")}"
+                  data-date="${m.dtstart ? new Date(m.dtstart).toISOString().slice(0,10) : ""}">
+            ${m.status === "in_progress" ? "Continue Notes" : "Start Notes"}
+          </button>
+        </div>
+      </div>`;
+    }).join("");
+
+    list.querySelectorAll(".upcoming-start-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const mid = btn.dataset.id;
+        await fetch(`/api/meetings/${mid}/status`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "in_progress" }),
+        });
+        openIntakeModalForMeeting({
+          topic: btn.dataset.topic,
+          attendees: btn.dataset.attendees,
+          date: btn.dataset.date,
+          preparedMeetingId: mid,
+        });
+      });
+    });
+  } catch (e) {
+    card.style.display = "none";
+  }
+}
+
+async function uploadICS(file) {
+  const form = new FormData();
+  form.append("file", file);
+  const btn = $("#hero-upload-ics");
+  const orig = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Adding…"; }
+  try {
+    const res = await fetch("/api/calendar/upload", { method: "POST", body: form });
+    const data = await res.json();
+    if (data.ok && data.action !== "skipped") {
+      loadUpcomingMeetings();
+      if (btn) {
+        btn.textContent = "Added!";
+        setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 2000);
+      }
+    } else if (data.action === "skipped") {
+      if (btn) { btn.disabled = false; btn.textContent = orig; }
+    } else {
+      alert(data.error || "Could not parse ICS file.");
+      if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+  } catch (e) {
+    alert("Upload failed: " + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
+  // Reset file input so the same file can be re-uploaded if needed
+  const inp = $("#ics-upload-input");
+  if (inp) inp.value = "";
+}
+
+function openIntakeModalForMeeting({ topic, attendees, date, preparedMeetingId } = {}) {
+  openIntakeModal();
+  if (topic) $("#intake-topic").value = topic;
+  if (attendees) $("#intake-attendees").value = attendees;
+  if (date) $("#intake-date").value = date;
+  if (preparedMeetingId) {
+    let inp = $("#intake-prepared-meeting-id");
+    if (!inp) {
+      inp = document.createElement("input");
+      inp.type = "hidden";
+      inp.id = "intake-prepared-meeting-id";
+      inp.name = "prepared_meeting_id";
+      $(".modal-intake form, .modal-intake")?.appendChild(inp);
+    }
+    inp.value = preparedMeetingId;
+  }
+  // Skip type picker + pre-meeting form — metadata is already known from ICS
+  _intakeMeetingType = "other";
+  _intakeStartMeeting();
 }
 
 async function _refreshTodayCalloutsSummary() {
@@ -2458,6 +2572,8 @@ async function _intakeSaveNotes() {
   const resultEl = $("#intake-result");
   resultEl.className = "intake-result hidden";
 
+  const preparedMeetingId = $("#intake-prepared-meeting-id")?.value || null;
+
   try {
     const res = await fetch("/api/notes/intake", {
       method: "POST",
@@ -2472,6 +2588,7 @@ async function _intakeSaveNotes() {
         reminders: "",
         meeting_type: _intakeMeetingType || null,
         purpose_val: $("#intake-purpose").value.trim() || null,
+        prepared_meeting_id: preparedMeetingId || null,
         confirmed_items: _intakeScanResult
           ? _intakeScanResult.items.map((i) => {
               const out = { type: i.type, text: i.text };
@@ -2495,6 +2612,16 @@ async function _intakeSaveNotes() {
             body: JSON.stringify({ contact_id: c.id }),
           })
         ));
+      }
+      // Mark the prepared calendar-event stub as complete
+      if (preparedMeetingId) {
+        await fetch(`/api/meetings/${preparedMeetingId}/status`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "complete" }),
+        });
+        if ($("#intake-prepared-meeting-id")) $("#intake-prepared-meeting-id").value = "";
+        loadUpcomingMeetings();
       }
       resultEl.className = "intake-result intake-result-ok";
       const c = data.created || {};
@@ -3324,6 +3451,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Home cards
   $("#hero-add-task").addEventListener("click", openNLModal);
   $("#hero-view-tasks").addEventListener("click", () => switchTab("tasks"));
+  $("#hero-upload-ics").addEventListener("click", () => $("#ics-upload-input").click());
+  $("#ics-upload-input").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (file) uploadICS(file);
+  });
 
   // Deadline strip
   $("#deadlines-strip").addEventListener("click", (e) => {

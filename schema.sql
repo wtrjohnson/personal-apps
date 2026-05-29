@@ -112,3 +112,36 @@ CREATE TABLE IF NOT EXISTS bill_references (
 );
 
 CREATE INDEX IF NOT EXISTS bill_refs_meeting ON bill_references (meeting_id);
+
+-- Calendar events ingested via forwarded Outlook invites (ICS parsing)
+CREATE TABLE IF NOT EXISTS external_calendar_events (
+    id           SERIAL PRIMARY KEY,
+    user_id      TEXT NOT NULL DEFAULT 'default',
+    ics_uid      TEXT NOT NULL,
+    recurrence_id TEXT,
+    sequence     INTEGER NOT NULL DEFAULT 0,
+    method       TEXT,
+    status       TEXT,
+    summary      TEXT,
+    description  TEXT,
+    location     TEXT,
+    dtstart      TIMESTAMPTZ,
+    dtend        TIMESTAMPTZ,
+    organizer    TEXT,
+    attendees    JSONB DEFAULT '[]',
+    rrule        TEXT,
+    raw_ics      TEXT,
+    meeting_id   TEXT REFERENCES meetings(id) ON DELETE SET NULL,
+    created_at   TIMESTAMPTZ DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (user_id, ics_uid, recurrence_id)
+);
+
+CREATE INDEX IF NOT EXISTS ece_uid ON external_calendar_events (ics_uid);
+CREATE INDEX IF NOT EXISTS ece_dtstart ON external_calendar_events (dtstart);
+
+ALTER TABLE meetings
+    ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'complete',
+    ADD COLUMN IF NOT EXISTS calendar_event_id INTEGER REFERENCES external_calendar_events(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS dtstart TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS meeting_link TEXT;

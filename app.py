@@ -173,6 +173,24 @@ def init_db() -> None:
                     END IF;
                     IF NOT EXISTS (
                         SELECT 1 FROM information_schema.columns
+                        WHERE table_name='meetings' AND column_name='status'
+                    ) THEN
+                        ALTER TABLE meetings ADD COLUMN status TEXT DEFAULT 'complete';
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='meetings' AND column_name='dtstart'
+                    ) THEN
+                        ALTER TABLE meetings ADD COLUMN dtstart TIMESTAMPTZ;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='meetings' AND column_name='meeting_link'
+                    ) THEN
+                        ALTER TABLE meetings ADD COLUMN meeting_link TEXT;
+                    END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
                         WHERE table_name='tasks' AND column_name='callout_source'
                     ) THEN
                         ALTER TABLE tasks ADD COLUMN callout_source TEXT NULL;
@@ -230,6 +248,42 @@ def init_db() -> None:
                     created_at   TIMESTAMP DEFAULT NOW()
                 );
                 CREATE INDEX IF NOT EXISTS scan_items_meeting ON meeting_scan_items (meeting_id);
+                CREATE TABLE IF NOT EXISTS external_calendar_events (
+                    id           SERIAL PRIMARY KEY,
+                    user_id      TEXT NOT NULL DEFAULT 'default',
+                    ics_uid      TEXT NOT NULL,
+                    recurrence_id TEXT,
+                    sequence     INTEGER NOT NULL DEFAULT 0,
+                    method       TEXT,
+                    status       TEXT,
+                    summary      TEXT,
+                    description  TEXT,
+                    location     TEXT,
+                    dtstart      TIMESTAMPTZ,
+                    dtend        TIMESTAMPTZ,
+                    organizer    TEXT,
+                    attendees    JSONB DEFAULT '[]',
+                    rrule        TEXT,
+                    raw_ics      TEXT,
+                    meeting_id   TEXT REFERENCES meetings(id) ON DELETE SET NULL,
+                    created_at   TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at   TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE (user_id, ics_uid, recurrence_id)
+                );
+                CREATE INDEX IF NOT EXISTS ece_uid ON external_calendar_events (ics_uid);
+                CREATE INDEX IF NOT EXISTS ece_dtstart ON external_calendar_events (dtstart);
+            """)
+            # calendar_event_id FK can only be added after external_calendar_events exists
+            cur.execute("""
+                DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='meetings' AND column_name='calendar_event_id'
+                    ) THEN
+                        ALTER TABLE meetings ADD COLUMN calendar_event_id INTEGER
+                            REFERENCES external_calendar_events(id) ON DELETE SET NULL;
+                    END IF;
+                END $$;
             """)
             # Phase 1: organizations, asks, commitments, followup_triggers
             cur.execute("""
@@ -2974,6 +3028,328 @@ def api_notes_intake():
         })
     except Exception as e:
         return jsonify({"ok": False, "error": f"Database error: {e}"}), 500
+
+
+# --------------------------------------------------
+# CALENDAR / ICS UPLOAD
+# --------------------------------------------------
+
+_TEAMS_RE = re.compile(r'https://teams\.microsoft\.com/l/meetup-join/[^\s<>"\']+')
+_ZOOM_RE = re.compile(r'https://[\w.-]*zoom\.us/j/[^\s<>"\']+')
+
+
+def parse_ics_content(raw_bytes: bytes) -> Optional[dict]:
+    """Parse raw ICS bytes into a normalized event dict. Returns None on failure."""
+    try:
+        from icalendar import Calendar
+    except ImportError:
+        return None
+    try:
+        cal = Calendar.from_ical(raw_bytes)
+    except Exception:
+        return None
+
+    cal_method = cal.get('METHOD')
+    method = str(cal_method).upper() if cal_method else None
+
+    for component in cal.walk():
+        if component.name != 'VEVENT':
+            continue
+        uid = str(component.get('UID', '')).strip()
+        if not uid:
+            continue
+
+        def _str(key: str) -> str:
+            v = component.get(key)
+            return str(v) if v is not None else ''
+
+        def _dt_iso(key: str) -> Optional[str]:
+            try:
+                from datetime import timezone as _tz
+                v = component.decoded(key, None)
+                if v is None:
+                    return None
+                if isinstance(v, datetime):
+                    if v.tzinfo:
+                        return v.astimezone(_tz.utc).isoformat()
+                    return v.isoformat()
+                # date only — treat as UTC midnight
+                return datetime(v.year, v.month, v.day, tzinfo=_tz.utc).isoformat()
+            except Exception:
+                return None
+
+        organizer = _str('ORGANIZER')
+        if organizer.lower().startswith('mailto:'):
+            organizer = organizer[7:]
+
+        attendees = []
+        att_raw = component.get('ATTENDEE')
+        if att_raw is not None:
+            if not isinstance(att_raw, list):
+                att_raw = [att_raw]
+            for a in att_raw:
+                addr = str(a)
+                if addr.lower().startswith('mailto:'):
+                    addr = addr[7:]
+                cn = a.params.get('CN', addr) if hasattr(a, 'params') else addr
+                attendees.append({'email': addr, 'name': str(cn)})
+
+        rrule = None
+        rr = component.get('RRULE')
+        if rr is not None:
+            try:
+                rrule = rr.to_ical().decode('utf-8')
+            except Exception:
+                rrule = str(rr)
+
+        recurrence_id = None
+        rid = component.get('RECURRENCE-ID')
+        if rid is not None:
+            recurrence_id = _dt_iso('RECURRENCE-ID') or str(rid)
+
+        return {
+            'uid': uid,
+            'sequence': int(component.get('SEQUENCE', 0) or 0),
+            'method': method,
+            'status': _str('STATUS').upper() or None,
+            'summary': _str('SUMMARY'),
+            'description': _str('DESCRIPTION'),
+            'location': _str('LOCATION'),
+            'dtstart': _dt_iso('DTSTART'),
+            'dtend': _dt_iso('DTEND'),
+            'organizer': organizer,
+            'attendees': attendees,
+            'rrule': rrule,
+            'recurrence_id': recurrence_id,
+            'teams_url': _str('X-MICROSOFT-SKYPETEAMSMEETINGURL'),
+            'zoom_url': _str('X-ZOOM-JOIN-URL'),
+        }
+    return None
+
+
+def extract_meeting_link(event: dict) -> Optional[str]:
+    if event.get('teams_url'):
+        return event['teams_url']
+    if event.get('zoom_url'):
+        return event['zoom_url']
+    for field in ('location', 'description'):
+        text = event.get(field, '') or ''
+        m = _TEAMS_RE.search(text)
+        if m:
+            return m.group(0)
+        m = _ZOOM_RE.search(text)
+        if m:
+            return m.group(0)
+    return None
+
+
+def _create_or_update_prepared_meeting(event: dict, ece_id: int) -> str:
+    """Upsert a prepared meeting stub from a parsed ICS event. Returns meeting id."""
+    uid = event['uid']
+    recurrence_id = event.get('recurrence_id') or ''
+    summary = event.get('summary') or 'Untitled Meeting'
+    dtstart_str = event.get('dtstart') or ''
+
+    try:
+        dtstart_dt = datetime.fromisoformat(dtstart_str)
+        date_str = dtstart_dt.date().isoformat()
+    except Exception:
+        date_str = date_cls.today().isoformat()
+
+    uid_hash = hashlib.sha1(f"{uid}:{recurrence_id}".encode()).hexdigest()[:8]
+    safe_summary = re.sub(r'[^a-zA-Z0-9_-]', '-', summary[:30])
+    filename = f"{date_str} - {safe_summary} [cal-{uid_hash}].md"
+    mid = hashlib.sha1(filename.encode()).hexdigest()[:16]
+
+    _ATTENDEE_COLLAPSE_THRESHOLD = 8
+    attendees_list = event.get('attendees') or []
+    if len(attendees_list) <= _ATTENDEE_COLLAPSE_THRESHOLD:
+        attendees_str = ', '.join(
+            a.get('name') or a.get('email', '') for a in attendees_list
+        )
+    else:
+        attendees_str = f"Large meeting ({len(attendees_list)} attendees)"
+    meeting_link = extract_meeting_link(event)
+
+    try:
+        file_date: Optional[date_cls] = date_cls.fromisoformat(date_str)
+    except Exception:
+        file_date = None
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, status FROM meetings WHERE id = %s", (mid,))
+            existing = cur.fetchone()
+
+            if existing is None:
+                cur.execute("""
+                    INSERT INTO meetings
+                        (id, filename, file_date, raw_group, canonical_group,
+                         topic, purpose, outcome, deadline, attendees,
+                         body, body_html, mtime,
+                         status, calendar_event_id, dtstart, meeting_link)
+                    VALUES (%s,%s,%s,'calendar','calendar',%s,%s,
+                            '','', %s,'','',NULL,'prepared',%s,%s,%s)
+                """, (
+                    mid, filename, file_date,
+                    summary, json.dumps([]), attendees_str,
+                    ece_id, event.get('dtstart'), meeting_link,
+                ))
+                cur.execute(
+                    "UPDATE external_calendar_events SET meeting_id = %s WHERE id = %s",
+                    (mid, ece_id),
+                )
+            elif existing['status'] == 'prepared':
+                cur.execute("""
+                    UPDATE meetings SET
+                        topic = %s, attendees = %s, dtstart = %s,
+                        meeting_link = %s, calendar_event_id = %s
+                    WHERE id = %s
+                """, (summary, attendees_str, event.get('dtstart'), meeting_link, ece_id, mid))
+                cur.execute(
+                    "UPDATE external_calendar_events SET meeting_id = %s WHERE id = %s",
+                    (mid, ece_id),
+                )
+    return mid
+
+
+def _ingest_ics_bytes(raw_ics: bytes) -> dict:
+    """Parse ICS bytes and upsert ECE + prepared meeting. Returns result dict."""
+    event = parse_ics_content(raw_ics)
+    if not event:
+        return {"ok": False, "error": "Could not parse ICS content"}
+
+    uid = event['uid']
+    recurrence_id = event.get('recurrence_id') or None
+    sequence = event.get('sequence', 0)
+    method = event.get('method') or 'REQUEST'
+    status = event.get('status') or 'CONFIRMED'
+    is_cancelled = method == 'CANCEL' or status == 'CANCELLED'
+
+    ece_id: Optional[int] = None
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, sequence, meeting_id FROM external_calendar_events
+                WHERE user_id = 'default' AND ics_uid = %s
+                  AND (recurrence_id IS NOT DISTINCT FROM %s)
+            """, (uid, recurrence_id))
+            existing_ece = cur.fetchone()
+
+            if existing_ece:
+                if sequence <= existing_ece['sequence'] and not is_cancelled:
+                    return {"ok": True, "action": "skipped", "reason": "stale_sequence",
+                            "meeting_id": existing_ece.get('meeting_id')}
+                cur.execute("""
+                    UPDATE external_calendar_events SET
+                        sequence = %s, method = %s, status = %s,
+                        summary = %s, description = %s, location = %s,
+                        dtstart = %s, dtend = %s, organizer = %s,
+                        attendees = %s, rrule = %s, raw_ics = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                """, (
+                    sequence, method, status,
+                    event.get('summary'), event.get('description'), event.get('location'),
+                    event.get('dtstart'), event.get('dtend'), event.get('organizer'),
+                    json.dumps(event.get('attendees', [])), event.get('rrule'),
+                    raw_ics.decode('utf-8', errors='replace'),
+                    existing_ece['id'],
+                ))
+                ece_id = existing_ece['id']
+                linked_mid = existing_ece.get('meeting_id')
+                if is_cancelled and linked_mid:
+                    cur.execute("""
+                        UPDATE meetings SET status = 'cancelled'
+                        WHERE id = %s AND status = 'prepared'
+                    """, (linked_mid,))
+                action = "cancelled" if is_cancelled else "updated"
+            else:
+                if is_cancelled:
+                    return {"ok": True, "action": "skipped", "reason": "cancel_for_unknown"}
+                cur.execute("""
+                    INSERT INTO external_calendar_events
+                        (user_id, ics_uid, recurrence_id, sequence, method, status,
+                         summary, description, location, dtstart, dtend, organizer,
+                         attendees, rrule, raw_ics)
+                    VALUES ('default',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING id
+                """, (
+                    uid, recurrence_id, sequence, method, status,
+                    event.get('summary'), event.get('description'), event.get('location'),
+                    event.get('dtstart'), event.get('dtend'), event.get('organizer'),
+                    json.dumps(event.get('attendees', [])), event.get('rrule'),
+                    raw_ics.decode('utf-8', errors='replace'),
+                ))
+                ece_id = cur.fetchone()['id']
+                action = "created"
+
+    mid = None
+    if not is_cancelled and ece_id is not None:
+        mid = _create_or_update_prepared_meeting(event, ece_id)
+
+    return {"ok": True, "action": action, "meeting_id": mid, "ece_id": ece_id,
+            "summary": event.get('summary'), "dtstart": event.get('dtstart')}
+
+
+@app.route("/api/calendar/upload", methods=["POST"])
+def api_calendar_upload():
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"ok": False, "error": "No file uploaded"}), 400
+    raw_ics = f.read()
+    if not raw_ics:
+        return jsonify({"ok": False, "error": "Empty file"}), 400
+    try:
+        result = _ingest_ics_bytes(raw_ics)
+        status_code = 200 if result.get("ok") else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/meetings/upcoming")
+def api_meetings_upcoming():
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT m.id, m.topic, m.attendees, m.dtstart, m.meeting_link,
+                           m.status, m.calendar_event_id,
+                           e.organizer, e.attendees AS cal_attendees, e.description
+                    FROM meetings m
+                    LEFT JOIN external_calendar_events e ON e.id = m.calendar_event_id
+                    WHERE m.dtstart >= NOW() - INTERVAL '1 hour'
+                      AND m.status IN ('prepared', 'in_progress')
+                    ORDER BY m.dtstart ASC
+                    LIMIT 20
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+        return jsonify({"ok": True, "meetings": rows})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/meetings/<mid>/status", methods=["POST"])
+def api_meeting_status(mid: str):
+    data = request.get_json(force=True, silent=True) or {}
+    new_status = (data.get("status") or "").strip()
+    allowed = {"prepared", "in_progress", "complete", "cancelled"}
+    if new_status not in allowed:
+        return jsonify({"ok": False, "error": f"status must be one of {allowed}"}), 400
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE meetings SET status = %s WHERE id = %s RETURNING id",
+                    (new_status, mid),
+                )
+                if not cur.fetchone():
+                    return jsonify({"ok": False, "error": "Not found"}), 404
+        return jsonify({"ok": True, "status": new_status})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # --------------------------------------------------
