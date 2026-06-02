@@ -1053,6 +1053,12 @@ input, select, textarea { font-family: inherit; }
   white-space: nowrap;
   font-size: 13.5px;
 }
+.toast.error {
+  background: #b91c1c;
+  color: #fff;
+}
+.toast.error .toast-dismiss { color: rgba(255,255,255,0.7); }
+.toast.error .toast-dismiss:hover { color: #fff; }
 .toast-msg { flex: 1; }
 .toast-undo {
   background: none;
@@ -2659,6 +2665,11 @@ table.bills-table tr:last-child td { border-bottom: none; }
   margin-top: 6px;
   margin-bottom: 4px;
   opacity: 0.8;
+}
+.nl-hint.nl-hint-warn {
+  color: #b45309;
+  opacity: 1;
+  font-weight: 600;
 }
 .nl-step1-footer {
   display: flex;

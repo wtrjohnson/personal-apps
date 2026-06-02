@@ -35,7 +35,14 @@ function escapeHtml(s) {
 }
 async function api(path, opts) {
   const r = await fetch(path, opts);
-  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  if (!r.ok) {
+    let detail = "";
+    try {
+      const body = await r.json();
+      if (body && body.error) detail = `: ${body.error}`;
+    } catch (_) { /* non-JSON error body */ }
+    throw new Error(`${path} → ${r.status}${detail}`);
+  }
   return r.json();
 }
 
@@ -596,42 +603,57 @@ async function deleteTask(task) {
   if (state.tab === "home") renderHome();
 }
 
-// ---------- Undo toast ----------
+// ---------- Toasts ----------
 let _undoTimer = null;
 
-function showUndoToast(task) {
+// Generic transient toast. opts: { type: "error"|null, actionLabel, onAction, duration }
+function showToast(message, opts = {}) {
   clearTimeout(_undoTimer);
   const container = $("#toast-container");
+  const action = opts.actionLabel
+    ? `<button class="toast-undo" id="toast-action-btn">${escapeHtml(opts.actionLabel)}</button>`
+    : "";
   container.innerHTML = `
-    <div class="toast">
-      <span class="toast-msg">Marked complete.</span>
-      <button class="toast-undo" id="toast-undo-btn">Undo</button>
+    <div class="toast${opts.type === "error" ? " error" : ""}">
+      <span class="toast-msg">${escapeHtml(message)}</span>
+      ${action}
       <button class="toast-dismiss" id="toast-dismiss-btn">×</button>
     </div>
   `;
   container.classList.add("visible");
 
-  $("#toast-undo-btn").addEventListener("click", async () => {
-    clearTimeout(_undoTimer);
-    container.classList.remove("visible");
-    await api("/api/tasks/toggle", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: task.id,
-        done: false,
-      }),
+  if (opts.actionLabel) {
+    $("#toast-action-btn").addEventListener("click", () => {
+      clearTimeout(_undoTimer);
+      container.classList.remove("visible");
+      if (opts.onAction) opts.onAction();
     });
-    await refreshTasks();
-    if (state.tab === "home") renderHome();
-  });
-
+  }
   $("#toast-dismiss-btn").addEventListener("click", () => {
     clearTimeout(_undoTimer);
     container.classList.remove("visible");
   });
 
-  _undoTimer = setTimeout(() => container.classList.remove("visible"), 6000);
+  _undoTimer = setTimeout(
+    () => container.classList.remove("visible"),
+    opts.duration || (opts.type === "error" ? 8000 : 4000),
+  );
+}
+
+function showUndoToast(task) {
+  showToast("Marked complete.", {
+    actionLabel: "Undo",
+    duration: 6000,
+    onAction: async () => {
+      await api("/api/tasks/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: task.id, done: false }),
+      });
+      await refreshTasks();
+      if (state.tab === "home") renderHome();
+    },
+  });
 }
 
 // ---------- Context menu ----------
@@ -960,20 +982,68 @@ function getRecurrenceRule(prefix) {
 }
 
 // ---------- NL Morphing Add-task modal ----------
+function _monthIndex(name) {
+  return ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"]
+    .indexOf(name.slice(0, 3).toLowerCase());
+}
+
+// Resolve a month/day with no year to the next future occurrence (this year, or next
+// year if the date has already passed).
+function _resolveMonthDay(monIdx, day, today) {
+  const todayMid = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  let d = new Date(today.getFullYear(), monIdx, day);
+  if (d < todayMid) d = new Date(today.getFullYear() + 1, monIdx, day);
+  return d;
+}
+
 function _clientExtractDeadline(text) {
   const t = text.toLowerCase();
   const today = new Date();
   const iso = (d) => d.toISOString().slice(0, 10);
   const addDays = (n) => { const d = new Date(today); d.setDate(d.getDate() + n); return d; };
+  const dayNames = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
 
+  if (/\b(today|tonight|eod|end of day)\b/.test(t)) return iso(today);
   if (/\btomorrow\b/.test(t)) return iso(addDays(1));
+
   const inN = t.match(/\bin (\d+) days?\b/);
   if (inN) return iso(addDays(parseInt(inN[1])));
+  const inW = t.match(/\bin (\d+) weeks?\b/);
+  if (inW) return iso(addDays(parseInt(inW[1]) * 7));
+
   if (/\bend of (this )?week\b/.test(t)) return iso(_thisFriday());
   if (/\bnext week\b/.test(t)) return iso(_thisFriday());
-  const dayNames = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
+  if (/\bnext month\b/.test(t)) { const d = new Date(today); d.setMonth(d.getMonth() + 1); return iso(d); }
+
   const nextDay = t.match(/\bnext (sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
   if (nextDay) return iso(_nextWeekday(dayNames.indexOf(nextDay[1])));
+
+  // Bare weekday with a preposition: "by Friday", "on Monday", "due Thursday"
+  const wd = t.match(/\b(?:by|on|this|due|before)\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
+  if (wd) return iso(_nextWeekday(dayNames.indexOf(wd[1])));
+
+  // Month name + day: "June 5", "Jun 5th", or "5 June"
+  const monthRe = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
+  let monIdx = -1, day = -1;
+  let md = t.match(new RegExp(`\\b${monthRe}\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`));
+  if (md) { monIdx = _monthIndex(md[1]); day = parseInt(md[2]); }
+  else {
+    md = t.match(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+${monthRe}\\b`));
+    if (md) { day = parseInt(md[1]); monIdx = _monthIndex(md[2]); }
+  }
+  if (monIdx >= 0 && day >= 1 && day <= 31) return iso(_resolveMonthDay(monIdx, day, today));
+
+  // Numeric M/D or M/D/YY(YY) with a preposition: "by 6/5", "due 6/5/26"
+  const numd = t.match(/\b(?:by|on|due|before|deadline:?)\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+  if (numd) {
+    const mo = parseInt(numd[1]) - 1, dy = parseInt(numd[2]);
+    let yr = numd[3] ? parseInt(numd[3]) : null;
+    if (yr !== null && yr < 100) yr += 2000;
+    if (mo >= 0 && mo <= 11 && dy >= 1 && dy <= 31) {
+      return iso(yr !== null ? new Date(yr, mo, dy) : _resolveMonthDay(mo, dy, today));
+    }
+  }
+
   return null;
 }
 
@@ -1018,10 +1088,10 @@ function _populateNLStep2(parsed) {
   fields.push({ id: "nl-f-priority", label: "Priority", type: "select", value: parsed.priority, options: [["normal","Normal"],["high","High"],["low","Low"]] });
   fields.push({ id: "nl-f-deadline", label: "Deadline", type: "date", value: parsed.deadline || "" });
   fields.push({ id: "nl-f-group", label: "Group", type: "text", value: parsed.group || "", uncertain: parsed.groupUncertain });
-  const contactVal = [parsed.email, parsed.phone, parsed.contact].filter(Boolean).join("  ");
-  if (contactVal) {
-    fields.push({ id: "nl-f-contact", label: "Contact method", type: "text", value: contactVal });
-  }
+  // Structured contact fields — kept distinct instead of merged into one blob.
+  if (parsed.contact) fields.push({ id: "nl-f-contact", label: "Contact", type: "text", value: parsed.contact });
+  if (parsed.email)   fields.push({ id: "nl-f-email", label: "Email", type: "text", value: parsed.email });
+  if (parsed.phone)   fields.push({ id: "nl-f-phone", label: "Phone", type: "text", value: parsed.phone });
   if (parsed.estimate_minutes) {
     fields.push({ id: "nl-f-estimate", label: "Estimate (min)", type: "number", value: parsed.estimate_minutes });
   }
@@ -1041,24 +1111,47 @@ function _populateNLStep2(parsed) {
     </div>`;
   }).join("");
 
+  // Non-blocking warning if the resolved deadline is already in the past.
+  $("#nl-f-deadline")?.addEventListener("change", _nlCheckDeadlineWarning);
+  _nlCheckDeadlineWarning();
+
   // Expand container, then unblur fields staggered
   requestAnimationFrame(() => {
     container.classList.add("nl-fields-visible");
     requestAnimationFrame(() => {
       container.querySelectorAll(".nl-field-blur").forEach((el) => el.classList.remove("nl-field-blur"));
+      // a11y: move focus into the form once it's revealed
+      container.querySelector("input, select")?.focus();
     });
   });
 }
 
+function _nlCheckDeadlineWarning() {
+  const el = $("#nl-f-deadline");
+  const hint = $("#nl-hint");
+  if (!el || !hint) return;
+  const todayIso = new Date().toISOString().slice(0, 10);
+  if (el.value && el.value < todayIso) {
+    hint.textContent = "⚠ Deadline is in the past";
+    hint.classList.add("nl-hint-warn");
+  } else {
+    hint.textContent = "";
+    hint.classList.remove("nl-hint-warn");
+  }
+}
+
 let _nlParsed = null;
+let _nlTrigger = null;
 
 function openNLModal() {
   _nlParsed = null;
+  _nlTrigger = document.activeElement;  // restore focus here on close
   const ta = $("#nl-text");
   ta.value = "";
   ta.readOnly = false;
   ta.classList.remove("nl-text-blurred");
   $("#nl-hint").textContent = "";
+  $("#nl-hint").classList.remove("nl-hint-warn");
   const container = $("#nl-parsed-fields");
   container.innerHTML = "";
   container.classList.remove("nl-fields-visible");
@@ -1067,7 +1160,11 @@ function openNLModal() {
   $("#nl-modal-backdrop").classList.remove("hidden");
   setTimeout(() => ta.focus(), 10);
 }
-function closeNLModal() { $("#nl-modal-backdrop").classList.add("hidden"); }
+function closeNLModal() {
+  $("#nl-modal-backdrop").classList.add("hidden");
+  if (_nlTrigger && typeof _nlTrigger.focus === "function") { _nlTrigger.focus(); }
+  _nlTrigger = null;
+}
 
 function _nlGoBack() {
   const ta = $("#nl-text");
@@ -1079,6 +1176,8 @@ function _nlGoBack() {
     container.innerHTML = "";
     ta.readOnly = false;
     ta.classList.remove("nl-text-blurred");
+    $("#nl-hint").textContent = "";
+    $("#nl-hint").classList.remove("nl-hint-warn");
     $("#nl-footer-step2").classList.add("hidden");
     $("#nl-footer-step1").classList.remove("hidden");
     ta.focus();
@@ -1114,19 +1213,40 @@ async function submitNLModal() {
   const priority = $("#nl-f-priority")?.value || "normal";
   const deadline = $("#nl-f-deadline")?.value || "";
   const group = $("#nl-f-group")?.value.trim() || "";
-  const contact = $("#nl-f-contact")?.value.trim() || null;
+  // Structured contact fields → store the primary value (name, else email, else phone).
+  const contactName = $("#nl-f-contact")?.value.trim() || "";
+  const email = $("#nl-f-email")?.value.trim() || "";
+  const phone = $("#nl-f-phone")?.value.trim() || "";
+  const contact = contactName || email || phone || null;
   const estimateRaw = parseInt($("#nl-f-estimate")?.value);
   const estimate_minutes = isNaN(estimateRaw) ? null : estimateRaw;
 
-  await api("/api/tasks/add", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, group, deadline, priority, contact, estimate_minutes }),
-  });
-  closeNLModal();
-  if (state.tab === "tasks") await refreshTasks();
-  if (state.tab === "home")  await renderHome();
-  await loadFacets();
+  const submitBtn = $("#nl-submit");
+  if (submitBtn.disabled) return;  // guard against double-submit
+  const origLabel = submitBtn.textContent;
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Adding…";
+
+  try {
+    await api("/api/tasks/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, group, deadline, priority, contact, estimate_minutes }),
+    });
+    closeNLModal();
+    showToast("Task added");
+    // Refresh only what the current view needs; facets are independent → run together.
+    const refreshes = [loadFacets()];
+    if (state.tab === "tasks") refreshes.push(refreshTasks());
+    if (state.tab === "home")  refreshes.push(renderHome());
+    await Promise.all(refreshes);
+  } catch (err) {
+    // Keep the modal open so the user can retry without re-typing.
+    showToast(err.message || "Could not add task", { type: "error" });
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = origLabel;
+  }
 }
 
 // ---------- (legacy alias — kept for any old references) ----------
@@ -3519,6 +3639,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.target.id === "nl-modal-backdrop") closeNLModal();
   });
   const _nlHintDebounced = debounce((text) => {
+    $("#nl-hint").classList.remove("nl-hint-warn");  // step-1 hint is never a warning
     if (!text.trim()) { $("#nl-hint").textContent = ""; return; }
     const p = parseNLTask(text);
     const hints = [];
@@ -3531,13 +3652,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (p.group) hints.push(`group: ${p.group}`);
     $("#nl-hint").textContent = hints.length ? "Detected: " + hints.join(", ") : "";
   }, 400);
-  const _nlAutoParseDebounced = debounce(() => {
-    const ta = $("#nl-text");
-    if (!ta.readOnly && ta.value.trim()) _nlTransitionToStep2();
-  }, 700);
   $("#nl-text").addEventListener("input", (e) => {
+    // Live "Detected: …" feedback only — advancing to step 2 is explicit
+    // (Enter without Shift, or the "Parse & confirm" button). No idle auto-advance.
     _nlHintDebounced(e.target.value);
-    _nlAutoParseDebounced();
   });
   $("#nl-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); _nlTransitionToStep2(); }

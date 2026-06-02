@@ -2402,18 +2402,15 @@ def api_add_task():
     if not text:
         return jsonify({"ok": False, "error": "text required"}), 400
 
-    tags = []
-    if group:
-        tags.append(f"@group:{group}")
+    # Resolve the deadline. Prefer a value the client already parsed (ISO date);
+    # otherwise fall back to parsing any inline date phrase in the task text.
     if deadline_in:
-        tags.append(f"due {deadline_in}")
-    full_text = text + ((" " + " ".join(tags)) if tags else "")
+        deadline, deadline_raw = deadline_in, deadline_in
+    else:
+        deadline, deadline_raw = extract_deadline(text, context_year=datetime.now().year)
 
-    deadline, deadline_raw = extract_deadline(full_text, context_year=datetime.now().year)
-    # If deadline was passed directly (already parsed client-side), prefer it
-    if deadline_in and not deadline:
-        deadline = deadline_in
-        deadline_raw = deadline_in
+    # Store the clean task text. group/deadline already live in their own columns,
+    # so we no longer append "@group:X due DATE" noise into the displayed text.
     tid = str(uuid.uuid4())
 
     try:
@@ -2427,13 +2424,13 @@ def api_add_task():
                     VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
                             %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
-                    tid, full_text, group, date_cls.today(), deadline, deadline_raw,
+                    tid, text, group, date_cls.today(), deadline, deadline_raw,
                     add_priority, add_contact,
                     int(add_estimate) if add_estimate else None,
                     json.dumps(add_recurrence) if add_recurrence else None,
                     add_parent_id,
                 ))
-        return jsonify({"ok": True, "text": full_text, "id": tid})
+        return jsonify({"ok": True, "text": text, "id": tid})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
