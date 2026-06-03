@@ -375,7 +375,23 @@ def init_db() -> None:
                         ALTER TABLE tasks ADD COLUMN organization_id TEXT
                             REFERENCES organizations(id) ON DELETE SET NULL;
                     END IF;
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='tasks' AND column_name='contact_id'
+                    ) THEN
+                        ALTER TABLE tasks ADD COLUMN contact_id TEXT
+                            REFERENCES contacts(id) ON DELETE SET NULL;
+                    END IF;
                 END $$;
+            """)
+            # Many-to-many people <-> organizations
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS contact_organizations (
+                    contact_id      TEXT REFERENCES contacts(id) ON DELETE CASCADE,
+                    organization_id TEXT REFERENCES organizations(id) ON DELETE CASCADE,
+                    PRIMARY KEY (contact_id, organization_id)
+                );
+                CREATE INDEX IF NOT EXISTS contact_orgs_org ON contact_organizations (organization_id);
             """)
             # Seed organizations from existing canonical_groups and link meetings
             cur.execute("""
@@ -394,6 +410,31 @@ def init_db() -> None:
                     trim('-' FROM regexp_replace(lower(canonical_group), '[^a-z0-9]+', '-', 'g'))
                 WHERE organization_id IS NULL
                   AND canonical_group IS NOT NULL AND canonical_group != ''
+            """)
+            # Seed organizations from distinct task group_name + backfill task org links
+            cur.execute("""
+                INSERT INTO organizations (id, name, created_at, updated_at)
+                SELECT DISTINCT
+                    trim('-' FROM regexp_replace(lower(group_name), '[^a-z0-9]+', '-', 'g')) AS id,
+                    group_name AS name,
+                    NOW(), NOW()
+                FROM tasks
+                WHERE group_name IS NOT NULL AND group_name != ''
+                ON CONFLICT (id) DO NOTHING
+            """)
+            cur.execute("""
+                UPDATE tasks
+                SET organization_id =
+                    trim('-' FROM regexp_replace(lower(group_name), '[^a-z0-9]+', '-', 'g'))
+                WHERE organization_id IS NULL
+                  AND group_name IS NOT NULL AND group_name != ''
+            """)
+            # Backfill the people<->org join table from the legacy single-org column
+            cur.execute("""
+                INSERT INTO contact_organizations (contact_id, organization_id)
+                SELECT id, organization_id FROM contacts
+                WHERE organization_id IS NOT NULL
+                ON CONFLICT DO NOTHING
             """)
 
 
@@ -524,6 +565,7 @@ class Task:
     ask_id: Optional[str] = None
     commitment_id: Optional[str] = None
     organization_id: Optional[str] = None
+    contact_id: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -552,6 +594,7 @@ class Task:
             "ask_id": self.ask_id,
             "commitment_id": self.commitment_id,
             "organization_id": self.organization_id,
+            "contact_id": self.contact_id,
         }
 
 
@@ -730,6 +773,31 @@ def _contact_name_key(name: str) -> str:
     return hashlib.sha1(name.strip().lower().encode()).hexdigest()[:16]
 
 
+def _org_for_name(cur, name: Optional[str]) -> Optional[str]:
+    """Upsert an organization by display name and return its id. Returns None for blank
+    or the 'intake' placeholder so callers don't create junk orgs."""
+    name = (name or "").strip()
+    if not name or name == "intake":
+        return None
+    oid = _org_slug(name)
+    cur.execute("""
+        INSERT INTO organizations (id, name, created_at, updated_at)
+        VALUES (%s, %s, NOW(), NOW())
+        ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
+    """, (oid, name))
+    return oid
+
+
+def _link_contact_org(cur, contact_id: Optional[str], org_id: Optional[str]) -> None:
+    """Associate a person with an organization (many-to-many). No-op if either is missing."""
+    if not contact_id or not org_id:
+        return
+    cur.execute("""
+        INSERT INTO contact_organizations (contact_id, organization_id)
+        VALUES (%s, %s) ON CONFLICT DO NOTHING
+    """, (contact_id, org_id))
+
+
 def _upsert_attendee_contacts(cur, mid: str, attendees_str: Optional[str],
                               org_id: Optional[str]) -> None:
     """Split a free-text attendees string and ensure each name is a People contact
@@ -750,6 +818,7 @@ def _upsert_attendee_contacts(cur, mid: str, attendees_str: Optional[str],
             INSERT INTO meeting_contacts (meeting_id, contact_id)
             VALUES (%s, %s) ON CONFLICT DO NOTHING
         """, (mid, cid))
+        _link_contact_org(cur, cid, org_id)
 
 
 def _year_from_date(s: Optional[str]) -> Optional[int]:
@@ -955,6 +1024,7 @@ def _task_row_to_task(row: dict, today: str) -> Task:
         ask_id=row.get("ask_id"),
         commitment_id=row.get("commitment_id"),
         organization_id=row.get("organization_id"),
+        contact_id=row.get("contact_id"),
     )
 
 
@@ -1065,11 +1135,22 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
                 ORDER BY ft.created_at DESC
             """, (org_id,))
             triggers = [dict(r) for r in cur.fetchall()]
+            # People linked to this org via the many-to-many join, the legacy single-org
+            # column, OR by attending one of its meetings — unioned and de-duplicated.
             cur.execute("""
                 SELECT ct.id, ct.name, ct.title, ct.company, ct.email, ct.phone, ct.card_image
-                FROM contacts ct WHERE ct.organization_id = %s
+                FROM contacts ct
+                WHERE ct.id IN (
+                    SELECT contact_id FROM contact_organizations WHERE organization_id = %s
+                    UNION
+                    SELECT id FROM contacts WHERE organization_id = %s
+                    UNION
+                    SELECT mc.contact_id FROM meeting_contacts mc
+                    JOIN meetings m ON m.id = mc.meeting_id
+                    WHERE m.organization_id = %s
+                )
                 ORDER BY ct.name
-            """, (org_id,))
+            """, (org_id, org_id, org_id))
             contacts_rows = [dict(r) for r in cur.fetchall()]
             cur.execute("""
                 SELECT br.bill_type, br.bill_number,
@@ -1864,32 +1945,49 @@ def api_scan_item_delete(item_id):
     return jsonify({"ok": True})
 
 
+def _contact_org_list(cur, contact_id):
+    """All organizations a person belongs to (via the join table or the legacy column)."""
+    cur.execute("""
+        SELECT o.id, o.name FROM organizations o
+        WHERE o.id IN (
+            SELECT organization_id FROM contact_organizations WHERE contact_id = %s
+            UNION
+            SELECT organization_id FROM contacts WHERE id = %s AND organization_id IS NOT NULL
+        )
+        ORDER BY o.name
+    """, (contact_id, contact_id))
+    return [{"id": r["id"], "name": r["name"]} for r in cur.fetchall()]
+
+
 @app.route("/api/people")
 def api_people():
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT ct.id, ct.name, ct.company, ct.title, ct.email, ct.phone,
-                       ct.card_image, ct.organization_id,
-                       o.name AS org_name,
+                       ct.card_image,
                        COUNT(DISTINCT mc.meeting_id) AS meeting_count,
                        to_char(MAX(m.file_date), 'YYYY-MM-DD') AS last_seen
                 FROM contacts ct
-                LEFT JOIN organizations o ON ct.organization_id = o.id
                 LEFT JOIN meeting_contacts mc ON mc.contact_id = ct.id
                 LEFT JOIN meetings m ON m.id = mc.meeting_id
                 GROUP BY ct.id, ct.name, ct.company, ct.title, ct.email,
-                         ct.phone, ct.card_image, ct.organization_id, o.name
+                         ct.phone, ct.card_image
                 ORDER BY MAX(m.file_date) DESC NULLS LAST, ct.name
             """)
             rows = cur.fetchall()
-    return jsonify([{
-        "id": r["id"], "name": r["name"], "company": r["company"],
-        "title": r["title"], "email": r["email"], "phone": r["phone"],
-        "card_image": r["card_image"], "organization_id": r["organization_id"],
-        "org_name": r["org_name"],
-        "meeting_count": r["meeting_count"], "last_seen": r["last_seen"],
-    } for r in rows])
+            people = []
+            for r in rows:
+                orgs = _contact_org_list(cur, r["id"])
+                people.append({
+                    "id": r["id"], "name": r["name"], "company": r["company"],
+                    "title": r["title"], "email": r["email"], "phone": r["phone"],
+                    "card_image": r["card_image"],
+                    "orgs": orgs,
+                    "org_name": ", ".join(o["name"] for o in orgs) or None,
+                    "meeting_count": r["meeting_count"], "last_seen": r["last_seen"],
+                })
+    return jsonify(people)
 
 
 @app.route("/api/people/<contact_id>")
@@ -1916,12 +2014,62 @@ def api_person_detail(contact_id):
                 ORDER BY a.created_at DESC
             """, (contact_id,))
             asks = [dict(r) for r in cur.fetchall()]
+            cur.execute("""
+                SELECT c.id, c.text, c.status,
+                       to_char(c.created_at,'YYYY-MM-DD') AS created_at_str
+                FROM commitments c WHERE c.contact_id = %s
+                ORDER BY c.created_at DESC
+            """, (contact_id,))
+            commitments = [dict(r) for r in cur.fetchall()]
+            today_iso = date_cls.today().isoformat()
+            cur.execute(_TASKS_SELECT + """
+                WHERE t.contact_id = %s
+                ORDER BY t.done ASC,
+                  CASE WHEN t.deadline IS NULL THEN 1 ELSE 0 END, t.deadline ASC,
+                  t.created_at DESC
+            """, (contact_id,))
+            tasks = [_task_row_to_task(dict(r), today_iso).as_dict() for r in cur.fetchall()]
+            orgs = _contact_org_list(cur, contact_id)
     return jsonify({
         "id": row["id"], "name": row["name"], "company": row["company"],
         "title": row["title"], "email": row["email"], "phone": row["phone"],
         "card_image": row["card_image"], "organization_id": row["organization_id"],
-        "meetings": meetings, "asks": asks,
+        "orgs": orgs, "meetings": meetings, "asks": asks,
+        "commitments": commitments, "tasks": tasks,
     })
+
+
+@app.route("/api/people/<contact_id>/organizations", methods=["POST"])
+def api_person_add_org(contact_id):
+    """Associate a person with an organization (by existing id or new name)."""
+    data = request.get_json(force=True, silent=True) or {}
+    org_id = (data.get("org_id") or "").strip() or None
+    org_name = (data.get("name") or "").strip() or None
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM contacts WHERE id=%s", (contact_id,))
+            if not cur.fetchone():
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            if not org_id:
+                org_id = _org_for_name(cur, org_name)
+            if not org_id:
+                return jsonify({"ok": False, "error": "org_id or name required"}), 400
+            _link_contact_org(cur, contact_id, org_id)
+    return jsonify({"ok": True, "org_id": org_id})
+
+
+@app.route("/api/people/<contact_id>/organizations/<org_id>", methods=["DELETE"])
+def api_person_remove_org(contact_id, org_id):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM contact_organizations WHERE contact_id=%s AND organization_id=%s",
+                (contact_id, org_id))
+            # Also clear the legacy single-org pointer if it matches.
+            cur.execute(
+                "UPDATE contacts SET organization_id=NULL WHERE id=%s AND organization_id=%s",
+                (contact_id, org_id))
+    return jsonify({"ok": True})
 
 
 @app.route("/api/asks")
@@ -2407,6 +2555,7 @@ def api_edit_task():
         new_priority = None
     new_group = (data.get("group") or "").strip() or None
     new_contact = data.get("contact")  # None means "don't change"; "" means clear it
+    new_person = data.get("contact_id")  # None = don't change; "" = clear; id = assign person
     # deadline_direct from picker overrides text-extracted deadline
     deadline_direct = (data.get("deadline_direct") or "").strip() or None
     new_estimate = data.get("estimate_minutes")  # int or None
@@ -2428,8 +2577,14 @@ def api_edit_task():
                 vals = [new_id, new_text, new_deadline, new_deadline_raw]
                 if new_priority:
                     sets.append("priority = %s"); vals.append(new_priority)
+                org_id = None
                 if new_group is not None:
+                    org_id = _org_for_name(cur, new_group)
                     sets.append("group_name = %s"); vals.append(new_group or None)
+                    sets.append("organization_id = %s"); vals.append(org_id)
+                person_id = (new_person or "").strip() or None if new_person is not None else None
+                if new_person is not None:
+                    sets.append("contact_id = %s"); vals.append(person_id)
                 if new_contact is not None:
                     sets.append("contact = %s"); vals.append((new_contact or "").strip() or None)
                 if new_estimate is not None:
@@ -2442,11 +2597,15 @@ def api_edit_task():
                         sets.append("recurrence_rule = %s"); vals.append(json.dumps(new_recurrence))
                 vals.append(task_id)
                 cur.execute(
-                    f"UPDATE tasks SET {', '.join(sets)} WHERE id = %s RETURNING id",
+                    f"UPDATE tasks SET {', '.join(sets)} WHERE id = %s RETURNING id, organization_id",
                     vals,
                 )
-                if cur.fetchone() is None:
+                row = cur.fetchone()
+                if row is None:
                     return jsonify({"ok": False, "error": "task not found"}), 404
+                # Assigning a person ties them to the task's organization too.
+                if person_id:
+                    _link_contact_org(cur, person_id, row["organization_id"])
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -2462,6 +2621,7 @@ def api_add_task():
     if add_priority not in ("high", "normal", "low"):
         add_priority = "normal"
     add_contact = (data.get("contact") or "").strip() or None
+    add_person = (data.get("contact_id") or "").strip() or None
     add_estimate = data.get("estimate_minutes")
     add_recurrence = data.get("recurrence_rule")  # dict or None
     add_parent_id = (data.get("parent_id") or "").strip() or None
@@ -2485,20 +2645,24 @@ def api_add_task():
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
+                org_id = _org_for_name(cur, group)
                 cur.execute("""
                     INSERT INTO tasks
                         (id, text, type, done, backburner, source_filename, section,
                          group_name, source_date, deadline, deadline_raw, priority, contact,
-                         estimate_minutes, recurrence_rule, parent_id)
+                         estimate_minutes, recurrence_rule, parent_id,
+                         organization_id, contact_id)
                     VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     tid, full_text, group, date_cls.today(), deadline, deadline_raw,
                     add_priority, add_contact,
                     int(add_estimate) if add_estimate else None,
                     json.dumps(add_recurrence) if add_recurrence else None,
-                    add_parent_id,
+                    add_parent_id, org_id, add_person,
                 ))
+                # Assigning a person ties them to the task's organization too.
+                _link_contact_org(cur, add_person, org_id)
         return jsonify({"ok": True, "text": full_text, "id": tid})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

@@ -171,8 +171,8 @@
                   </select>
                 </div>
                 <div class="task-filter-field">
-                  <label for="t-group">Group</label>
-                  <select id="t-group"><option value="">All groups</option></select>
+                  <label for="t-group">Organization</label>
+                  <select id="t-group"><option value="">All organizations</option></select>
                 </div>
                 <div class="task-filter-field">
                   <label for="t-priority">Priority</label>
@@ -476,10 +476,17 @@
 
         <div class="modal-row">
           <div>
-            <label>Group (optional)</label>
+            <label>Organization (optional)</label>
             <input id="edit-m-group" list="edit-m-group-list" placeholder="Pick or type new" autocomplete="off">
             <datalist id="edit-m-group-list"></datalist>
           </div>
+          <div>
+            <label>Person (optional)</label>
+            <input id="edit-m-person" list="edit-m-person-list" placeholder="Assign to a person" autocomplete="off">
+            <datalist id="edit-m-person-list"></datalist>
+          </div>
+        </div>
+        <div class="modal-row">
           <div>
             <label>Deadline (optional)</label>
             <div class="deadline-selects">
@@ -811,7 +818,7 @@
         <div id="intake-premeeting" class="intake-premeeting">
           <div class="intake-context-row">
             <div class="intake-context-field" style="flex:2">
-              <label for="intake-group" id="intake-group-label">Group / Project</label>
+              <label for="intake-group" id="intake-group-label">Organization</label>
               <input id="intake-group" type="text" list="intake-group-list" placeholder="e.g. Work, Personal…" autocomplete="off" inputmode="text">
               <datalist id="intake-group-list"></datalist>
             </div>
@@ -937,7 +944,7 @@
       <div class="modal-body">
         <div class="meeting-edit-form">
           <div class="modal-row">
-            <label for="meeting-edit-group">Group</label>
+            <label for="meeting-edit-group">Organization</label>
             <input id="meeting-edit-group" type="text" list="meeting-edit-group-list" placeholder="e.g. Rebekah…" autocomplete="off">
             <datalist id="meeting-edit-group-list"></datalist>
           </div>

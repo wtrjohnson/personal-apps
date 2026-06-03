@@ -14,6 +14,7 @@ const state = {
   selectedOrgId: null,
   selectedTaskIdx: -1,
   facets: { groups: [], purposes: [], attendees: [], unaliased_raw_groups: [] },
+  people: [],
   stats: null,
   meetingFilters: { group: "", purpose: "", attendee: "", dateFrom: "", dateTo: "", hasOpenTasks: false },
   smartView: "today",
@@ -768,6 +769,12 @@ function openEditModal(task) {
       .map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
   }
   if ($("#edit-m-group")) $("#edit-m-group").value = task.group || "";
+  // Populate person datalist + current value
+  fillPersonDatalist("edit-m-person-list");
+  if ($("#edit-m-person")) {
+    const cur = state.people.find((p) => p.id === task.contact_id);
+    $("#edit-m-person").value = cur ? cur.name : "";
+  }
   if ($("#edit-m-contact")) $("#edit-m-contact").value = task.contact || "";
   if ($("#edit-m-estimate")) $("#edit-m-estimate").value = task.estimate_minutes || "";
   if ($("#edit-m-recur")) {
@@ -815,21 +822,28 @@ async function submitEditModal() {
   const newDeadline = getDeadlineValue("edit-m") || null;
   const newContact = $("#edit-m-contact")?.value.trim() ?? null;
   const estimateVal = parseInt($("#edit-m-estimate")?.value);
+  // Person: "" clears, a matched name sets the id, an unmatched non-empty name leaves it unchanged.
+  const personRaw = $("#edit-m-person")?.value.trim() ?? "";
+  let personField;
+  if (personRaw === "") personField = "";
+  else personField = resolvePersonId(personRaw);  // null (unmatched) → omitted below
+  const payload = {
+    source_filename: _editTask.source_filename,
+    section: _editTask.section,
+    old_text: _editTask.text,
+    new_text: newText,
+    priority: newPriority,
+    group: newGroup,
+    deadline_direct: newDeadline,
+    contact: newContact,
+    estimate_minutes: isNaN(estimateVal) ? null : estimateVal,
+    recurrence_rule: getRecurrenceRule("edit-m"),
+  };
+  if (personField !== null) payload.contact_id = personField;
   await api("/api/tasks/edit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      source_filename: _editTask.source_filename,
-      section: _editTask.section,
-      old_text: _editTask.text,
-      new_text: newText,
-      priority: newPriority,
-      group: newGroup,
-      deadline_direct: newDeadline,
-      contact: newContact,
-      estimate_minutes: isNaN(estimateVal) ? null : estimateVal,
-      recurrence_rule: getRecurrenceRule("edit-m"),
-    }),
+    body: JSON.stringify(payload),
   });
   closeEditModal();
   await refreshTasks();
@@ -1098,9 +1112,12 @@ function _populateNLStep2(parsed) {
   const blocks = [
     { uncertain: false, html: `<label>Priority</label>
       <select id="nl-f-priority">${[["normal","Normal"],["high","High"],["low","Low"]].map(([v, l]) => `<option value="${v}"${v === parsed.priority ? " selected" : ""}>${l}</option>`).join("")}</select>` },
-    { uncertain: !!parsed.groupUncertain, html: `<label>Group${parsed.groupUncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
+    { uncertain: !!parsed.groupUncertain, html: `<label>Organization${parsed.groupUncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
       <input id="nl-f-group" list="nl-f-group-list" value="${escapeHtml(parsed.group || "")}" placeholder="Pick or type new" autocomplete="off">
       <datalist id="nl-f-group-list">${groupOpts}</datalist>` },
+    { uncertain: false, html: `<label>Person</label>
+      <input id="nl-f-person" list="nl-f-person-list" value="" placeholder="Assign to a person" autocomplete="off">
+      <datalist id="nl-f-person-list">${state.people.map((p) => `<option value="${escapeHtml(p.name)}"></option>`).join("")}</datalist>` },
     { uncertain: false, html: `<label>Deadline</label>
       <div class="deadline-selects">
         <select id="nl-f-dl-month">${_nlMonthOptions(dlMo)}</select>
@@ -1197,13 +1214,14 @@ async function submitNLModal() {
   const deadline = getDeadlineValue("nl-f") || "";
   const group = $("#nl-f-group")?.value.trim() || "";
   const contact = $("#nl-f-contact")?.value.trim() || null;
+  const contact_id = resolvePersonId($("#nl-f-person")?.value);
   const estimateRaw = parseInt($("#nl-f-estimate")?.value);
   const estimate_minutes = isNaN(estimateRaw) ? null : estimateRaw;
 
   await api("/api/tasks/add", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, group, deadline, priority, contact, estimate_minutes }),
+    body: JSON.stringify({ text, group, deadline, priority, contact, contact_id, estimate_minutes }),
   });
   closeNLModal();
   if (state.tab === "tasks") await refreshTasks();
@@ -1884,9 +1902,35 @@ async function selectPerson(contactId) {
          <span class="org-meeting-topic">${escapeHtml(m.topic || m.canonical_group || "Meeting")}</span>
        </div>`).join("");
 
+    const orgsHtml = (p.orgs || []).map((o) =>
+      `<button class="attendee-chip attendee-chip--link" data-org-id="${escapeHtml(o.id)}">${escapeHtml(o.name)}</button>`
+    ).join("") + `<button class="attendee-chip" id="person-add-org" title="Add organization">+ org</button>`;
+
+    const tasksHtml = (p.tasks || []).map((t) =>
+      `<div class="org-entity-row org-entity-row--task${t.done ? " org-entity-row--done" : ""}" data-person-task-id="${escapeHtml(t.id)}">
+         <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
+         <span class="entity-text">${escapeHtml(t.text)}</span>
+         ${t.done ? `<span class="entity-status">✓ done</span>` : (t.deadline ? `<span class="entity-status">${escapeHtml(t.deadline)}</span>` : "")}
+       </div>`).join("") || `<p class="detail-empty-inline">No tasks yet.</p>`;
+
+    const commitsHtml = (p.commitments || []).map((c) =>
+      `<div class="org-entity-row">
+         <span class="entity-text">${escapeHtml(c.text)}</span>
+         <span class="entity-status status-${c.status}">${escapeHtml((c.status || "").replace("_"," "))}</span>
+       </div>`).join("");
+
     content.innerHTML = `
       <div class="org-detail-header"><h2>${escapeHtml(p.name)}</h2></div>
+      <div class="org-detail-section">
+        <div class="drawer-section-label">Organizations</div>
+        <div class="attendee-chips">${orgsHtml}</div>
+      </div>
       ${_personEditorFields(p)}
+      <div class="org-detail-section">
+        <div class="drawer-section-label">Tasks</div>
+        ${tasksHtml}
+      </div>
+      ${commitsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Commitments</div>${commitsHtml}</div>` : ""}
       <div class="org-detail-section">
         <div class="drawer-section-label">Asks Raised</div>
         ${asksHtml}
@@ -1897,6 +1941,33 @@ async function selectPerson(contactId) {
     content.querySelectorAll(".org-meeting-row[data-mid]").forEach((row) => {
       if (!row.dataset.mid) return;
       row.addEventListener("click", () => selectMeeting(row.dataset.mid));
+    });
+    // Org chips → open that org
+    content.querySelectorAll(".attendee-chip--link[data-org-id]").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+        document.querySelector(".groups-subtab[data-subtab='orgs']")?.classList.add("active");
+        document.querySelectorAll(".groups-panel").forEach((pp) => pp.classList.add("hidden"));
+        $("#groups-panel-orgs")?.classList.remove("hidden");
+        selectOrg(chip.dataset.orgId, { skipToggle: true });
+      });
+    });
+    // + org → prompt for org name, link, refresh
+    $("#person-add-org")?.addEventListener("click", async () => {
+      const name = prompt("Add this person to which organization?");
+      if (!name || !name.trim()) return;
+      await api(`/api/people/${contactId}/organizations`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      selectPerson(contactId);
+    });
+    // Person's tasks open the task drawer
+    content.querySelectorAll("[data-person-task-id]").forEach((row) => {
+      row.addEventListener("click", () => {
+        const t = (p.tasks || []).find((x) => x.id === row.dataset.personTaskId);
+        if (t) openDrawer(t);
+      });
     });
   } catch {
     content.innerHTML = `<div class="detail-empty">Couldn't load person.</div>`;
@@ -2962,6 +3033,24 @@ async function refreshMeetingsNow() {
 
 async function loadFacets() {
   state.facets = await api("/api/facets");
+}
+
+// People cache used by the Person picker on task modals.
+async function loadPeopleCache() {
+  try { state.people = await api("/api/people") || []; } catch { state.people = []; }
+}
+// Fill a <datalist> with person names (value = name) for autosuggest.
+function fillPersonDatalist(id) {
+  const dl = $("#" + id);
+  if (!dl) return;
+  dl.innerHTML = state.people.map((p) => `<option value="${escapeHtml(p.name)}"></option>`).join("");
+}
+// Resolve a typed person name back to a contact id (exact, case-insensitive). null if no match.
+function resolvePersonId(name) {
+  const n = (name || "").trim().toLowerCase();
+  if (!n) return null;
+  const hit = state.people.find((p) => (p.name || "").trim().toLowerCase() === n);
+  return hit ? hit.id : null;
 }
 
 function renderBillsTable(bills) {
@@ -4380,6 +4469,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   await loadFacets();
+  loadPeopleCache();
   switchTab("home");
 });
 
