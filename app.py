@@ -3352,9 +3352,12 @@ def api_meeting_metadata(mid: str):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
+                # Preserve the existing dtstart if none is provided, so a blank
+                # date field can't silently drop the meeting from the upcoming card.
                 cur.execute("""
                     UPDATE meetings
-                    SET topic = %s, attendees = %s, meeting_link = %s, dtstart = %s
+                    SET topic = %s, attendees = %s, meeting_link = %s,
+                        dtstart = COALESCE(%s, dtstart)
                     WHERE id = %s
                     RETURNING id
                 """, (topic, attendees, meeting_link, dtstart, mid))

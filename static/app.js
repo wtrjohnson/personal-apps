@@ -316,9 +316,14 @@ function closeMeetingEditModal() {
 }
 async function submitMeetingEditModal() {
   if (!_meetingEditId) return;
+  // The datetime-local field holds a local wall-clock value with no timezone.
+  // Convert it to a UTC ISO string so the TIMESTAMPTZ column stores the correct
+  // instant (otherwise Postgres reads the naive value as UTC and shifts the time).
+  const dtRaw = $("#me-dtstart").value;
+  const dtstart = dtRaw ? new Date(dtRaw).toISOString() : null;
   const body = {
     topic: $("#me-topic").value.trim(),
-    dtstart: $("#me-dtstart").value || null,
+    dtstart,
     attendees: $("#me-attendees").value.trim(),
     meeting_link: $("#me-link").value.trim(),
   };
