@@ -307,11 +307,11 @@ function openMeetingEditModal({ id, topic, attendees, meeting_link, dtstart } = 
   $("#me-dtstart").value = dtstart || "";
   $("#me-attendees").value = attendees || "";
   $("#me-link").value = meeting_link || "";
-  $("#meeting-edit-backdrop").classList.remove("hidden");
+  $("#ics-meeting-edit-backdrop").classList.remove("hidden");
   setTimeout(() => $("#me-topic").focus(), 10);
 }
 function closeMeetingEditModal() {
-  $("#meeting-edit-backdrop").classList.add("hidden");
+  $("#ics-meeting-edit-backdrop").classList.add("hidden");
   _meetingEditId = null;
 }
 async function submitMeetingEditModal() {
@@ -3500,8 +3500,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#me-close").addEventListener("click",  closeMeetingEditModal);
   $("#me-cancel").addEventListener("click", closeMeetingEditModal);
   $("#me-submit").addEventListener("click", submitMeetingEditModal);
-  $("#meeting-edit-backdrop").addEventListener("click", (e) => {
-    if (e.target.id === "meeting-edit-backdrop") closeMeetingEditModal();
+  $("#ics-meeting-edit-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "ics-meeting-edit-backdrop") closeMeetingEditModal();
   });
   $("#edit-m-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter")  { e.preventDefault(); submitEditModal(); }
