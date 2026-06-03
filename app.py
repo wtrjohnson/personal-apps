@@ -393,6 +393,18 @@ def init_db() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS contact_orgs_org ON contact_organizations (organization_id);
             """)
+            # Standalone notes attached to an organization or a person
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS entity_notes (
+                    id          SERIAL PRIMARY KEY,
+                    entity_type TEXT NOT NULL,   -- 'organization' | 'contact'
+                    entity_id   TEXT NOT NULL,
+                    body        TEXT NOT NULL DEFAULT '',
+                    created_at  TIMESTAMP DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS entity_notes_lookup
+                    ON entity_notes (entity_type, entity_id);
+            """)
             # Seed organizations from existing canonical_groups and link meetings
             cur.execute("""
                 INSERT INTO organizations (id, name, created_at, updated_at)
@@ -435,6 +447,13 @@ def init_db() -> None:
                 SELECT id, organization_id FROM contacts
                 WHERE organization_id IS NOT NULL
                 ON CONFLICT DO NOTHING
+            """)
+            # Strip the legacy trailing "@group:..." tag that the add-task flow used to
+            # append into free-task text (organization is a structured field now).
+            cur.execute(r"""
+                UPDATE tasks
+                SET text = regexp_replace(text, '\s*@group:.*$', '')
+                WHERE text LIKE '%@group:%'
             """)
 
 
@@ -1181,6 +1200,7 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
             """, (org_id, org_id))
             completed_tasks = [_task_row_to_task(dict(r), today_iso).as_dict()
                                for r in cur.fetchall()]
+            entity_notes = _get_entity_notes(cur, "organization", org_id)
     # Derive org name from meetings if no org row exists
     fallback_name = meetings[0]["canonical_group"] if meetings else org_id
     return {
@@ -1196,6 +1216,7 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
         "bills": bills,
         "open_tasks": open_tasks,
         "completed_tasks": completed_tasks,
+        "entity_notes": entity_notes,
     }
 
 
@@ -1945,6 +1966,43 @@ def api_scan_item_delete(item_id):
     return jsonify({"ok": True})
 
 
+_NOTE_TYPES = ("organization", "contact")
+
+def _get_entity_notes(cur, entity_type, entity_id):
+    cur.execute("""
+        SELECT id, body, to_char(created_at,'YYYY-MM-DD') AS created_at
+        FROM entity_notes WHERE entity_type=%s AND entity_id=%s
+        ORDER BY created_at DESC, id DESC
+    """, (entity_type, entity_id))
+    return [dict(r) for r in cur.fetchall()]
+
+
+@app.route("/api/entity-notes", methods=["POST"])
+def api_entity_note_add():
+    data = request.get_json(force=True, silent=True) or {}
+    etype = (data.get("entity_type") or "").strip()
+    eid = (data.get("entity_id") or "").strip()
+    body = (data.get("body") or "").strip()
+    if etype not in _NOTE_TYPES or not eid or not body:
+        return jsonify({"ok": False, "error": "entity_type, entity_id, body required"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO entity_notes (entity_type, entity_id, body)
+                VALUES (%s, %s, %s) RETURNING id
+            """, (etype, eid, body))
+            nid = cur.fetchone()["id"]
+    return jsonify({"ok": True, "id": nid})
+
+
+@app.route("/api/entity-notes/<int:note_id>", methods=["DELETE"])
+def api_entity_note_delete(note_id):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM entity_notes WHERE id=%s", (note_id,))
+    return jsonify({"ok": True})
+
+
 def _contact_org_list(cur, contact_id):
     """All organizations a person belongs to (via the join table or the legacy column)."""
     cur.execute("""
@@ -2030,12 +2088,13 @@ def api_person_detail(contact_id):
             """, (contact_id,))
             tasks = [_task_row_to_task(dict(r), today_iso).as_dict() for r in cur.fetchall()]
             orgs = _contact_org_list(cur, contact_id)
+            entity_notes = _get_entity_notes(cur, "contact", contact_id)
     return jsonify({
         "id": row["id"], "name": row["name"], "company": row["company"],
         "title": row["title"], "email": row["email"], "phone": row["phone"],
         "card_image": row["card_image"], "organization_id": row["organization_id"],
         "orgs": orgs, "meetings": meetings, "asks": asks,
-        "commitments": commitments, "tasks": tasks,
+        "commitments": commitments, "tasks": tasks, "entity_notes": entity_notes,
     })
 
 
@@ -2628,14 +2687,10 @@ def api_add_task():
     if not text:
         return jsonify({"ok": False, "error": "text required"}), 400
 
-    tags = []
-    if group:
-        tags.append(f"@group:{group}")
-    if deadline_in:
-        tags.append(f"due {deadline_in}")
-    full_text = text + ((" " + " ".join(tags)) if tags else "")
-
-    deadline, deadline_raw = extract_deadline(full_text, context_year=datetime.now().year)
+    # Organization + deadline are now structured fields, so keep the task text clean
+    # (no more "@group:" / "due" tags appended into the text).
+    full_text = text
+    deadline, deadline_raw = extract_deadline(text, context_year=datetime.now().year)
     # If deadline was passed directly (already parsed client-side), prefer it
     if deadline_in and not deadline:
         deadline = deadline_in

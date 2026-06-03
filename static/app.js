@@ -822,11 +822,9 @@ async function submitEditModal() {
   const newDeadline = getDeadlineValue("edit-m") || null;
   const newContact = $("#edit-m-contact")?.value.trim() ?? null;
   const estimateVal = parseInt($("#edit-m-estimate")?.value);
-  // Person: "" clears, a matched name sets the id, an unmatched non-empty name leaves it unchanged.
+  // Person: "" clears; a typed name resolves to an existing contact or creates a new one.
   const personRaw = $("#edit-m-person")?.value.trim() ?? "";
-  let personField;
-  if (personRaw === "") personField = "";
-  else personField = resolvePersonId(personRaw);  // null (unmatched) → omitted below
+  const personField = personRaw === "" ? "" : await ensurePersonId(personRaw);
   const payload = {
     source_filename: _editTask.source_filename,
     section: _editTask.section,
@@ -839,7 +837,7 @@ async function submitEditModal() {
     estimate_minutes: isNaN(estimateVal) ? null : estimateVal,
     recurrence_rule: getRecurrenceRule("edit-m"),
   };
-  if (personField !== null) payload.contact_id = personField;
+  payload.contact_id = personField;
   await api("/api/tasks/edit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1214,7 +1212,7 @@ async function submitNLModal() {
   const deadline = getDeadlineValue("nl-f") || "";
   const group = $("#nl-f-group")?.value.trim() || "";
   const contact = $("#nl-f-contact")?.value.trim() || null;
-  const contact_id = resolvePersonId($("#nl-f-person")?.value);
+  const contact_id = await ensurePersonId($("#nl-f-person")?.value);
   const estimateRaw = parseInt($("#nl-f-estimate")?.value);
   const estimate_minutes = isNaN(estimateRaw) ? null : estimateRaw;
 
@@ -1669,7 +1667,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
       ? openTasks.map((t) => {
           const deadline = t.deadline ? `<span class="entity-status">${escapeHtml(t.deadline)}</span>` : "";
           const priority = t.priority === "high" ? `<span class="entity-status status-task_created">high</span>` : "";
-          return `<div class="org-entity-row org-entity-row--task" data-task-id="${escapeHtml(t.id)}">
+          return `<div class="org-entity-row org-entity-row--task" data-task-id="${escapeHtml(t.id)}" data-contact-id="${escapeHtml(t.contact_id || "")}">
             <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
             <span class="entity-text">${escapeHtml(t.text)}</span>${deadline}${priority}
           </div>`;
@@ -1678,7 +1676,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
 
     const completedTasksHtml = completedTasks.length
       ? completedTasks.map((t) => {
-          return `<div class="org-entity-row org-entity-row--task org-entity-row--done" data-task-id="${escapeHtml(t.id)}">
+          return `<div class="org-entity-row org-entity-row--task org-entity-row--done" data-task-id="${escapeHtml(t.id)}" data-contact-id="${escapeHtml(t.contact_id || "")}">
             <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
             <span class="entity-text">${escapeHtml(t.text)}</span>
             <span class="entity-status">✓ done</span>
@@ -1691,7 +1689,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     ).join("");
 
     const contactsHtml = (org.contacts || []).map((c) => `
-      <div class="drawer-card">
+      <div class="drawer-card org-person-card" data-person-id="${escapeHtml(c.id)}" style="cursor:pointer">
         ${c.card_image ? `<img class="drawer-card-thumb" src="${c.card_image}" alt="">` : ""}
         <div class="drawer-card-info">
           <div class="drawer-card-name">${escapeHtml(c.name || "(no name)")}</div>
@@ -1700,13 +1698,27 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         </div>
       </div>`).join("");
 
+    // Filter-by-person control for the task sections (only if there are people + tasks)
+    const hasTasks = openTasks.length || completedTasks.length;
+    const personFilterHtml = (hasTasks && (org.contacts || []).length)
+      ? `<div class="org-task-filter">
+           <label>Filter tasks by person</label>
+           <select id="org-task-person-filter">
+             <option value="">Everyone</option>
+             ${(org.contacts || []).map((c) => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name || "(no name)")}</option>`).join("")}
+           </select>
+         </div>`
+      : "";
+
     const sections = [
       asksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Asks</div>${asksHtml}</div>`,
       commitsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Commitments</div>${commitsHtml}</div>`,
+      personFilterHtml,
       tasksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Tasks</div>${tasksHtml}</div>`,
       completedTasksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Completed Tasks</div>${completedTasksHtml}</div>`,
       billsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Bills</div><div class="bill-pills-row">${billsHtml}</div></div>`,
-      contactsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Contacts</div><div class="drawer-cards">${contactsHtml}</div></div>`,
+      contactsHtml && `<div class="org-detail-section"><div class="drawer-section-label">People</div><div class="drawer-cards">${contactsHtml}</div></div>`,
+      _entityNotesHtml(org.entity_notes),
     ].filter(Boolean).join("");
 
     // Populate all of col-2's contents (header, badges, org-detail block) while still hidden.
@@ -1720,6 +1732,28 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     }
     if (content) content.innerHTML = sections;
     if (orgDetail) orgDetail.classList.toggle("hidden", !sections);
+
+    // Standalone org notes
+    if (content) _wireEntityNotes(content, "organization", orgId, () => selectOrg(orgId, { skipToggle: true }));
+
+    // Filter task rows by person
+    content?.querySelector("#org-task-person-filter")?.addEventListener("change", (e) => {
+      const cid = e.target.value;
+      content.querySelectorAll(".org-entity-row--task").forEach((row) => {
+        row.classList.toggle("hidden", !!cid && row.dataset.contactId !== cid);
+      });
+    });
+
+    // Person cards → open that person on the People subtab
+    content?.querySelectorAll(".org-person-card[data-person-id]").forEach((card) => {
+      card.addEventListener("click", () => {
+        document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+        document.querySelector(".groups-subtab[data-subtab='people']")?.classList.add("active");
+        document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
+        $("#groups-panel-people")?.classList.remove("hidden");
+        selectPerson(card.dataset.personId);
+      });
+    });
 
     // Wire interactive buttons
     content?.querySelectorAll(".entity-status-btn").forEach((btn) => {
@@ -1863,6 +1897,44 @@ function _wirePersonEditor() {
   });
 }
 
+// Reusable standalone-notes section for an organization or a person.
+function _entityNotesHtml(notes) {
+  const items = (notes || []).map((n) => `
+    <div class="entity-note" data-note-id="${n.id}">
+      <span class="entity-note-body">${escapeHtml(n.body)}</span>
+      <span class="entity-note-meta">${escapeHtml(n.created_at || "")}</span>
+      <button class="entity-note-del" title="Delete note">✕</button>
+    </div>`).join("") || `<p class="detail-empty-inline">No notes yet.</p>`;
+  return `<div class="org-detail-section">
+      <div class="drawer-section-label">Notes</div>
+      ${items}
+      <div class="entity-note-add">
+        <textarea class="entity-note-input" rows="2" placeholder="Add a note…"></textarea>
+        <button class="secondary-btn-sm entity-note-save">Add note</button>
+      </div>
+    </div>`;
+}
+function _wireEntityNotes(scope, entityType, entityId, refresh) {
+  scope.querySelectorAll(".entity-note-del").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.closest(".entity-note").dataset.noteId;
+      await api(`/api/entity-notes/${id}`, { method: "DELETE" });
+      refresh();
+    });
+  });
+  const save = scope.querySelector(".entity-note-save");
+  save?.addEventListener("click", async () => {
+    const ta = scope.querySelector(".entity-note-input");
+    const body = (ta.value || "").trim();
+    if (!body) return;
+    await api("/api/entity-notes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entity_type: entityType, entity_id: entityId, body }),
+    });
+    refresh();
+  });
+}
+
 function openAddPersonModal() {
   _currentPersonId = null;
   _pePendingCard = null;
@@ -1936,8 +2008,10 @@ async function selectPerson(contactId) {
         ${asksHtml}
       </div>
       ${meetingsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Meeting History</div>${meetingsHtml}</div>` : ""}
+      ${_entityNotesHtml(p.entity_notes)}
     `;
     _wirePersonEditor();
+    _wireEntityNotes(content, "contact", contactId, () => selectPerson(contactId));
     content.querySelectorAll(".org-meeting-row[data-mid]").forEach((row) => {
       if (!row.dataset.mid) return;
       row.addEventListener("click", () => selectMeeting(row.dataset.mid));
@@ -3051,6 +3125,19 @@ function resolvePersonId(name) {
   if (!n) return null;
   const hit = state.people.find((p) => (p.name || "").trim().toLowerCase() === n);
   return hit ? hit.id : null;
+}
+// Resolve a typed person name to a contact id, creating a new contact if none matches.
+async function ensurePersonId(name) {
+  const n = (name || "").trim();
+  if (!n) return null;
+  const existing = resolvePersonId(n);
+  if (existing) return existing;
+  const res = await api("/api/contacts", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: n }),
+  });
+  await loadPeopleCache();
+  return res.id;
 }
 
 function renderBillsTable(bills) {

@@ -3753,6 +3753,25 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
 .people-list-header { display: flex; justify-content: flex-end; margin-bottom: 8px; }
 .person-editor { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
 .person-editor-actions { display: flex; gap: 8px; margin-top: 4px; }
+
+/* Standalone notes (org + person) */
+.entity-note {
+  display: flex; align-items: baseline; gap: 8px; padding: 6px 0;
+  border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.entity-note:last-of-type { border-bottom: none; }
+.entity-note-body { flex: 1; min-width: 0; white-space: pre-wrap; }
+.entity-note-meta { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+.entity-note-del {
+  border: none; background: none; color: var(--muted); cursor: pointer; font-size: 13px; flex-shrink: 0;
+}
+.entity-note-del:hover { color: var(--card-blue); }
+.entity-note-add { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; }
+.entity-note-input { flex: 1; resize: vertical; }
+
+/* Per-person task filter on the org detail */
+.org-task-filter { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; font-size: 12px; color: var(--muted); }
+.org-task-filter select { flex: 0 0 auto; }
 .org-entity-text, .entity-text { flex: 1; min-width: 0; }
 .org-entity-status, .entity-status {
   padding: 2px 7px; border-radius: var(--r-pill); font-size: 10px; font-weight: 600;
