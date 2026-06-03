@@ -1710,7 +1710,13 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
          </div>`
       : "";
 
+    const orgHeaderHtml = `<div class="org-detail-header">
+        <h2>${escapeHtml(org.name)}</h2>
+        <button class="icon-btn org-rename-btn" title="Rename organization">✎</button>
+      </div>`;
+
     const sections = [
+      orgHeaderHtml,
       asksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Asks</div>${asksHtml}</div>`,
       commitsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Commitments</div>${commitsHtml}</div>`,
       personFilterHtml,
@@ -1732,6 +1738,19 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     }
     if (content) content.innerHTML = sections;
     if (orgDetail) orgDetail.classList.toggle("hidden", !sections);
+
+    // Rename organization (id stays stable)
+    content?.querySelector(".org-rename-btn")?.addEventListener("click", async () => {
+      const next = prompt("Rename organization:", org.name);
+      if (!next || !next.trim() || next.trim() === org.name) return;
+      await api(`/api/organizations/${orgId}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: next.trim() }),
+      });
+      await loadGroups();
+      await loadFacets();
+      selectOrg(orgId, { skipToggle: true });
+    });
 
     // Standalone org notes
     if (content) _wireEntityNotes(content, "organization", orgId, () => selectOrg(orgId, { skipToggle: true }));
@@ -2009,8 +2028,29 @@ async function selectPerson(contactId) {
       </div>
       ${meetingsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Meeting History</div>${meetingsHtml}</div>` : ""}
       ${_entityNotesHtml(p.entity_notes)}
+      <div class="org-detail-section">
+        <div class="drawer-section-label">Merge duplicate</div>
+        <div class="person-merge-row">
+          <input id="person-merge-input" list="person-merge-list" placeholder="Merge this person into…" autocomplete="off">
+          <datalist id="person-merge-list">${state.people.filter((x) => x.id !== contactId).map((x) => `<option value="${escapeHtml(x.name)}"></option>`).join("")}</datalist>
+          <button class="secondary-btn-sm" id="person-merge-btn">Merge</button>
+        </div>
+      </div>
     `;
     _wirePersonEditor();
+    $("#person-merge-btn")?.addEventListener("click", async () => {
+      const into = resolvePersonId($("#person-merge-input")?.value);
+      if (!into || into === contactId) { alert("Pick a different existing person to merge into."); return; }
+      const target = state.people.find((x) => x.id === into);
+      if (!confirm(`Merge "${p.name}" into "${target ? target.name : into}"? This deletes "${p.name}" and moves all its tasks, meetings, orgs and notes.`)) return;
+      await api(`/api/people/${contactId}/merge`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ into }),
+      });
+      await loadPeopleCache();
+      await loadGroups();
+      selectPerson(into);
+    });
     _wireEntityNotes(content, "contact", contactId, () => selectPerson(contactId));
     content.querySelectorAll(".org-meeting-row[data-mid]").forEach((row) => {
       if (!row.dataset.mid) return;

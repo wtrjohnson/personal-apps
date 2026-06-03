@@ -3772,6 +3772,14 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
 /* Per-person task filter on the org detail */
 .org-task-filter { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; font-size: 12px; color: var(--muted); }
 .org-task-filter select { flex: 0 0 auto; }
+
+/* Org rename button in the org detail header */
+.org-detail-header { display: flex; align-items: center; gap: 8px; }
+.org-rename-btn { flex: 0 0 auto; }
+
+/* Person merge control */
+.person-merge-row { display: flex; gap: 8px; align-items: center; }
+.person-merge-row input { flex: 1; margin-bottom: 0; }
 .org-entity-text, .entity-text { flex: 1; min-width: 0; }
 .org-entity-status, .entity-status {
   padding: 2px 7px; border-radius: var(--r-pill); font-size: 10px; font-weight: 600;

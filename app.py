@@ -793,11 +793,18 @@ def _contact_name_key(name: str) -> str:
 
 
 def _org_for_name(cur, name: Optional[str]) -> Optional[str]:
-    """Upsert an organization by display name and return its id. Returns None for blank
-    or the 'intake' placeholder so callers don't create junk orgs."""
+    """Resolve a display name to an organization id, reusing an existing org when the name
+    matches (case-insensitively) so slight variants don't fork new orgs — and so a renamed
+    org (whose id no longer equals slug(name)) still resolves to its real id. Creates a new
+    slug-id org only when no name match exists. Returns None for blank / the 'intake' placeholder."""
     name = (name or "").strip()
     if not name or name == "intake":
         return None
+    cur.execute("SELECT id FROM organizations WHERE lower(name) = lower(%s) ORDER BY created_at LIMIT 1",
+                (name,))
+    hit = cur.fetchone()
+    if hit:
+        return hit["id"]
     oid = _org_slug(name)
     cur.execute("""
         INSERT INTO organizations (id, name, created_at, updated_at)
@@ -829,15 +836,15 @@ def _upsert_attendee_contacts(cur, mid: str, attendees_str: Optional[str],
             continue
         cid = _contact_name_key(name)
         cur.execute("""
-            INSERT INTO contacts (id, name, organization_id, updated_at)
-            VALUES (%s, %s, %s, NOW())
+            INSERT INTO contacts (id, name, updated_at)
+            VALUES (%s, %s, NOW())
             ON CONFLICT (id) DO NOTHING
-        """, (cid, name, org_id))
+        """, (cid, name))
         cur.execute("""
             INSERT INTO meeting_contacts (meeting_id, contact_id)
             VALUES (%s, %s) ON CONFLICT DO NOTHING
         """, (mid, cid))
-        _link_contact_org(cur, cid, org_id)
+        _link_contact_org(cur, cid, org_id)  # org link lives in the join table
 
 
 def _year_from_date(s: Optional[str]) -> Optional[int]:
@@ -1154,22 +1161,20 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
                 ORDER BY ft.created_at DESC
             """, (org_id,))
             triggers = [dict(r) for r in cur.fetchall()]
-            # People linked to this org via the many-to-many join, the legacy single-org
-            # column, OR by attending one of its meetings — unioned and de-duplicated.
+            # People linked to this org via the many-to-many join OR by attending one of its
+            # meetings — unioned and de-duplicated.
             cur.execute("""
                 SELECT ct.id, ct.name, ct.title, ct.company, ct.email, ct.phone, ct.card_image
                 FROM contacts ct
                 WHERE ct.id IN (
                     SELECT contact_id FROM contact_organizations WHERE organization_id = %s
                     UNION
-                    SELECT id FROM contacts WHERE organization_id = %s
-                    UNION
                     SELECT mc.contact_id FROM meeting_contacts mc
                     JOIN meetings m ON m.id = mc.meeting_id
                     WHERE m.organization_id = %s
                 )
                 ORDER BY ct.name
-            """, (org_id, org_id, org_id))
+            """, (org_id, org_id))
             contacts_rows = [dict(r) for r in cur.fetchall()]
             cur.execute("""
                 SELECT br.bill_type, br.bill_number,
@@ -1519,17 +1524,12 @@ def api_meeting_update(mid: str):
     if not note_group:
         return jsonify({"ok": False, "error": "Group required"}), 400
     canon = note_group  # user explicitly set this name, treat it as canonical directly
-    org_id_new = _org_slug(note_group)
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM meetings WHERE id = %s", (mid,))
             if not cur.fetchone():
                 return jsonify({"ok": False, "error": "Not found"}), 404
-            cur.execute("""
-                INSERT INTO organizations (id, name, created_at, updated_at)
-                VALUES (%s, %s, NOW(), NOW())
-                ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
-            """, (org_id_new, note_group))
+            org_id_new = _org_for_name(cur, note_group)
             cur.execute("""
                 UPDATE meetings
                 SET raw_group = %s, canonical_group = %s, topic = %s,
@@ -1846,6 +1846,30 @@ def api_organization_detail(org_id):
     return jsonify(profile)
 
 
+@app.route("/api/organizations/<org_id>", methods=["PUT"])
+def api_organization_rename(org_id):
+    """Rename an organization. The id stays stable; dependent display-name text on meetings
+    and tasks is synced so name-based views (e.g. the meeting timeline filter) keep matching."""
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "name required"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO organizations (id, name, created_at, updated_at)
+                VALUES (%s, %s, NOW(), NOW())
+                ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, updated_at = NOW()
+            """, (org_id, name))
+            cur.execute("""
+                UPDATE meetings SET raw_group = %s, canonical_group = %s
+                WHERE organization_id = %s
+            """, (name, name, org_id))
+            cur.execute("UPDATE tasks SET group_name = %s WHERE organization_id = %s",
+                        (name, org_id))
+    return jsonify({"ok": True, "id": org_id, "name": name})
+
+
 @app.route("/api/organizations/<org_id>/brief")
 def api_organization_brief(org_id):
     return jsonify(db_get_pre_meeting_brief(org_id))
@@ -2004,16 +2028,13 @@ def api_entity_note_delete(note_id):
 
 
 def _contact_org_list(cur, contact_id):
-    """All organizations a person belongs to (via the join table or the legacy column)."""
+    """All organizations a person belongs to (via the contact_organizations join table)."""
     cur.execute("""
         SELECT o.id, o.name FROM organizations o
-        WHERE o.id IN (
-            SELECT organization_id FROM contact_organizations WHERE contact_id = %s
-            UNION
-            SELECT organization_id FROM contacts WHERE id = %s AND organization_id IS NOT NULL
-        )
+        JOIN contact_organizations co ON co.organization_id = o.id
+        WHERE co.contact_id = %s
         ORDER BY o.name
-    """, (contact_id, contact_id))
+    """, (contact_id,))
     return [{"id": r["id"], "name": r["name"]} for r in cur.fetchall()]
 
 
@@ -2092,7 +2113,7 @@ def api_person_detail(contact_id):
     return jsonify({
         "id": row["id"], "name": row["name"], "company": row["company"],
         "title": row["title"], "email": row["email"], "phone": row["phone"],
-        "card_image": row["card_image"], "organization_id": row["organization_id"],
+        "card_image": row["card_image"],
         "orgs": orgs, "meetings": meetings, "asks": asks,
         "commitments": commitments, "tasks": tasks, "entity_notes": entity_notes,
     })
@@ -2124,11 +2145,56 @@ def api_person_remove_org(contact_id, org_id):
             cur.execute(
                 "DELETE FROM contact_organizations WHERE contact_id=%s AND organization_id=%s",
                 (contact_id, org_id))
-            # Also clear the legacy single-org pointer if it matches.
-            cur.execute(
-                "UPDATE contacts SET organization_id=NULL WHERE id=%s AND organization_id=%s",
-                (contact_id, org_id))
     return jsonify({"ok": True})
+
+
+@app.route("/api/people/<contact_id>/merge", methods=["POST"])
+def api_person_merge(contact_id):
+    """Merge the duplicate person <contact_id> INTO a canonical person, repointing every
+    reference, filling blanks on the survivor, then deleting the duplicate."""
+    data = request.get_json(force=True, silent=True) or {}
+    into = (data.get("into") or "").strip()
+    dup = contact_id
+    if not into or into == dup:
+        return jsonify({"ok": False, "error": "a different 'into' contact is required"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM contacts WHERE id=%s", (into,))
+            survivor = cur.fetchone()
+            cur.execute("SELECT * FROM contacts WHERE id=%s", (dup,))
+            duprow = cur.fetchone()
+            if not survivor or not duprow:
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            # Composite-PK join tables: copy then delete, guarding against collisions.
+            for tbl in ("meeting_contacts", "contact_organizations"):
+                other = "meeting_id" if tbl == "meeting_contacts" else "organization_id"
+                cur.execute(f"""
+                    INSERT INTO {tbl} ({other}, contact_id)
+                    SELECT {other}, %s FROM {tbl} WHERE contact_id = %s
+                    ON CONFLICT DO NOTHING
+                """, (into, dup))
+                cur.execute(f"DELETE FROM {tbl} WHERE contact_id = %s", (dup,))
+            # Nullable FKs: straight repoint.
+            for tbl in ("asks", "commitments", "followup_triggers", "tasks"):
+                cur.execute(f"UPDATE {tbl} SET contact_id = %s WHERE contact_id = %s", (into, dup))
+            cur.execute("""
+                UPDATE entity_notes SET entity_id = %s
+                WHERE entity_type = 'contact' AND entity_id = %s
+            """, (into, dup))
+            # Fill blank survivor fields from the duplicate.
+            cur.execute("""
+                UPDATE contacts SET
+                    email      = COALESCE(NULLIF(email, ''), %s),
+                    phone      = COALESCE(NULLIF(phone, ''), %s),
+                    title      = COALESCE(NULLIF(title, ''), %s),
+                    company    = COALESCE(NULLIF(company, ''), %s),
+                    card_image = COALESCE(card_image, %s),
+                    updated_at = NOW()
+                WHERE id = %s
+            """, (duprow["email"], duprow["phone"], duprow["title"],
+                  duprow["company"], duprow["card_image"], into))
+            cur.execute("DELETE FROM contacts WHERE id = %s", (dup,))
+    return jsonify({"ok": True, "id": into})
 
 
 @app.route("/api/asks")
@@ -3150,12 +3216,7 @@ def api_notes_intake():
                     # Resolve or create organization for this meeting
                     org_id_out: Optional[str] = None
                     if note_group and note_group != "intake":
-                        org_id_out = _org_slug(note_group)
-                        cur.execute("""
-                            INSERT INTO organizations (id, name, created_at, updated_at)
-                            VALUES (%s, %s, NOW(), NOW())
-                            ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
-                        """, (org_id_out, note_group))
+                        org_id_out = _org_for_name(cur, note_group)
                         cur.execute("""
                             UPDATE meetings SET organization_id = %s WHERE id = %s
                         """, (org_id_out, mid_out))
