@@ -3341,6 +3341,30 @@ def api_meetings_upcoming():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/meetings/<mid>/metadata", methods=["POST"])
+def api_meeting_metadata(mid: str):
+    """Edit parsed metadata (title/date/attendees/link) of a prepared meeting."""
+    data = request.get_json(force=True, silent=True) or {}
+    topic = (data.get("topic") or "").strip()
+    attendees = (data.get("attendees") or "").strip()
+    meeting_link = (data.get("meeting_link") or "").strip() or None
+    dtstart = (data.get("dtstart") or "").strip() or None
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE meetings
+                    SET topic = %s, attendees = %s, meeting_link = %s, dtstart = %s
+                    WHERE id = %s
+                    RETURNING id
+                """, (topic, attendees, meeting_link, dtstart, mid))
+                if not cur.fetchone():
+                    return jsonify({"ok": False, "error": "Not found"}), 404
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/meetings/<mid>/status", methods=["POST"])
 def api_meeting_status(mid: str):
     data = request.get_json(force=True, silent=True) or {}

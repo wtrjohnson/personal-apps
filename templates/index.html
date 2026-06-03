@@ -542,6 +542,33 @@
     </div>
   </div>
 
+  <!-- Edit meeting (parsed ICS) metadata modal -->
+  <div id="meeting-edit-backdrop" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2>Edit meeting details</h2>
+        <button class="modal-close" id="me-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <label for="me-topic">Title</label>
+        <input id="me-topic" placeholder="Meeting title" autocomplete="off">
+
+        <label for="me-dtstart">Date &amp; time</label>
+        <input id="me-dtstart" type="datetime-local" autocomplete="off">
+
+        <label for="me-attendees">Attendees</label>
+        <input id="me-attendees" placeholder="Comma-separated names" autocomplete="off">
+
+        <label for="me-link">Meeting link</label>
+        <input id="me-link" placeholder="https://…" autocomplete="off">
+      </div>
+      <div class="modal-footer">
+        <button class="secondary-btn" id="me-cancel">Cancel</button>
+        <button class="primary-btn" id="me-submit">Save changes</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Import modal -->
   <div id="import-modal-backdrop" class="modal-backdrop hidden">
     <div class="modal modal-wide" role="dialog" aria-modal="true">

@@ -242,10 +242,20 @@ async function loadUpcomingMeetings() {
       const statusBadge = m.status === "in_progress"
         ? `<span class="upcoming-badge in-progress">In progress</span>`
         : "";
+      const dtLocal = dt
+        ? new Date(dt.getTime() - dt.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+        : "";
+      const editBtn = `<button class="upcoming-edit-btn" title="Edit meeting details"
+              data-id="${escapeHtml(m.id)}"
+              data-topic="${escapeHtml(m.topic || "")}"
+              data-attendees="${escapeHtml(m.attendees || "")}"
+              data-link="${escapeHtml(m.meeting_link || "")}"
+              data-dtstart="${dtLocal}">✎</button>`;
       return `<div class="upcoming-item" data-id="${escapeHtml(m.id)}">
         <div class="upcoming-meta">${dateStr}${organizer ? " · " + organizer : ""}${attendees > 0 ? ` · ${attendees} attendees` : ""}</div>
         <div class="upcoming-title">${escapeHtml(m.topic || "Untitled Meeting")} ${statusBadge}</div>
         <div class="upcoming-actions">
+          ${editBtn}
           ${linkBtn}
           <button class="cta-pill ghost upcoming-start-btn" data-id="${escapeHtml(m.id)}"
                   data-topic="${escapeHtml(m.topic || "")}"
@@ -256,6 +266,18 @@ async function loadUpcomingMeetings() {
         </div>
       </div>`;
     }).join("");
+
+    list.querySelectorAll(".upcoming-edit-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        openMeetingEditModal({
+          id: btn.dataset.id,
+          topic: btn.dataset.topic,
+          attendees: btn.dataset.attendees,
+          meeting_link: btn.dataset.link,
+          dtstart: btn.dataset.dtstart,
+        });
+      });
+    });
 
     list.querySelectorAll(".upcoming-start-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
@@ -276,6 +298,37 @@ async function loadUpcomingMeetings() {
   } catch (e) {
     card.style.display = "none";
   }
+}
+
+let _meetingEditId = null;
+function openMeetingEditModal({ id, topic, attendees, meeting_link, dtstart } = {}) {
+  _meetingEditId = id;
+  $("#me-topic").value = topic || "";
+  $("#me-dtstart").value = dtstart || "";
+  $("#me-attendees").value = attendees || "";
+  $("#me-link").value = meeting_link || "";
+  $("#meeting-edit-backdrop").classList.remove("hidden");
+  setTimeout(() => $("#me-topic").focus(), 10);
+}
+function closeMeetingEditModal() {
+  $("#meeting-edit-backdrop").classList.add("hidden");
+  _meetingEditId = null;
+}
+async function submitMeetingEditModal() {
+  if (!_meetingEditId) return;
+  const body = {
+    topic: $("#me-topic").value.trim(),
+    dtstart: $("#me-dtstart").value || null,
+    attendees: $("#me-attendees").value.trim(),
+    meeting_link: $("#me-link").value.trim(),
+  };
+  await api(`/api/meetings/${_meetingEditId}/metadata`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  closeMeetingEditModal();
+  await loadUpcomingMeetings();
 }
 
 async function uploadICS(file) {
@@ -3443,6 +3496,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#edit-modal-submit").addEventListener("click",  submitEditModal);
   $("#edit-modal-backdrop").addEventListener("click", (e) => {
     if (e.target.id === "edit-modal-backdrop") closeEditModal();
+  });
+  $("#me-close").addEventListener("click",  closeMeetingEditModal);
+  $("#me-cancel").addEventListener("click", closeMeetingEditModal);
+  $("#me-submit").addEventListener("click", submitMeetingEditModal);
+  $("#meeting-edit-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "meeting-edit-backdrop") closeMeetingEditModal();
   });
   $("#edit-m-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter")  { e.preventDefault(); submitEditModal(); }
