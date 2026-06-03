@@ -3739,6 +3739,20 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .org-entity-row--task { cursor: pointer; }
 .org-entity-row--task:hover { background: var(--surface); }
 .org-entity-row--done .entity-text { color: var(--ink-soft, #8a8f98); text-decoration: line-through; }
+
+/* Attendee chips on the meeting detail */
+.attendee-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.attendee-chip {
+  display: inline-block; padding: 1px 8px; border-radius: var(--r-pill);
+  background: var(--surface); border: 1px solid var(--border); font-size: 12px; color: var(--ink);
+}
+button.attendee-chip--link { cursor: pointer; }
+button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--card-blue); }
+
+/* People tab: add-person header + person editor */
+.people-list-header { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.person-editor { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
+.person-editor-actions { display: flex; gap: 8px; margin-top: 4px; }
 .org-entity-text, .entity-text { flex: 1; min-width: 0; }
 .org-entity-status, .entity-status {
   padding: 2px 7px; border-radius: var(--r-pill); font-size: 10px; font-weight: 600;

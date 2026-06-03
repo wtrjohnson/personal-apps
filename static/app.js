@@ -1255,7 +1255,17 @@ function renderDetail(m) {
   const meta = [];
   if (m.date)          meta.push(`<span>${escapeHtml(m.date)}</span>`);
   if (m.purpose?.length) meta.push(`<span>${escapeHtml(m.purpose.join(" · "))}</span>`);
-  if (m.attendees)     meta.push(`<span>👥 ${escapeHtml(m.attendees)}</span>`);
+  if (m.attendees) {
+    const norm = (s) => s.trim().toLowerCase();
+    const byName = new Map((m.contacts || []).map((c) => [norm(c.name || ""), c.id]));
+    const chips = m.attendees.split(/[;,]/).map((a) => a.trim()).filter(Boolean).map((a) => {
+      const cid = byName.get(norm(a));
+      return cid
+        ? `<button class="attendee-chip attendee-chip--link" data-person-id="${escapeHtml(cid)}">${escapeHtml(a)}</button>`
+        : `<span class="attendee-chip">${escapeHtml(a)}</span>`;
+    }).join("");
+    meta.push(`<span class="attendee-chips">👥 ${chips}</span>`);
+  }
   if (m.deadline)      meta.push(`<span>⏰ ${escapeHtml(m.deadline)}</span>`);
   if (m.outcome)       meta.push(`<span>→ ${escapeHtml(m.outcome)}</span>`);
   if (m.raw_group && m.raw_group !== m.group)
@@ -1328,6 +1338,16 @@ function renderDetail(m) {
   `;
   const ci = $("#detail .canvas-note-image");
   if (ci) ci.addEventListener("click", () => _openCanvasFullscreen(ci.src));
+
+  $("#detail").querySelectorAll(".attendee-chip--link").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+      document.querySelector(".groups-subtab[data-subtab='people']")?.classList.add("active");
+      document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
+      $("#groups-panel-people")?.classList.remove("hidden");
+      selectPerson(chip.dataset.personId);
+    });
+  });
 
   $("#detail").querySelectorAll(".detail-contact-unlink").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -1739,7 +1759,110 @@ function renderPeopleTable(people) {
   });
 }
 
+let _currentPersonId = null;   // contact id being edited; null = creating a new person
+let _pePendingCard = null;     // data URL of a freshly scanned card, sent on save
+
+function _personEditorFields(p = {}) {
+  const f = (id, label, val, type = "text") =>
+    `<div class="modal-row"><label for="${id}">${label}</label>
+       <input id="${id}" type="${type}" value="${escapeHtml(val || "")}" autocomplete="off"></div>`;
+  return `
+    <div class="person-editor">
+      ${f("pe-name", "Name", p.name)}
+      ${f("pe-title", "Title", p.title)}
+      ${f("pe-company", "Company", p.company)}
+      ${f("pe-email", "Email", p.email, "email")}
+      ${f("pe-phone", "Phone", p.phone, "tel")}
+      ${p.card_image ? `<img id="pe-card-img" class="drawer-card-thumb" src="${p.card_image}" alt="Business card" style="margin-top:6px">` : `<img id="pe-card-img" class="drawer-card-thumb hidden" alt="Business card" style="margin-top:6px">`}
+      <input type="file" id="pe-photo" accept="image/*" capture="environment" style="display:none">
+      <div class="person-editor-actions">
+        <button type="button" class="secondary-btn-sm" id="pe-scan">Scan business card</button>
+        <button type="button" class="primary-btn-sm" id="pe-save">Save</button>
+      </div>
+    </div>`;
+}
+
+function _wirePersonEditor() {
+  const scanBtn = $("#pe-scan");
+  const photo = $("#pe-photo");
+  scanBtn?.addEventListener("click", () => photo.click());
+  photo?.addEventListener("change", async () => {
+    const file = photo.files[0];
+    if (!file) return;
+    photo.value = "";
+    scanBtn.disabled = true;
+    scanBtn.textContent = "Reading…";
+    try {
+      const r = await scanCardImage(file);
+      _pePendingCard = r.dataUrl || null;
+      if (r.ok) {
+        // Only overwrite a field when the scan actually returned a value.
+        const set = (id, v) => { if (v) $(id).value = v; };
+        set("#pe-name", r.name); set("#pe-company", r.company);
+        set("#pe-title", r.title); set("#pe-email", r.email); set("#pe-phone", r.phone);
+      } else {
+        alert(r.error || "Card scan failed — fill in manually");
+      }
+      const img = $("#pe-card-img");
+      if (img && _pePendingCard) { img.src = _pePendingCard; img.classList.remove("hidden"); }
+    } catch {
+      alert("Card scan failed — fill in manually");
+    } finally {
+      scanBtn.disabled = false;
+      scanBtn.textContent = "Scan business card";
+    }
+  });
+  $("#pe-save")?.addEventListener("click", async () => {
+    const body = {
+      name: $("#pe-name").value.trim(),
+      title: $("#pe-title").value.trim(),
+      company: $("#pe-company").value.trim(),
+      email: $("#pe-email").value.trim(),
+      phone: $("#pe-phone").value.trim(),
+    };
+    if (_pePendingCard) body.card_image = _pePendingCard;
+    if (!body.name) { alert("Name is required"); $("#pe-name").focus(); return; }
+    try {
+      let savedId = _currentPersonId;
+      if (_currentPersonId) {
+        await api(`/api/people/${_currentPersonId}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } else {
+        const res = await api("/api/contacts", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        savedId = res.id;
+      }
+      _pePendingCard = null;
+      await loadGroups();
+      if (savedId) selectPerson(savedId);
+    } catch {
+      alert("Save failed");
+    }
+  });
+}
+
+function openAddPersonModal() {
+  _currentPersonId = null;
+  _pePendingCard = null;
+  $$("#people-body .stakeholder-row").forEach((r) => r.classList.remove("active"));
+  const panel = $("#person-detail-panel");
+  const content = $("#person-detail-content");
+  if (!panel || !content) return;
+  panel.classList.remove("hidden");
+  content.innerHTML = `
+    <div class="org-detail-header"><h2>Add person</h2></div>
+    ${_personEditorFields({})}`;
+  _wirePersonEditor();
+  setTimeout(() => $("#pe-name")?.focus(), 10);
+}
+
 async function selectPerson(contactId) {
+  _currentPersonId = contactId;
+  _pePendingCard = null;
   $$("#people-body .stakeholder-row").forEach((r) =>
     r.classList.toggle("active", r.dataset.personId === contactId));
   const panel = $("#person-detail-panel");
@@ -1756,27 +1879,25 @@ async function selectPerson(contactId) {
        </div>`).join("") || `<p class="detail-empty-inline">No asks on record.</p>`;
 
     const meetingsHtml = (p.meetings || []).slice(0, 8).map((m) =>
-      `<div class="org-meeting-row">
+      `<div class="org-meeting-row" data-mid="${escapeHtml(m.id || "")}" style="cursor:pointer">
          <span class="org-meeting-date">${escapeHtml(m.date || "—")}</span>
          <span class="org-meeting-topic">${escapeHtml(m.topic || m.canonical_group || "Meeting")}</span>
        </div>`).join("");
 
     content.innerHTML = `
-      <div class="org-detail-header">
-        <h2>${escapeHtml(p.name)}</h2>
-        <div class="person-meta">
-          ${p.title || p.company ? `<span>${escapeHtml([p.title,p.company].filter(Boolean).join(" · "))}</span>` : ""}
-          ${p.email ? `<span>${escapeHtml(p.email)}</span>` : ""}
-          ${p.phone ? `<span>${escapeHtml(p.phone)}</span>` : ""}
-        </div>
-        ${p.card_image ? `<img class="drawer-card-thumb" src="${p.card_image}" alt="Business card" style="margin-top:10px">` : ""}
-      </div>
+      <div class="org-detail-header"><h2>${escapeHtml(p.name)}</h2></div>
+      ${_personEditorFields(p)}
       <div class="org-detail-section">
         <div class="drawer-section-label">Asks Raised</div>
         ${asksHtml}
       </div>
       ${meetingsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Meeting History</div>${meetingsHtml}</div>` : ""}
     `;
+    _wirePersonEditor();
+    content.querySelectorAll(".org-meeting-row[data-mid]").forEach((row) => {
+      if (!row.dataset.mid) return;
+      row.addEventListener("click", () => selectMeeting(row.dataset.mid));
+    });
   } catch {
     content.innerHTML = `<div class="detail-empty">Couldn't load person.</div>`;
   }
@@ -2381,6 +2502,24 @@ function _renderSavedCards() {
       _renderSavedCards();
     });
   });
+}
+
+// Shared business-card scan: read a file, send to Claude Vision, return structured fields.
+// Used by the intake card scanner and the People person editor.
+async function scanCardImage(file) {
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  const res = await fetch("/api/contacts/scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: dataUrl }),
+  });
+  const data = await res.json();
+  return { ...data, dataUrl };
 }
 
 (function _initCardScanner() {
@@ -3989,6 +4128,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (subtab !== "orgs") selectOrg(null);
     });
   });
+
+  $("#add-person-btn")?.addEventListener("click", openAddPersonModal);
 
   // Intake modal
   $("#intake-modal-close").addEventListener("click", closeIntakeModal);
