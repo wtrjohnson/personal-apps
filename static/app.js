@@ -14,6 +14,7 @@ const state = {
   selectedOrgId: null,
   selectedTaskIdx: -1,
   facets: { groups: [], purposes: [], attendees: [], unaliased_raw_groups: [] },
+  people: [],
   stats: null,
   meetingFilters: { group: "", purpose: "", attendee: "", dateFrom: "", dateTo: "", hasOpenTasks: false },
   smartView: "today",
@@ -768,6 +769,12 @@ function openEditModal(task) {
       .map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
   }
   if ($("#edit-m-group")) $("#edit-m-group").value = task.group || "";
+  // Populate person datalist + current value
+  fillPersonDatalist("edit-m-person-list");
+  if ($("#edit-m-person")) {
+    const cur = state.people.find((p) => p.id === task.contact_id);
+    $("#edit-m-person").value = cur ? cur.name : "";
+  }
   if ($("#edit-m-contact")) $("#edit-m-contact").value = task.contact || "";
   if ($("#edit-m-estimate")) $("#edit-m-estimate").value = task.estimate_minutes || "";
   if ($("#edit-m-recur")) {
@@ -815,21 +822,26 @@ async function submitEditModal() {
   const newDeadline = getDeadlineValue("edit-m") || null;
   const newContact = $("#edit-m-contact")?.value.trim() ?? null;
   const estimateVal = parseInt($("#edit-m-estimate")?.value);
+  // Person: "" clears; a typed name resolves to an existing contact or creates a new one.
+  const personRaw = $("#edit-m-person")?.value.trim() ?? "";
+  const personField = personRaw === "" ? "" : await ensurePersonId(personRaw);
+  const payload = {
+    source_filename: _editTask.source_filename,
+    section: _editTask.section,
+    old_text: _editTask.text,
+    new_text: newText,
+    priority: newPriority,
+    group: newGroup,
+    deadline_direct: newDeadline,
+    contact: newContact,
+    estimate_minutes: isNaN(estimateVal) ? null : estimateVal,
+    recurrence_rule: getRecurrenceRule("edit-m"),
+  };
+  payload.contact_id = personField;
   await api("/api/tasks/edit", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      source_filename: _editTask.source_filename,
-      section: _editTask.section,
-      old_text: _editTask.text,
-      new_text: newText,
-      priority: newPriority,
-      group: newGroup,
-      deadline_direct: newDeadline,
-      contact: newContact,
-      estimate_minutes: isNaN(estimateVal) ? null : estimateVal,
-      recurrence_rule: getRecurrenceRule("edit-m"),
-    }),
+    body: JSON.stringify(payload),
   });
   closeEditModal();
   await refreshTasks();
@@ -1098,9 +1110,12 @@ function _populateNLStep2(parsed) {
   const blocks = [
     { uncertain: false, html: `<label>Priority</label>
       <select id="nl-f-priority">${[["normal","Normal"],["high","High"],["low","Low"]].map(([v, l]) => `<option value="${v}"${v === parsed.priority ? " selected" : ""}>${l}</option>`).join("")}</select>` },
-    { uncertain: !!parsed.groupUncertain, html: `<label>Group${parsed.groupUncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
+    { uncertain: !!parsed.groupUncertain, html: `<label>Organization${parsed.groupUncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
       <input id="nl-f-group" list="nl-f-group-list" value="${escapeHtml(parsed.group || "")}" placeholder="Pick or type new" autocomplete="off">
       <datalist id="nl-f-group-list">${groupOpts}</datalist>` },
+    { uncertain: false, html: `<label>Person</label>
+      <input id="nl-f-person" list="nl-f-person-list" value="" placeholder="Assign to a person" autocomplete="off">
+      <datalist id="nl-f-person-list">${state.people.map((p) => `<option value="${escapeHtml(p.name)}"></option>`).join("")}</datalist>` },
     { uncertain: false, html: `<label>Deadline</label>
       <div class="deadline-selects">
         <select id="nl-f-dl-month">${_nlMonthOptions(dlMo)}</select>
@@ -1197,13 +1212,14 @@ async function submitNLModal() {
   const deadline = getDeadlineValue("nl-f") || "";
   const group = $("#nl-f-group")?.value.trim() || "";
   const contact = $("#nl-f-contact")?.value.trim() || null;
+  const contact_id = await ensurePersonId($("#nl-f-person")?.value);
   const estimateRaw = parseInt($("#nl-f-estimate")?.value);
   const estimate_minutes = isNaN(estimateRaw) ? null : estimateRaw;
 
   await api("/api/tasks/add", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, group, deadline, priority, contact, estimate_minutes }),
+    body: JSON.stringify({ text, group, deadline, priority, contact, contact_id, estimate_minutes }),
   });
   closeNLModal();
   if (state.tab === "tasks") await refreshTasks();
@@ -1651,7 +1667,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
       ? openTasks.map((t) => {
           const deadline = t.deadline ? `<span class="entity-status">${escapeHtml(t.deadline)}</span>` : "";
           const priority = t.priority === "high" ? `<span class="entity-status status-task_created">high</span>` : "";
-          return `<div class="org-entity-row org-entity-row--task" data-task-id="${escapeHtml(t.id)}">
+          return `<div class="org-entity-row org-entity-row--task" data-task-id="${escapeHtml(t.id)}" data-contact-id="${escapeHtml(t.contact_id || "")}">
             <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
             <span class="entity-text">${escapeHtml(t.text)}</span>${deadline}${priority}
           </div>`;
@@ -1660,7 +1676,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
 
     const completedTasksHtml = completedTasks.length
       ? completedTasks.map((t) => {
-          return `<div class="org-entity-row org-entity-row--task org-entity-row--done" data-task-id="${escapeHtml(t.id)}">
+          return `<div class="org-entity-row org-entity-row--task org-entity-row--done" data-task-id="${escapeHtml(t.id)}" data-contact-id="${escapeHtml(t.contact_id || "")}">
             <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
             <span class="entity-text">${escapeHtml(t.text)}</span>
             <span class="entity-status">✓ done</span>
@@ -1673,7 +1689,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     ).join("");
 
     const contactsHtml = (org.contacts || []).map((c) => `
-      <div class="drawer-card">
+      <div class="drawer-card org-person-card" data-person-id="${escapeHtml(c.id)}" style="cursor:pointer">
         ${c.card_image ? `<img class="drawer-card-thumb" src="${c.card_image}" alt="">` : ""}
         <div class="drawer-card-info">
           <div class="drawer-card-name">${escapeHtml(c.name || "(no name)")}</div>
@@ -1682,13 +1698,27 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         </div>
       </div>`).join("");
 
+    // Filter-by-person control for the task sections (only if there are people + tasks)
+    const hasTasks = openTasks.length || completedTasks.length;
+    const personFilterHtml = (hasTasks && (org.contacts || []).length)
+      ? `<div class="org-task-filter">
+           <label>Filter tasks by person</label>
+           <select id="org-task-person-filter">
+             <option value="">Everyone</option>
+             ${(org.contacts || []).map((c) => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name || "(no name)")}</option>`).join("")}
+           </select>
+         </div>`
+      : "";
+
     const sections = [
       asksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Asks</div>${asksHtml}</div>`,
       commitsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Commitments</div>${commitsHtml}</div>`,
+      personFilterHtml,
       tasksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Tasks</div>${tasksHtml}</div>`,
       completedTasksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Completed Tasks</div>${completedTasksHtml}</div>`,
       billsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Bills</div><div class="bill-pills-row">${billsHtml}</div></div>`,
-      contactsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Contacts</div><div class="drawer-cards">${contactsHtml}</div></div>`,
+      contactsHtml && `<div class="org-detail-section"><div class="drawer-section-label">People</div><div class="drawer-cards">${contactsHtml}</div></div>`,
+      _entityNotesHtml(org.entity_notes),
     ].filter(Boolean).join("");
 
     // Populate all of col-2's contents (header, badges, org-detail block) while still hidden.
@@ -1702,6 +1732,28 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     }
     if (content) content.innerHTML = sections;
     if (orgDetail) orgDetail.classList.toggle("hidden", !sections);
+
+    // Standalone org notes
+    if (content) _wireEntityNotes(content, "organization", orgId, () => selectOrg(orgId, { skipToggle: true }));
+
+    // Filter task rows by person
+    content?.querySelector("#org-task-person-filter")?.addEventListener("change", (e) => {
+      const cid = e.target.value;
+      content.querySelectorAll(".org-entity-row--task").forEach((row) => {
+        row.classList.toggle("hidden", !!cid && row.dataset.contactId !== cid);
+      });
+    });
+
+    // Person cards → open that person on the People subtab
+    content?.querySelectorAll(".org-person-card[data-person-id]").forEach((card) => {
+      card.addEventListener("click", () => {
+        document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+        document.querySelector(".groups-subtab[data-subtab='people']")?.classList.add("active");
+        document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
+        $("#groups-panel-people")?.classList.remove("hidden");
+        selectPerson(card.dataset.personId);
+      });
+    });
 
     // Wire interactive buttons
     content?.querySelectorAll(".entity-status-btn").forEach((btn) => {
@@ -1845,6 +1897,44 @@ function _wirePersonEditor() {
   });
 }
 
+// Reusable standalone-notes section for an organization or a person.
+function _entityNotesHtml(notes) {
+  const items = (notes || []).map((n) => `
+    <div class="entity-note" data-note-id="${n.id}">
+      <span class="entity-note-body">${escapeHtml(n.body)}</span>
+      <span class="entity-note-meta">${escapeHtml(n.created_at || "")}</span>
+      <button class="entity-note-del" title="Delete note">✕</button>
+    </div>`).join("") || `<p class="detail-empty-inline">No notes yet.</p>`;
+  return `<div class="org-detail-section">
+      <div class="drawer-section-label">Notes</div>
+      ${items}
+      <div class="entity-note-add">
+        <textarea class="entity-note-input" rows="2" placeholder="Add a note…"></textarea>
+        <button class="secondary-btn-sm entity-note-save">Add note</button>
+      </div>
+    </div>`;
+}
+function _wireEntityNotes(scope, entityType, entityId, refresh) {
+  scope.querySelectorAll(".entity-note-del").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.closest(".entity-note").dataset.noteId;
+      await api(`/api/entity-notes/${id}`, { method: "DELETE" });
+      refresh();
+    });
+  });
+  const save = scope.querySelector(".entity-note-save");
+  save?.addEventListener("click", async () => {
+    const ta = scope.querySelector(".entity-note-input");
+    const body = (ta.value || "").trim();
+    if (!body) return;
+    await api("/api/entity-notes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entity_type: entityType, entity_id: entityId, body }),
+    });
+    refresh();
+  });
+}
+
 function openAddPersonModal() {
   _currentPersonId = null;
   _pePendingCard = null;
@@ -1884,19 +1974,74 @@ async function selectPerson(contactId) {
          <span class="org-meeting-topic">${escapeHtml(m.topic || m.canonical_group || "Meeting")}</span>
        </div>`).join("");
 
+    const orgsHtml = (p.orgs || []).map((o) =>
+      `<button class="attendee-chip attendee-chip--link" data-org-id="${escapeHtml(o.id)}">${escapeHtml(o.name)}</button>`
+    ).join("") + `<button class="attendee-chip" id="person-add-org" title="Add organization">+ org</button>`;
+
+    const tasksHtml = (p.tasks || []).map((t) =>
+      `<div class="org-entity-row org-entity-row--task${t.done ? " org-entity-row--done" : ""}" data-person-task-id="${escapeHtml(t.id)}">
+         <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
+         <span class="entity-text">${escapeHtml(t.text)}</span>
+         ${t.done ? `<span class="entity-status">✓ done</span>` : (t.deadline ? `<span class="entity-status">${escapeHtml(t.deadline)}</span>` : "")}
+       </div>`).join("") || `<p class="detail-empty-inline">No tasks yet.</p>`;
+
+    const commitsHtml = (p.commitments || []).map((c) =>
+      `<div class="org-entity-row">
+         <span class="entity-text">${escapeHtml(c.text)}</span>
+         <span class="entity-status status-${c.status}">${escapeHtml((c.status || "").replace("_"," "))}</span>
+       </div>`).join("");
+
     content.innerHTML = `
       <div class="org-detail-header"><h2>${escapeHtml(p.name)}</h2></div>
+      <div class="org-detail-section">
+        <div class="drawer-section-label">Organizations</div>
+        <div class="attendee-chips">${orgsHtml}</div>
+      </div>
       ${_personEditorFields(p)}
+      <div class="org-detail-section">
+        <div class="drawer-section-label">Tasks</div>
+        ${tasksHtml}
+      </div>
+      ${commitsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Commitments</div>${commitsHtml}</div>` : ""}
       <div class="org-detail-section">
         <div class="drawer-section-label">Asks Raised</div>
         ${asksHtml}
       </div>
       ${meetingsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Meeting History</div>${meetingsHtml}</div>` : ""}
+      ${_entityNotesHtml(p.entity_notes)}
     `;
     _wirePersonEditor();
+    _wireEntityNotes(content, "contact", contactId, () => selectPerson(contactId));
     content.querySelectorAll(".org-meeting-row[data-mid]").forEach((row) => {
       if (!row.dataset.mid) return;
       row.addEventListener("click", () => selectMeeting(row.dataset.mid));
+    });
+    // Org chips → open that org
+    content.querySelectorAll(".attendee-chip--link[data-org-id]").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+        document.querySelector(".groups-subtab[data-subtab='orgs']")?.classList.add("active");
+        document.querySelectorAll(".groups-panel").forEach((pp) => pp.classList.add("hidden"));
+        $("#groups-panel-orgs")?.classList.remove("hidden");
+        selectOrg(chip.dataset.orgId, { skipToggle: true });
+      });
+    });
+    // + org → prompt for org name, link, refresh
+    $("#person-add-org")?.addEventListener("click", async () => {
+      const name = prompt("Add this person to which organization?");
+      if (!name || !name.trim()) return;
+      await api(`/api/people/${contactId}/organizations`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      selectPerson(contactId);
+    });
+    // Person's tasks open the task drawer
+    content.querySelectorAll("[data-person-task-id]").forEach((row) => {
+      row.addEventListener("click", () => {
+        const t = (p.tasks || []).find((x) => x.id === row.dataset.personTaskId);
+        if (t) openDrawer(t);
+      });
     });
   } catch {
     content.innerHTML = `<div class="detail-empty">Couldn't load person.</div>`;
@@ -2962,6 +3107,37 @@ async function refreshMeetingsNow() {
 
 async function loadFacets() {
   state.facets = await api("/api/facets");
+}
+
+// People cache used by the Person picker on task modals.
+async function loadPeopleCache() {
+  try { state.people = await api("/api/people") || []; } catch { state.people = []; }
+}
+// Fill a <datalist> with person names (value = name) for autosuggest.
+function fillPersonDatalist(id) {
+  const dl = $("#" + id);
+  if (!dl) return;
+  dl.innerHTML = state.people.map((p) => `<option value="${escapeHtml(p.name)}"></option>`).join("");
+}
+// Resolve a typed person name back to a contact id (exact, case-insensitive). null if no match.
+function resolvePersonId(name) {
+  const n = (name || "").trim().toLowerCase();
+  if (!n) return null;
+  const hit = state.people.find((p) => (p.name || "").trim().toLowerCase() === n);
+  return hit ? hit.id : null;
+}
+// Resolve a typed person name to a contact id, creating a new contact if none matches.
+async function ensurePersonId(name) {
+  const n = (name || "").trim();
+  if (!n) return null;
+  const existing = resolvePersonId(n);
+  if (existing) return existing;
+  const res = await api("/api/contacts", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: n }),
+  });
+  await loadPeopleCache();
+  return res.id;
 }
 
 function renderBillsTable(bills) {
@@ -4380,6 +4556,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   await loadFacets();
+  loadPeopleCache();
   switchTab("home");
 });
 
