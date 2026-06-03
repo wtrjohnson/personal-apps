@@ -242,10 +242,20 @@ async function loadUpcomingMeetings() {
       const statusBadge = m.status === "in_progress"
         ? `<span class="upcoming-badge in-progress">In progress</span>`
         : "";
+      const dtLocal = dt
+        ? new Date(dt.getTime() - dt.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+        : "";
+      const editBtn = `<button class="upcoming-edit-btn" title="Edit meeting details"
+              data-id="${escapeHtml(m.id)}"
+              data-topic="${escapeHtml(m.topic || "")}"
+              data-attendees="${escapeHtml(m.attendees || "")}"
+              data-link="${escapeHtml(m.meeting_link || "")}"
+              data-dtstart="${dtLocal}">✎</button>`;
       return `<div class="upcoming-item" data-id="${escapeHtml(m.id)}">
         <div class="upcoming-meta">${dateStr}${organizer ? " · " + organizer : ""}${attendees > 0 ? ` · ${attendees} attendees` : ""}</div>
         <div class="upcoming-title">${escapeHtml(m.topic || "Untitled Meeting")} ${statusBadge}</div>
         <div class="upcoming-actions">
+          ${editBtn}
           ${linkBtn}
           <button class="cta-pill ghost upcoming-start-btn" data-id="${escapeHtml(m.id)}"
                   data-topic="${escapeHtml(m.topic || "")}"
@@ -256,6 +266,18 @@ async function loadUpcomingMeetings() {
         </div>
       </div>`;
     }).join("");
+
+    list.querySelectorAll(".upcoming-edit-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        openMeetingEditModal({
+          id: btn.dataset.id,
+          topic: btn.dataset.topic,
+          attendees: btn.dataset.attendees,
+          meeting_link: btn.dataset.link,
+          dtstart: btn.dataset.dtstart,
+        });
+      });
+    });
 
     list.querySelectorAll(".upcoming-start-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
@@ -276,6 +298,42 @@ async function loadUpcomingMeetings() {
   } catch (e) {
     card.style.display = "none";
   }
+}
+
+let _meetingEditId = null;
+function openMeetingEditModal({ id, topic, attendees, meeting_link, dtstart } = {}) {
+  _meetingEditId = id;
+  $("#me-topic").value = topic || "";
+  $("#me-dtstart").value = dtstart || "";
+  $("#me-attendees").value = attendees || "";
+  $("#me-link").value = meeting_link || "";
+  $("#ics-meeting-edit-backdrop").classList.remove("hidden");
+  setTimeout(() => $("#me-topic").focus(), 10);
+}
+function closeMeetingEditModal() {
+  $("#ics-meeting-edit-backdrop").classList.add("hidden");
+  _meetingEditId = null;
+}
+async function submitMeetingEditModal() {
+  if (!_meetingEditId) return;
+  // The datetime-local field holds a local wall-clock value with no timezone.
+  // Convert it to a UTC ISO string so the TIMESTAMPTZ column stores the correct
+  // instant (otherwise Postgres reads the naive value as UTC and shifts the time).
+  const dtRaw = $("#me-dtstart").value;
+  const dtstart = dtRaw ? new Date(dtRaw).toISOString() : null;
+  const body = {
+    topic: $("#me-topic").value.trim(),
+    dtstart,
+    attendees: $("#me-attendees").value.trim(),
+    meeting_link: $("#me-link").value.trim(),
+  };
+  await api(`/api/meetings/${_meetingEditId}/metadata`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  closeMeetingEditModal();
+  await loadUpcomingMeetings();
 }
 
 async function uploadICS(file) {
@@ -1013,33 +1071,57 @@ function parseNLTask(text) {
   return result;
 }
 
+function _nlMonthOptions(sel) {
+  const months = [["01","Jan"],["02","Feb"],["03","Mar"],["04","Apr"],["05","May"],["06","Jun"],["07","Jul"],["08","Aug"],["09","Sep"],["10","Oct"],["11","Nov"],["12","Dec"]];
+  return `<option value="">Month</option>` + months.map(([v, l]) => `<option value="${v}"${v === sel ? " selected" : ""}>${l}</option>`).join("");
+}
+function _nlDayOptions(sel) {
+  let o = `<option value="">Day</option>`;
+  for (let d = 1; d <= 31; d++) { const v = String(d).padStart(2, "0"); o += `<option value="${v}"${v === sel ? " selected" : ""}>${d}</option>`; }
+  return o;
+}
+function _nlYearOptions(sel) {
+  const ty = new Date().getFullYear();
+  return `<option value="">Year</option>` + [ty - 1, ty, ty + 1, ty + 2].map((y) => `<option value="${y}"${String(y) === sel ? " selected" : ""}>${y}</option>`).join("");
+}
+
 function _populateNLStep2(parsed) {
-  const fields = [];
-  fields.push({ id: "nl-f-priority", label: "Priority", type: "select", value: parsed.priority, options: [["normal","Normal"],["high","High"],["low","Low"]] });
-  fields.push({ id: "nl-f-deadline", label: "Deadline", type: "date", value: parsed.deadline || "" });
-  fields.push({ id: "nl-f-group", label: "Group", type: "text", value: parsed.group || "", uncertain: parsed.groupUncertain });
-  const contactVal = [parsed.email, parsed.phone, parsed.contact].filter(Boolean).join("  ");
-  if (contactVal) {
-    fields.push({ id: "nl-f-contact", label: "Contact method", type: "text", value: contactVal });
+  // Deadline parts (matches the edit modal's month/day/year selects)
+  let dlMo = "", dlDd = "", dlYy = "";
+  if (parsed.deadline && /^\d{4}-\d{2}-\d{2}$/.test(parsed.deadline)) {
+    [dlYy, dlMo, dlDd] = parsed.deadline.split("-");
   }
-  if (parsed.estimate_minutes) {
-    fields.push({ id: "nl-f-estimate", label: "Estimate (min)", type: "number", value: parsed.estimate_minutes });
-  }
+  const allGroups = state.tasksGroupsInScope.concat(state.facets.groups).filter((v, i, a) => a.indexOf(v) === i);
+  const groupOpts = allGroups.map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
+  const contactVal = [parsed.email, parsed.phone, parsed.contact].filter(Boolean).join(", ");
+
+  const blocks = [
+    { uncertain: false, html: `<label>Priority</label>
+      <select id="nl-f-priority">${[["normal","Normal"],["high","High"],["low","Low"]].map(([v, l]) => `<option value="${v}"${v === parsed.priority ? " selected" : ""}>${l}</option>`).join("")}</select>` },
+    { uncertain: !!parsed.groupUncertain, html: `<label>Group${parsed.groupUncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
+      <input id="nl-f-group" list="nl-f-group-list" value="${escapeHtml(parsed.group || "")}" placeholder="Pick or type new" autocomplete="off">
+      <datalist id="nl-f-group-list">${groupOpts}</datalist>` },
+    { uncertain: false, html: `<label>Deadline</label>
+      <div class="deadline-selects">
+        <select id="nl-f-dl-month">${_nlMonthOptions(dlMo)}</select>
+        <select id="nl-f-dl-day">${_nlDayOptions(dlDd)}</select>
+        <select id="nl-f-dl-year">${_nlYearOptions(dlYy)}</select>
+      </div>
+      <div class="dl-quick-btns">
+        <button type="button" class="dl-quick-btn" data-quick="today" data-prefix="nl-f">Today</button>
+        <button type="button" class="dl-quick-btn" data-quick="this-week" data-prefix="nl-f">This week</button>
+        <button type="button" class="dl-quick-btn" data-quick="next-week" data-prefix="nl-f">Next week</button>
+      </div>` },
+    { uncertain: false, html: `<label>Phone / email</label>
+      <input id="nl-f-contact" value="${escapeHtml(contactVal)}" placeholder="Phone number or email" autocomplete="off">` },
+    { uncertain: false, html: `<label>Estimate (min)</label>
+      <input id="nl-f-estimate" type="number" min="1" max="480" value="${parsed.estimate_minutes || ""}" placeholder="e.g. 30" autocomplete="off">` },
+  ];
 
   const container = $("#nl-parsed-fields");
-  container.innerHTML = fields.map((f, i) => {
-    const uncertain = f.uncertain ? " nl-field-uncertain" : "";
-    let input;
-    if (f.type === "select") {
-      input = `<select id="${f.id}">${f.options.map(([v, l]) => `<option value="${v}"${v === f.value ? " selected" : ""}>${l}</option>`).join("")}</select>`;
-    } else {
-      input = `<input id="${f.id}" type="${f.type}" value="${escapeHtml(String(f.value || ""))}" autocomplete="off">`;
-    }
-    return `<div class="nl-field nl-field-blur${uncertain}" style="transition-delay:${i * 55}ms">
-      <label>${f.label}${f.uncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
-      ${input}
-    </div>`;
-  }).join("");
+  container.innerHTML = blocks.map((b, i) => `<div class="nl-field nl-field-blur${b.uncertain ? " nl-field-uncertain" : ""}" style="transition-delay:${i * 55}ms">
+      ${b.html}
+    </div>`).join("");
 
   // Expand container, then unblur fields staggered
   requestAnimationFrame(() => {
@@ -1112,7 +1194,7 @@ async function submitNLModal() {
   const text = $("#nl-text").value.trim();
   if (!text) return;
   const priority = $("#nl-f-priority")?.value || "normal";
-  const deadline = $("#nl-f-deadline")?.value || "";
+  const deadline = getDeadlineValue("nl-f") || "";
   const group = $("#nl-f-group")?.value.trim() || "";
   const contact = $("#nl-f-contact")?.value.trim() || null;
   const estimateRaw = parseInt($("#nl-f-estimate")?.value);
@@ -1173,7 +1255,17 @@ function renderDetail(m) {
   const meta = [];
   if (m.date)          meta.push(`<span>${escapeHtml(m.date)}</span>`);
   if (m.purpose?.length) meta.push(`<span>${escapeHtml(m.purpose.join(" · "))}</span>`);
-  if (m.attendees)     meta.push(`<span>👥 ${escapeHtml(m.attendees)}</span>`);
+  if (m.attendees) {
+    const norm = (s) => s.trim().toLowerCase();
+    const byName = new Map((m.contacts || []).map((c) => [norm(c.name || ""), c.id]));
+    const chips = m.attendees.split(/[;,]/).map((a) => a.trim()).filter(Boolean).map((a) => {
+      const cid = byName.get(norm(a));
+      return cid
+        ? `<button class="attendee-chip attendee-chip--link" data-person-id="${escapeHtml(cid)}">${escapeHtml(a)}</button>`
+        : `<span class="attendee-chip">${escapeHtml(a)}</span>`;
+    }).join("");
+    meta.push(`<span class="attendee-chips">👥 ${chips}</span>`);
+  }
   if (m.deadline)      meta.push(`<span>⏰ ${escapeHtml(m.deadline)}</span>`);
   if (m.outcome)       meta.push(`<span>→ ${escapeHtml(m.outcome)}</span>`);
   if (m.raw_group && m.raw_group !== m.group)
@@ -1246,6 +1338,16 @@ function renderDetail(m) {
   `;
   const ci = $("#detail .canvas-note-image");
   if (ci) ci.addEventListener("click", () => _openCanvasFullscreen(ci.src));
+
+  $("#detail").querySelectorAll(".attendee-chip--link").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+      document.querySelector(".groups-subtab[data-subtab='people']")?.classList.add("active");
+      document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
+      $("#groups-panel-people")?.classList.remove("hidden");
+      selectPerson(chip.dataset.personId);
+    });
+  });
 
   $("#detail").querySelectorAll(".detail-contact-unlink").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -1518,6 +1620,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     const openCommits = (org.commitments || []).filter((c) =>
       ["open","needs_review","task_created"].includes(c.status));
     const openTasks = org.open_tasks || [];
+    const completedTasks = org.completed_tasks || [];
 
     // Filter the meeting list and re-render it (still inside hidden col-2).
     state.meetingFilters.group = org.name;
@@ -1555,6 +1658,16 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         }).join("")
       : "";
 
+    const completedTasksHtml = completedTasks.length
+      ? completedTasks.map((t) => {
+          return `<div class="org-entity-row org-entity-row--task org-entity-row--done" data-task-id="${escapeHtml(t.id)}">
+            <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
+            <span class="entity-text">${escapeHtml(t.text)}</span>
+            <span class="entity-status">✓ done</span>
+          </div>`;
+        }).join("")
+      : "";
+
     const billsHtml = (org.bills || []).map((b) =>
       `<span class="bill-pill">${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}</span>`
     ).join("");
@@ -1573,6 +1686,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
       asksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Asks</div>${asksHtml}</div>`,
       commitsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Commitments</div>${commitsHtml}</div>`,
       tasksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Tasks</div>${tasksHtml}</div>`,
+      completedTasksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Completed Tasks</div>${completedTasksHtml}</div>`,
       billsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Bills</div><div class="bill-pills-row">${billsHtml}</div></div>`,
       contactsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Contacts</div><div class="drawer-cards">${contactsHtml}</div></div>`,
     ].filter(Boolean).join("");
@@ -1609,7 +1723,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     });
     content?.querySelectorAll(".org-entity-row--task").forEach((row) => {
       row.addEventListener("click", () => {
-        const task = openTasks.find((t) => t.id === row.dataset.taskId);
+        const task = [...openTasks, ...completedTasks].find((t) => t.id === row.dataset.taskId);
         if (task) openDrawer(task);
       });
     });
@@ -1645,7 +1759,110 @@ function renderPeopleTable(people) {
   });
 }
 
+let _currentPersonId = null;   // contact id being edited; null = creating a new person
+let _pePendingCard = null;     // data URL of a freshly scanned card, sent on save
+
+function _personEditorFields(p = {}) {
+  const f = (id, label, val, type = "text") =>
+    `<div class="modal-row"><label for="${id}">${label}</label>
+       <input id="${id}" type="${type}" value="${escapeHtml(val || "")}" autocomplete="off"></div>`;
+  return `
+    <div class="person-editor">
+      ${f("pe-name", "Name", p.name)}
+      ${f("pe-title", "Title", p.title)}
+      ${f("pe-company", "Company", p.company)}
+      ${f("pe-email", "Email", p.email, "email")}
+      ${f("pe-phone", "Phone", p.phone, "tel")}
+      ${p.card_image ? `<img id="pe-card-img" class="drawer-card-thumb" src="${p.card_image}" alt="Business card" style="margin-top:6px">` : `<img id="pe-card-img" class="drawer-card-thumb hidden" alt="Business card" style="margin-top:6px">`}
+      <input type="file" id="pe-photo" accept="image/*" capture="environment" style="display:none">
+      <div class="person-editor-actions">
+        <button type="button" class="secondary-btn-sm" id="pe-scan">Scan business card</button>
+        <button type="button" class="primary-btn-sm" id="pe-save">Save</button>
+      </div>
+    </div>`;
+}
+
+function _wirePersonEditor() {
+  const scanBtn = $("#pe-scan");
+  const photo = $("#pe-photo");
+  scanBtn?.addEventListener("click", () => photo.click());
+  photo?.addEventListener("change", async () => {
+    const file = photo.files[0];
+    if (!file) return;
+    photo.value = "";
+    scanBtn.disabled = true;
+    scanBtn.textContent = "Reading…";
+    try {
+      const r = await scanCardImage(file);
+      _pePendingCard = r.dataUrl || null;
+      if (r.ok) {
+        // Only overwrite a field when the scan actually returned a value.
+        const set = (id, v) => { if (v) $(id).value = v; };
+        set("#pe-name", r.name); set("#pe-company", r.company);
+        set("#pe-title", r.title); set("#pe-email", r.email); set("#pe-phone", r.phone);
+      } else {
+        alert(r.error || "Card scan failed — fill in manually");
+      }
+      const img = $("#pe-card-img");
+      if (img && _pePendingCard) { img.src = _pePendingCard; img.classList.remove("hidden"); }
+    } catch {
+      alert("Card scan failed — fill in manually");
+    } finally {
+      scanBtn.disabled = false;
+      scanBtn.textContent = "Scan business card";
+    }
+  });
+  $("#pe-save")?.addEventListener("click", async () => {
+    const body = {
+      name: $("#pe-name").value.trim(),
+      title: $("#pe-title").value.trim(),
+      company: $("#pe-company").value.trim(),
+      email: $("#pe-email").value.trim(),
+      phone: $("#pe-phone").value.trim(),
+    };
+    if (_pePendingCard) body.card_image = _pePendingCard;
+    if (!body.name) { alert("Name is required"); $("#pe-name").focus(); return; }
+    try {
+      let savedId = _currentPersonId;
+      if (_currentPersonId) {
+        await api(`/api/people/${_currentPersonId}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } else {
+        const res = await api("/api/contacts", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        savedId = res.id;
+      }
+      _pePendingCard = null;
+      await loadGroups();
+      if (savedId) selectPerson(savedId);
+    } catch {
+      alert("Save failed");
+    }
+  });
+}
+
+function openAddPersonModal() {
+  _currentPersonId = null;
+  _pePendingCard = null;
+  $$("#people-body .stakeholder-row").forEach((r) => r.classList.remove("active"));
+  const panel = $("#person-detail-panel");
+  const content = $("#person-detail-content");
+  if (!panel || !content) return;
+  panel.classList.remove("hidden");
+  content.innerHTML = `
+    <div class="org-detail-header"><h2>Add person</h2></div>
+    ${_personEditorFields({})}`;
+  _wirePersonEditor();
+  setTimeout(() => $("#pe-name")?.focus(), 10);
+}
+
 async function selectPerson(contactId) {
+  _currentPersonId = contactId;
+  _pePendingCard = null;
   $$("#people-body .stakeholder-row").forEach((r) =>
     r.classList.toggle("active", r.dataset.personId === contactId));
   const panel = $("#person-detail-panel");
@@ -1662,27 +1879,25 @@ async function selectPerson(contactId) {
        </div>`).join("") || `<p class="detail-empty-inline">No asks on record.</p>`;
 
     const meetingsHtml = (p.meetings || []).slice(0, 8).map((m) =>
-      `<div class="org-meeting-row">
+      `<div class="org-meeting-row" data-mid="${escapeHtml(m.id || "")}" style="cursor:pointer">
          <span class="org-meeting-date">${escapeHtml(m.date || "—")}</span>
          <span class="org-meeting-topic">${escapeHtml(m.topic || m.canonical_group || "Meeting")}</span>
        </div>`).join("");
 
     content.innerHTML = `
-      <div class="org-detail-header">
-        <h2>${escapeHtml(p.name)}</h2>
-        <div class="person-meta">
-          ${p.title || p.company ? `<span>${escapeHtml([p.title,p.company].filter(Boolean).join(" · "))}</span>` : ""}
-          ${p.email ? `<span>${escapeHtml(p.email)}</span>` : ""}
-          ${p.phone ? `<span>${escapeHtml(p.phone)}</span>` : ""}
-        </div>
-        ${p.card_image ? `<img class="drawer-card-thumb" src="${p.card_image}" alt="Business card" style="margin-top:10px">` : ""}
-      </div>
+      <div class="org-detail-header"><h2>${escapeHtml(p.name)}</h2></div>
+      ${_personEditorFields(p)}
       <div class="org-detail-section">
         <div class="drawer-section-label">Asks Raised</div>
         ${asksHtml}
       </div>
       ${meetingsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Meeting History</div>${meetingsHtml}</div>` : ""}
     `;
+    _wirePersonEditor();
+    content.querySelectorAll(".org-meeting-row[data-mid]").forEach((row) => {
+      if (!row.dataset.mid) return;
+      row.addEventListener("click", () => selectMeeting(row.dataset.mid));
+    });
   } catch {
     content.innerHTML = `<div class="detail-empty">Couldn't load person.</div>`;
   }
@@ -2287,6 +2502,24 @@ function _renderSavedCards() {
       _renderSavedCards();
     });
   });
+}
+
+// Shared business-card scan: read a file, send to Claude Vision, return structured fields.
+// Used by the intake card scanner and the People person editor.
+async function scanCardImage(file) {
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  const res = await fetch("/api/contacts/scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: dataUrl }),
+  });
+  const data = await res.json();
+  return { ...data, dataUrl };
 }
 
 (function _initCardScanner() {
@@ -3408,6 +3641,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#edit-modal-backdrop").addEventListener("click", (e) => {
     if (e.target.id === "edit-modal-backdrop") closeEditModal();
   });
+  $("#me-close").addEventListener("click",  closeMeetingEditModal);
+  $("#me-cancel").addEventListener("click", closeMeetingEditModal);
+  $("#me-submit").addEventListener("click", submitMeetingEditModal);
+  $("#ics-meeting-edit-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "ics-meeting-edit-backdrop") closeMeetingEditModal();
+  });
   $("#edit-m-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter")  { e.preventDefault(); submitEditModal(); }
     if (e.key === "Escape") { closeEditModal(); }
@@ -3889,6 +4128,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (subtab !== "orgs") selectOrg(null);
     });
   });
+
+  $("#add-person-btn")?.addEventListener("click", openAddPersonModal);
 
   // Intake modal
   $("#intake-modal-close").addEventListener("click", closeIntakeModal);

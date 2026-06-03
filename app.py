@@ -725,6 +725,33 @@ def _org_slug(name: str) -> str:
     return s.strip('-')[:40] or 'org'
 
 
+def _contact_name_key(name: str) -> str:
+    """Stable contact id derived from a name only (used for attendee-derived contacts)."""
+    return hashlib.sha1(name.strip().lower().encode()).hexdigest()[:16]
+
+
+def _upsert_attendee_contacts(cur, mid: str, attendees_str: Optional[str],
+                              org_id: Optional[str]) -> None:
+    """Split a free-text attendees string and ensure each name is a People contact
+    linked to this meeting. Uses ON CONFLICT DO NOTHING so re-saving a meeting never
+    clobbers a contact the user has since enriched. organization_id is only set on the
+    first insert and only when org_id refers to a real organization."""
+    for raw in re.split(r"[;,]", attendees_str or ""):
+        name = raw.strip()
+        if not name:
+            continue
+        cid = _contact_name_key(name)
+        cur.execute("""
+            INSERT INTO contacts (id, name, organization_id, updated_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (id) DO NOTHING
+        """, (cid, name, org_id))
+        cur.execute("""
+            INSERT INTO meeting_contacts (meeting_id, contact_id)
+            VALUES (%s, %s) ON CONFLICT DO NOTHING
+        """, (mid, cid))
+
+
 def _year_from_date(s: Optional[str]) -> Optional[int]:
     if not s:
         return None
@@ -1054,16 +1081,25 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
                 ORDER BY MIN(br.created_at) DESC
             """, (org_id,))
             bills = [dict(r) for r in cur.fetchall()]
-            cur.execute(_TASKS_SELECT + """
-                WHERE NOT t.done AND t.organization_id = %s
+            # Match tasks either by explicit organization_id or by their group_name
+            # slugified to the same form used for organization ids (see seeding above).
+            _group_slug = "trim('-' FROM regexp_replace(lower(t.group_name), '[^a-z0-9]+', '-', 'g'))"
+            cur.execute(_TASKS_SELECT + f"""
+                WHERE NOT t.done AND (t.organization_id = %s OR {_group_slug} = %s)
                 ORDER BY
                   CASE WHEN t.deadline IS NULL THEN 1 ELSE 0 END,
                   t.deadline ASC,
                   t.created_at DESC
-            """, (org_id,))
+            """, (org_id, org_id))
             today_iso = date_cls.today().isoformat()
             open_tasks = [_task_row_to_task(dict(r), today_iso).as_dict()
                           for r in cur.fetchall()]
+            cur.execute(_TASKS_SELECT + f"""
+                WHERE t.done AND (t.organization_id = %s OR {_group_slug} = %s)
+                ORDER BY t.created_at DESC
+            """, (org_id, org_id))
+            completed_tasks = [_task_row_to_task(dict(r), today_iso).as_dict()
+                               for r in cur.fetchall()]
     # Derive org name from meetings if no org row exists
     fallback_name = meetings[0]["canonical_group"] if meetings else org_id
     return {
@@ -1078,6 +1114,7 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
         "contacts": contacts_rows,
         "bills": bills,
         "open_tasks": open_tasks,
+        "completed_tasks": completed_tasks,
     }
 
 
@@ -1399,6 +1436,7 @@ def api_meeting_update(mid: str):
                 WHERE id = %s
             """, (note_group, canon, note_topic, note_attendees,
                   note_deadline, note_outcome, org_id_new, mid))
+            _upsert_attendee_contacts(cur, mid, note_attendees, org_id_new)
     return jsonify({"ok": True, "org_id": org_id_new})
 
 
@@ -1464,6 +1502,33 @@ def api_contacts_upsert():
                     updated_at=NOW()
             """, (cid, name, company, title, email, phone, notes, card_image))
     return jsonify({"ok": True, "id": cid, "name": name})
+
+
+@app.route("/api/people/<contact_id>", methods=["PUT"])
+def api_person_update(contact_id):
+    """Update an existing contact BY ID without recomputing the id, so enriching an
+    attendee-derived contact (e.g. adding an email) keeps its meeting_contacts links."""
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "name required"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM contacts WHERE id=%s", (contact_id,))
+            if not cur.fetchone():
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            cur.execute("""
+                UPDATE contacts SET name=%s, company=%s, title=%s, email=%s, phone=%s,
+                    card_image=COALESCE(%s, card_image), updated_at=NOW()
+                WHERE id=%s
+            """, (name,
+                  (data.get("company") or "").strip(),
+                  (data.get("title") or "").strip(),
+                  (data.get("email") or "").strip().lower(),
+                  (data.get("phone") or "").strip(),
+                  data.get("card_image") or None,
+                  contact_id))
+    return jsonify({"ok": True, "id": contact_id})
 
 
 # --------------------------------------------------
@@ -1544,6 +1609,7 @@ def api_contacts_scan():
 
 
 
+@app.route("/api/meetings/<mid>/contacts", methods=["POST"])
 def api_meeting_link_contact(mid: str):
     data = request.get_json(force=True, silent=True) or {}
     cid = (data.get("contact_id") or "").strip()
@@ -2875,6 +2941,9 @@ def api_notes_intake():
                             UPDATE meetings SET organization_id = %s WHERE id = %s
                         """, (org_id_out, mid_out))
 
+                    # Turn attendees into linked People contacts
+                    _upsert_attendee_contacts(cur, mid_out, note_attendees, org_id_out)
+
                     # Bill references
                     if bill_items:
                         for bill in bill_items:
@@ -3327,6 +3396,37 @@ def api_meetings_upcoming():
                 """)
                 rows = [dict(r) for r in cur.fetchall()]
         return jsonify({"ok": True, "meetings": rows})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/meetings/<mid>/metadata", methods=["POST"])
+def api_meeting_metadata(mid: str):
+    """Edit parsed metadata (title/date/attendees/link) of a prepared meeting."""
+    data = request.get_json(force=True, silent=True) or {}
+    topic = (data.get("topic") or "").strip()
+    attendees = (data.get("attendees") or "").strip()
+    meeting_link = (data.get("meeting_link") or "").strip() or None
+    dtstart = (data.get("dtstart") or "").strip() or None
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Preserve the existing dtstart if none is provided, so a blank
+                # date field can't silently drop the meeting from the upcoming card.
+                cur.execute("""
+                    UPDATE meetings
+                    SET topic = %s, attendees = %s, meeting_link = %s,
+                        dtstart = COALESCE(%s, dtstart)
+                    WHERE id = %s
+                    RETURNING id
+                """, (topic, attendees, meeting_link, dtstart, mid))
+                if not cur.fetchone():
+                    return jsonify({"ok": False, "error": "Not found"}), 404
+                cur.execute("SELECT organization_id FROM meetings WHERE id=%s", (mid,))
+                row = cur.fetchone()
+                meeting_org = row["organization_id"] if row else None
+                _upsert_attendee_contacts(cur, mid, attendees, meeting_org)
+        return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
