@@ -3738,6 +3738,7 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .org-entity-row:last-child { border-bottom: none; }
 .org-entity-row--task { cursor: pointer; }
 .org-entity-row--task:hover { background: var(--surface); }
+.org-entity-row--done .entity-text { color: var(--ink-soft, #8a8f98); text-decoration: line-through; }
 .org-entity-text, .entity-text { flex: 1; min-width: 0; }
 .org-entity-status, .entity-status {
   padding: 2px 7px; border-radius: var(--r-pill); font-size: 10px; font-weight: 600;

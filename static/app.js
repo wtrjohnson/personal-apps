@@ -1542,6 +1542,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     const openCommits = (org.commitments || []).filter((c) =>
       ["open","needs_review","task_created"].includes(c.status));
     const openTasks = org.open_tasks || [];
+    const completedTasks = org.completed_tasks || [];
 
     // Filter the meeting list and re-render it (still inside hidden col-2).
     state.meetingFilters.group = org.name;
@@ -1579,6 +1580,16 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         }).join("")
       : "";
 
+    const completedTasksHtml = completedTasks.length
+      ? completedTasks.map((t) => {
+          return `<div class="org-entity-row org-entity-row--task org-entity-row--done" data-task-id="${escapeHtml(t.id)}">
+            <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
+            <span class="entity-text">${escapeHtml(t.text)}</span>
+            <span class="entity-status">✓ done</span>
+          </div>`;
+        }).join("")
+      : "";
+
     const billsHtml = (org.bills || []).map((b) =>
       `<span class="bill-pill">${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}</span>`
     ).join("");
@@ -1597,6 +1608,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
       asksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Asks</div>${asksHtml}</div>`,
       commitsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Commitments</div>${commitsHtml}</div>`,
       tasksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Tasks</div>${tasksHtml}</div>`,
+      completedTasksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Completed Tasks</div>${completedTasksHtml}</div>`,
       billsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Bills</div><div class="bill-pills-row">${billsHtml}</div></div>`,
       contactsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Contacts</div><div class="drawer-cards">${contactsHtml}</div></div>`,
     ].filter(Boolean).join("");
@@ -1633,7 +1645,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     });
     content?.querySelectorAll(".org-entity-row--task").forEach((row) => {
       row.addEventListener("click", () => {
-        const task = openTasks.find((t) => t.id === row.dataset.taskId);
+        const task = [...openTasks, ...completedTasks].find((t) => t.id === row.dataset.taskId);
         if (task) openDrawer(task);
       });
     });

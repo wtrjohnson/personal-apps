@@ -1054,16 +1054,25 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
                 ORDER BY MIN(br.created_at) DESC
             """, (org_id,))
             bills = [dict(r) for r in cur.fetchall()]
-            cur.execute(_TASKS_SELECT + """
-                WHERE NOT t.done AND t.organization_id = %s
+            # Match tasks either by explicit organization_id or by their group_name
+            # slugified to the same form used for organization ids (see seeding above).
+            _group_slug = "trim('-' FROM regexp_replace(lower(t.group_name), '[^a-z0-9]+', '-', 'g'))"
+            cur.execute(_TASKS_SELECT + f"""
+                WHERE NOT t.done AND (t.organization_id = %s OR {_group_slug} = %s)
                 ORDER BY
                   CASE WHEN t.deadline IS NULL THEN 1 ELSE 0 END,
                   t.deadline ASC,
                   t.created_at DESC
-            """, (org_id,))
+            """, (org_id, org_id))
             today_iso = date_cls.today().isoformat()
             open_tasks = [_task_row_to_task(dict(r), today_iso).as_dict()
                           for r in cur.fetchall()]
+            cur.execute(_TASKS_SELECT + f"""
+                WHERE t.done AND (t.organization_id = %s OR {_group_slug} = %s)
+                ORDER BY t.created_at DESC
+            """, (org_id, org_id))
+            completed_tasks = [_task_row_to_task(dict(r), today_iso).as_dict()
+                               for r in cur.fetchall()]
     # Derive org name from meetings if no org row exists
     fallback_name = meetings[0]["canonical_group"] if meetings else org_id
     return {
@@ -1078,6 +1087,7 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
         "contacts": contacts_rows,
         "bills": bills,
         "open_tasks": open_tasks,
+        "completed_tasks": completed_tasks,
     }
 
 
