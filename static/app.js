@@ -1013,33 +1013,57 @@ function parseNLTask(text) {
   return result;
 }
 
+function _nlMonthOptions(sel) {
+  const months = [["01","Jan"],["02","Feb"],["03","Mar"],["04","Apr"],["05","May"],["06","Jun"],["07","Jul"],["08","Aug"],["09","Sep"],["10","Oct"],["11","Nov"],["12","Dec"]];
+  return `<option value="">Month</option>` + months.map(([v, l]) => `<option value="${v}"${v === sel ? " selected" : ""}>${l}</option>`).join("");
+}
+function _nlDayOptions(sel) {
+  let o = `<option value="">Day</option>`;
+  for (let d = 1; d <= 31; d++) { const v = String(d).padStart(2, "0"); o += `<option value="${v}"${v === sel ? " selected" : ""}>${d}</option>`; }
+  return o;
+}
+function _nlYearOptions(sel) {
+  const ty = new Date().getFullYear();
+  return `<option value="">Year</option>` + [ty - 1, ty, ty + 1, ty + 2].map((y) => `<option value="${y}"${String(y) === sel ? " selected" : ""}>${y}</option>`).join("");
+}
+
 function _populateNLStep2(parsed) {
-  const fields = [];
-  fields.push({ id: "nl-f-priority", label: "Priority", type: "select", value: parsed.priority, options: [["normal","Normal"],["high","High"],["low","Low"]] });
-  fields.push({ id: "nl-f-deadline", label: "Deadline", type: "date", value: parsed.deadline || "" });
-  fields.push({ id: "nl-f-group", label: "Group", type: "text", value: parsed.group || "", uncertain: parsed.groupUncertain });
-  const contactVal = [parsed.email, parsed.phone, parsed.contact].filter(Boolean).join("  ");
-  if (contactVal) {
-    fields.push({ id: "nl-f-contact", label: "Contact method", type: "text", value: contactVal });
+  // Deadline parts (matches the edit modal's month/day/year selects)
+  let dlMo = "", dlDd = "", dlYy = "";
+  if (parsed.deadline && /^\d{4}-\d{2}-\d{2}$/.test(parsed.deadline)) {
+    [dlYy, dlMo, dlDd] = parsed.deadline.split("-");
   }
-  if (parsed.estimate_minutes) {
-    fields.push({ id: "nl-f-estimate", label: "Estimate (min)", type: "number", value: parsed.estimate_minutes });
-  }
+  const allGroups = state.tasksGroupsInScope.concat(state.facets.groups).filter((v, i, a) => a.indexOf(v) === i);
+  const groupOpts = allGroups.map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
+  const contactVal = [parsed.email, parsed.phone, parsed.contact].filter(Boolean).join(", ");
+
+  const blocks = [
+    { uncertain: false, html: `<label>Priority</label>
+      <select id="nl-f-priority">${[["normal","Normal"],["high","High"],["low","Low"]].map(([v, l]) => `<option value="${v}"${v === parsed.priority ? " selected" : ""}>${l}</option>`).join("")}</select>` },
+    { uncertain: !!parsed.groupUncertain, html: `<label>Group${parsed.groupUncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
+      <input id="nl-f-group" list="nl-f-group-list" value="${escapeHtml(parsed.group || "")}" placeholder="Pick or type new" autocomplete="off">
+      <datalist id="nl-f-group-list">${groupOpts}</datalist>` },
+    { uncertain: false, html: `<label>Deadline</label>
+      <div class="deadline-selects">
+        <select id="nl-f-dl-month">${_nlMonthOptions(dlMo)}</select>
+        <select id="nl-f-dl-day">${_nlDayOptions(dlDd)}</select>
+        <select id="nl-f-dl-year">${_nlYearOptions(dlYy)}</select>
+      </div>
+      <div class="dl-quick-btns">
+        <button type="button" class="dl-quick-btn" data-quick="today" data-prefix="nl-f">Today</button>
+        <button type="button" class="dl-quick-btn" data-quick="this-week" data-prefix="nl-f">This week</button>
+        <button type="button" class="dl-quick-btn" data-quick="next-week" data-prefix="nl-f">Next week</button>
+      </div>` },
+    { uncertain: false, html: `<label>Phone / email</label>
+      <input id="nl-f-contact" value="${escapeHtml(contactVal)}" placeholder="Phone number or email" autocomplete="off">` },
+    { uncertain: false, html: `<label>Estimate (min)</label>
+      <input id="nl-f-estimate" type="number" min="1" max="480" value="${parsed.estimate_minutes || ""}" placeholder="e.g. 30" autocomplete="off">` },
+  ];
 
   const container = $("#nl-parsed-fields");
-  container.innerHTML = fields.map((f, i) => {
-    const uncertain = f.uncertain ? " nl-field-uncertain" : "";
-    let input;
-    if (f.type === "select") {
-      input = `<select id="${f.id}">${f.options.map(([v, l]) => `<option value="${v}"${v === f.value ? " selected" : ""}>${l}</option>`).join("")}</select>`;
-    } else {
-      input = `<input id="${f.id}" type="${f.type}" value="${escapeHtml(String(f.value || ""))}" autocomplete="off">`;
-    }
-    return `<div class="nl-field nl-field-blur${uncertain}" style="transition-delay:${i * 55}ms">
-      <label>${f.label}${f.uncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
-      ${input}
-    </div>`;
-  }).join("");
+  container.innerHTML = blocks.map((b, i) => `<div class="nl-field nl-field-blur${b.uncertain ? " nl-field-uncertain" : ""}" style="transition-delay:${i * 55}ms">
+      ${b.html}
+    </div>`).join("");
 
   // Expand container, then unblur fields staggered
   requestAnimationFrame(() => {
@@ -1112,7 +1136,7 @@ async function submitNLModal() {
   const text = $("#nl-text").value.trim();
   if (!text) return;
   const priority = $("#nl-f-priority")?.value || "normal";
-  const deadline = $("#nl-f-deadline")?.value || "";
+  const deadline = getDeadlineValue("nl-f") || "";
   const group = $("#nl-f-group")?.value.trim() || "";
   const contact = $("#nl-f-contact")?.value.trim() || null;
   const estimateRaw = parseInt($("#nl-f-estimate")?.value);
