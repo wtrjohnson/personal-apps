@@ -510,6 +510,10 @@ function renderTasks() {
   gSel.innerHTML = opts.join("");
   if (current && state.tasksGroupsInScope.includes(current)) gSel.value = current;
   else gSel.value = "";
+
+  // Keep the phone segmented control in sync with the front paper
+  const front = state.paperOrder[0];
+  document.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.seg === front));
 }
 
 function bringToFront(paperName) {
@@ -3835,6 +3839,14 @@ const _blockerSearchDebounced = debounce(async (q) => {
 document.addEventListener("DOMContentLoaded", async () => {
   // Dock nav
   $$(".dock-btn[data-tab]").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+
+  // Tasks segmented control (phone) — reuses bringToFront to swap the visible list
+  document.querySelector(".tasks-segmented")?.addEventListener("click", (e) => {
+    const b = e.target.closest(".seg-btn");
+    if (!b) return;
+    document.querySelectorAll(".seg-btn").forEach((x) => x.classList.toggle("active", x === b));
+    bringToFront(b.dataset.seg);
+  });
 
   // Safe-triangle dock submenus — handles all .dock-btn-wrap elements
   (function () {
