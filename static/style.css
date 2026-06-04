@@ -2217,10 +2217,6 @@ table.bills-table tr:last-child td { border-bottom: none; }
   .card-ring, .card-spark { grid-column: span 2; }
   .card-overdue, .card-by-group, .card-recent { grid-column: span 2; }
 }
-@media (max-width: 900px) {
-  .meetings-body { grid-template-columns: 1fr; }
-  #detail { display: none; }
-}
 
 /* =========================================================
    PRIMARY FOCUS PANEL (home dashboard)
@@ -4063,3 +4059,123 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
   color: var(--muted); cursor: pointer; transition: background 0.15s, color 0.15s;
 }
 .upcoming-edit-btn:hover { background: var(--card-blue); color: #fff; border-color: var(--card-blue); }
+
+/* =========================================================
+   Responsive — phones & iPad (appended; overrides win by source order)
+   ========================================================= */
+
+/* ---------- Touch devices (any size): neutralize hover-only menus ---------- */
+@media (hover: none) and (pointer: coarse) {
+  .dock-submenu { display: none !important; }
+}
+
+/* ---------- iPad / tablet: keep left dock, relax layouts ---------- */
+@media (min-width: 601px) and (max-width: 1024px) {
+  #view-home { grid-template-columns: repeat(2, 1fr); }
+  .card-hero { grid-column: span 2; min-height: 200px; }
+  .card-focus-panel, .card-deadlines { grid-column: span 2; }
+  .card-ring, .card-spark, .card-upcoming, .card-today-callouts { grid-column: span 1; }
+}
+
+/* Single-column relationships drill-down also on iPad portrait (3-col too tight) */
+@media (min-width: 601px) and (max-width: 768px) {
+  .rel-layout { display: block; position: relative; }
+  .rel-col-list, .rel-col-meetings, .rel-col-detail {
+    max-width: 100% !important; width: 100%; border-right: none; transition: none;
+  }
+  .rel-layout.depth-0 .rel-col-meetings,
+  .rel-layout.depth-0 .rel-col-detail,
+  .rel-layout.depth-1 .rel-col-list,
+  .rel-layout.depth-1 .rel-col-detail,
+  .rel-layout.depth-2 .rel-col-list,
+  .rel-layout.depth-2 .rel-col-meetings { display: none; }
+  .rel-layout.depth-1 .rel-col-meetings,
+  .rel-layout.depth-2 .rel-col-detail { display: flex; }
+}
+
+/* ---------- Phones ---------- */
+@media (max-width: 600px) {
+  /* App shell: no left gutter, room for bottom bar, dynamic viewport height */
+  .app {
+    padding: 12px 12px calc(64px + env(safe-area-inset-bottom)) 12px;
+    height: 100vh; height: 100dvh;
+  }
+
+  /* Nav dock → fixed bottom tab bar */
+  .nav-dock {
+    flex-direction: row; left: 0; right: 0; bottom: 0; width: 100%;
+    border-radius: 0; border: none; border-top: 1px solid var(--border);
+    box-shadow: 0 -2px 12px rgba(0,0,0,0.06);
+    justify-content: space-around; align-items: center; gap: 0;
+    padding: 6px 0 calc(6px + env(safe-area-inset-bottom));
+  }
+  .dock-divider, .dock-avatar, #dock-intake-btn { display: none; }
+  .dock-btn { width: 56px; height: 48px; }
+  .dock-btn-wrap { width: auto; flex: 0 0 auto; }
+  .dock-submenu { display: none !important; }
+  .toast-container { bottom: calc(72px + env(safe-area-inset-bottom)); }
+
+  /* Home: single column */
+  #view-home { grid-template-columns: 1fr; }
+  #view-home > .card { grid-column: 1 / -1 !important; }
+  .card-hero { min-height: 0; }
+  .card-hero .hero-cta-row { flex-wrap: wrap; }
+
+  /* Relationships: single-column drill-down (reuses depth state + back buttons) */
+  .rel-layout { display: block; position: relative; }
+  .rel-col-list, .rel-col-meetings, .rel-col-detail {
+    max-width: 100% !important; width: 100%; border-right: none; transition: none;
+  }
+  .rel-layout.depth-0 .rel-col-meetings,
+  .rel-layout.depth-0 .rel-col-detail,
+  .rel-layout.depth-1 .rel-col-list,
+  .rel-layout.depth-1 .rel-col-detail,
+  .rel-layout.depth-2 .rel-col-list,
+  .rel-layout.depth-2 .rel-col-meetings { display: none; }
+  .rel-layout.depth-1 .rel-col-meetings,
+  .rel-layout.depth-2 .rel-col-detail { display: flex; }
+  .radial-root { top: 8px; left: 8px; }
+
+  /* Tasks: segmented toggle, one full-width list (no overlapping stack) */
+  .tasks-segmented {
+    display: flex; gap: 4px; margin-bottom: 10px;
+    background: var(--card-soft); border-radius: var(--r-pill); padding: 3px;
+  }
+  .seg-btn {
+    flex: 1; height: 40px; border: none; background: transparent;
+    border-radius: var(--r-pill); font: 600 13px var(--sans); color: var(--muted);
+    cursor: pointer;
+  }
+  .seg-btn.active { background: var(--card); color: var(--ink); box-shadow: var(--shadow-sm); }
+  .paper-stack { padding-right: 0; position: static; }
+  .paper {
+    position: static !important; transform: none !important; width: 100% !important;
+    opacity: 1 !important; filter: none !important; box-shadow: var(--shadow-md);
+  }
+  .paper.pos-1, .paper.pos-2 { display: none; }
+  .paper.pos-0 { display: flex; }
+  .peek-edge { display: none !important; }
+
+  /* Smart views: stacked, sidebar becomes a horizontal scroll strip */
+  .smart-views-layout { grid-template-columns: 1fr; }
+  .smart-views-sidebar {
+    flex-direction: row; overflow-x: auto; gap: 6px;
+    -webkit-overflow-scrolling: touch; padding-bottom: 4px;
+  }
+  .smart-views-label { display: none; }
+  .smart-view-btn { flex: 0 0 auto; height: 40px; white-space: nowrap; }
+
+  /* Modals / drawers / overlays: use more of the screen, scroll long bodies */
+  .modal-backdrop { padding: 12px; }
+  .modal { max-height: calc(100dvh - 24px); }
+  .modal-body { max-height: calc(100dvh - 180px); overflow-y: auto; }
+  .modal-row, .modal-priority-row { flex-direction: column; }
+  .drawer { width: 100%; max-width: 100%; }
+  .focus-mode-inner { width: calc(100vw - 32px); }
+  .snooze-popup { width: calc(100vw - 24px); min-width: 0; }
+  .search-overlay { padding-top: 56px; }
+  .search-overlay-box, .cmd-box { width: calc(100vw - 24px); max-width: calc(100vw - 24px); }
+
+  /* Comfortable touch targets */
+  .modal-close, .drawer-close, .focus-mode-close, .icon-btn { min-width: 44px; min-height: 44px; }
+}
