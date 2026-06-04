@@ -149,61 +149,6 @@ async function renderHome() {
   drawSparkline(s.completions_per_day || []);
   $("#spark-total").textContent = s.completions_30d || 0;
 
-  const odCard = $("#card-overdue");
-  const odList = $("#overdue-list");
-  const odPill = $("#overdue-count-pill");
-  if (!s.overdue_top || s.overdue_top.length === 0) {
-    if (odCard) odCard.style.display = "none";
-  } else {
-    if (odCard) odCard.style.display = "";
-    odPill.style.display = "";
-    odPill.textContent = `${s.overdue_count} total`;
-    odList.innerHTML = s.overdue_top.map((t) => {
-      const days = t.days_overdue;
-      const label = days === 0 ? "today" : `${days}d`;
-      const groupLine = t.group ? `<span style="color:var(--muted); font-size:11px;">${escapeHtml(t.group)}</span>` : "";
-      return `
-        <li data-overdue-id="${escapeHtml(t.id)}">
-          <div>
-            <div class="od-text">${escapeHtml(t.text)}</div>
-            ${groupLine}
-          </div>
-          <span class="od-days">${label}</span>
-        </li>`;
-    }).join("");
-  }
-
-  const bgEl = $("#group-bars");
-  const maxGroup = Math.max(0, ...((s.by_group || []).map((g) => g.count)));
-  if (!s.by_group || !s.by_group.length) {
-    bgEl.innerHTML = `<div style="color:var(--muted); font-size:13px; text-align:center; padding:18px 0;">No open tasks with a group yet.</div>`;
-  } else {
-    bgEl.innerHTML = s.by_group.map((g) => {
-      const pctW = maxGroup ? Math.round((g.count / maxGroup) * 100) : 0;
-      return `
-        <div class="group-bar" data-group="${escapeHtml(g.group)}">
-          <span class="group-bar-name">${escapeHtml(g.group)}</span>
-          <span class="group-bar-num">${g.count}</span>
-          <div class="group-bar-fill" style="--pct: ${pctW}%;"></div>
-        </div>`;
-    }).join("");
-  }
-
-  if (s.recent_meeting) {
-    const rm = s.recent_meeting;
-    $("#recent-title").textContent = rm.group + (rm.topic ? ` — ${rm.topic}` : "");
-    $("#recent-meta").textContent = rm.date || "";
-    $("#recent-actions").textContent = rm.open_actions || 0;
-    $("#recent-reminders").textContent = rm.open_reminders || 0;
-    $("#recent-meeting-card").dataset.meetingId = rm.id;
-  } else {
-    $("#recent-title").textContent = "—";
-    $("#recent-meta").textContent = "No meetings yet.";
-    $("#recent-actions").textContent = "0";
-    $("#recent-reminders").textContent = "0";
-    delete $("#recent-meeting-card").dataset.meetingId;
-  }
-
   _renderFocusPanel(s.top_urgency || []);
 
   // Today's callouts summary card
@@ -1650,6 +1595,8 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
             <span class="entity-text">${escapeHtml(a.text)}</span>
             <span class="entity-status status-${a.status}">${escapeHtml(a.status.replace("_"," "))}</span>
             <button class="entity-status-btn" data-ask-id="${a.id}" data-status="completed">✓</button>
+            <button class="entity-edit-btn" data-ask-edit="${a.id}" title="Edit">✎</button>
+            <button class="entity-del-btn" data-ask-del="${a.id}" title="Delete">🗑</button>
           </div>`).join("")
       : "";
 
@@ -1660,6 +1607,8 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
             <span class="entity-text">${escapeHtml(c.text)}</span>
             <span class="entity-status status-${c.status}">${escapeHtml(c.status.replace("_"," "))}</span>
             ${!c.task_id ? `<button class="create-task-btn" data-commit-id="${c.id}">+ Task</button>` : ""}
+            <button class="entity-edit-btn" data-commit-edit="${c.id}" title="Edit">✎</button>
+            <button class="entity-del-btn" data-commit-del="${c.id}" title="Delete">🗑</button>
           </div>`).join("")
       : "";
 
@@ -1696,6 +1645,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
           ${c.title || c.company ? `<div class="drawer-card-sub">${escapeHtml([c.title,c.company].filter(Boolean).join(" · "))}</div>` : ""}
           ${c.email ? `<div class="drawer-card-sub">${escapeHtml(c.email)}</div>` : ""}
         </div>
+        <button class="chip-remove org-person-unlink" data-unlink-person="${escapeHtml(c.id)}" title="Remove from this organization" aria-label="Remove from this organization">×</button>
       </div>`).join("");
 
     // Filter-by-person control for the task sections (only if there are people + tasks)
@@ -1710,7 +1660,19 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
          </div>`
       : "";
 
+    const orgEditHtml = `
+      <div class="org-detail-header">
+        <input class="org-edit-name" id="org-edit-name" value="${escapeHtml(org.name || "")}" placeholder="Organization name">
+        <button class="detail-delete-btn" id="org-delete" title="Delete organization">Delete</button>
+      </div>
+      <div class="org-detail-section org-edit-fields">
+        <input id="org-edit-type" placeholder="Type (e.g. trade association)" value="${escapeHtml(org.type || "")}">
+        <textarea id="org-edit-notes" placeholder="Notes…">${escapeHtml(org.notes || "")}</textarea>
+        <button class="cta-pill ghost" id="org-edit-save">Save details</button>
+      </div>`;
+
     const sections = [
+      orgEditHtml,
       asksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Asks</div>${asksHtml}</div>`,
       commitsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Commitments</div>${commitsHtml}</div>`,
       personFilterHtml,
@@ -1778,6 +1740,84 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         const task = [...openTasks, ...completedTasks].find((t) => t.id === row.dataset.taskId);
         if (task) openDrawer(task);
       });
+    });
+
+    // Unlink a person from this organization
+    content?.querySelectorAll("[data-unlink-person]").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm("Remove this person from this organization?")) return;
+        await api(`/api/people/${btn.dataset.unlinkPerson}/organizations/${orgId}`, { method: "DELETE" });
+        selectOrg(orgId, { skipToggle: true });
+      });
+    });
+
+    // Edit / delete asks
+    content?.querySelectorAll("[data-ask-edit]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const a = openAsks.find((x) => x.id === btn.dataset.askEdit);
+        const text = prompt("Edit ask:", a?.text || "");
+        if (text === null || !text.trim()) return;
+        const priority = prompt("Priority (high / normal / low):", a?.priority || "normal");
+        if (priority === null) return;
+        await api(`/api/asks/${btn.dataset.askEdit}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: text.trim(), priority: (priority || "normal").trim() }),
+        });
+        selectOrg(orgId, { skipToggle: true });
+      });
+    });
+    content?.querySelectorAll("[data-ask-del]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Delete this ask?")) return;
+        await api(`/api/asks/${btn.dataset.askDel}`, { method: "DELETE" });
+        selectOrg(orgId, { skipToggle: true });
+      });
+    });
+
+    // Edit / delete commitments
+    content?.querySelectorAll("[data-commit-edit]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const c = openCommits.find((x) => x.id === btn.dataset.commitEdit);
+        const text = prompt("Edit commitment:", c?.text || "");
+        if (text === null || !text.trim()) return;
+        const due = prompt("Due date (YYYY-MM-DD, blank for none):", c?.due_date || "");
+        if (due === null) return;
+        await api(`/api/commitments/${btn.dataset.commitEdit}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: text.trim(), due_date: due.trim() }),
+        });
+        selectOrg(orgId, { skipToggle: true });
+      });
+    });
+    content?.querySelectorAll("[data-commit-del]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Delete this commitment?")) return;
+        await api(`/api/commitments/${btn.dataset.commitDel}`, { method: "DELETE" });
+        selectOrg(orgId, { skipToggle: true });
+      });
+    });
+
+    // Edit / delete the organization itself
+    $("#org-edit-save")?.addEventListener("click", async () => {
+      const name = $("#org-edit-name").value.trim();
+      if (!name) { alert("Organization name is required."); return; }
+      try {
+        await api(`/api/organizations/${orgId}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, type: $("#org-edit-type").value, notes: $("#org-edit-notes").value }),
+        });
+        loadGroups();
+        selectOrg(orgId, { skipToggle: true });
+      } catch { alert("Couldn't save organization."); }
+    });
+    $("#org-delete")?.addEventListener("click", async () => {
+      if (!confirm(`Delete ${org.name}? This permanently removes the organization.`)) return;
+      try {
+        await api(`/api/organizations/${orgId}`, { method: "DELETE" });
+        selectOrg(null);
+        loadGroups();
+      } catch { alert("Couldn't delete organization."); }
     });
 
     // Reveal col-2 — its content is already populated.
@@ -1975,7 +2015,10 @@ async function selectPerson(contactId) {
        </div>`).join("");
 
     const orgsHtml = (p.orgs || []).map((o) =>
-      `<button class="attendee-chip attendee-chip--link" data-org-id="${escapeHtml(o.id)}">${escapeHtml(o.name)}</button>`
+      `<span class="org-chip-wrap">
+         <button class="attendee-chip attendee-chip--link" data-org-id="${escapeHtml(o.id)}">${escapeHtml(o.name)}</button>
+         <button class="chip-remove" data-unlink-org="${escapeHtml(o.id)}" title="Remove from organization" aria-label="Remove from organization">×</button>
+       </span>`
     ).join("") + `<button class="attendee-chip" id="person-add-org" title="Add organization">+ org</button>`;
 
     const tasksHtml = (p.tasks || []).map((t) =>
@@ -1992,7 +2035,10 @@ async function selectPerson(contactId) {
        </div>`).join("");
 
     content.innerHTML = `
-      <div class="org-detail-header"><h2>${escapeHtml(p.name)}</h2></div>
+      <div class="org-detail-header">
+        <h2>${escapeHtml(p.name)}</h2>
+        <button class="detail-delete-btn" id="person-delete" title="Delete contact">Delete</button>
+      </div>
       <div class="org-detail-section">
         <div class="drawer-section-label">Organizations</div>
         <div class="attendee-chips">${orgsHtml}</div>
@@ -2035,6 +2081,22 @@ async function selectPerson(contactId) {
         body: JSON.stringify({ name: name.trim() }),
       });
       selectPerson(contactId);
+    });
+    // Unlink an organization from this person
+    content.querySelectorAll("[data-unlink-org]").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm("Remove this person from that organization?")) return;
+        await api(`/api/people/${contactId}/organizations/${btn.dataset.unlinkOrg}`, { method: "DELETE" });
+        selectPerson(contactId);
+      });
+    });
+    // Delete this contact
+    $("#person-delete")?.addEventListener("click", async () => {
+      if (!confirm(`Delete ${p.name}? This permanently removes the contact.`)) return;
+      await api(`/api/people/${contactId}`, { method: "DELETE" });
+      $("#person-detail-panel")?.classList.add("hidden");
+      loadGroups();
     });
     // Person's tasks open the task drawer
     content.querySelectorAll("[data-person-task-id]").forEach((row) => {
@@ -3240,9 +3302,7 @@ function switchTab(tab) {
   if (view) view.classList.add("active");
 
   const input = $("#q");
-  if (input) input.placeholder = tab === "tasks" ? "Search tasks…"
-    : tab === "groups" ? "Search notes…"
-    : "Search…";
+  if (input) input.placeholder = "Search people, meetings, tasks, notes…";
 
   if (tab === "home")   renderHome();
   if (tab === "groups") {
@@ -3268,8 +3328,107 @@ function openSearchOverlay() {
 function closeSearchOverlay() {
   $("#search-overlay").classList.remove("open");
   $("#search-overlay").setAttribute("aria-hidden", "true");
-  $("#q")?.blur();
+  const qEl = $("#q");
+  if (qEl) { qEl.blur(); qEl.value = ""; }
+  const r = $("#search-results");
+  if (r) r.innerHTML = "";
+  _searchResultItems = [];
+  _searchActiveIdx = -1;
 }
+
+// ---------- Global search ----------
+let _searchResultItems = [];   // flat list of {item} in display order
+let _searchActiveIdx = -1;
+
+function _activateGroupsSubtab(subtab) {
+  document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.toggle("active", b.dataset.subtab === subtab));
+  document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
+  $(`#groups-panel-${subtab}`)?.classList.remove("hidden");
+}
+
+async function navigateToSearchResult(item) {
+  if (!item) return;
+  closeSearchOverlay();
+  const type = item.type === "note"
+    ? (item.entity_type === "organization" ? "org" : "person")
+    : item.type;
+  if (type === "person") {
+    switchTab("groups");
+    _activateGroupsSubtab("people");
+    if (typeof selectPerson === "function") selectPerson(item.id);
+  } else if (type === "org") {
+    switchTab("groups");
+    _activateGroupsSubtab("orgs");
+    if (typeof selectOrg === "function") selectOrg(item.id);
+  } else if (type === "meeting") {
+    switchTab("groups");
+    await refreshMeetings();
+    if (typeof selectMeeting === "function") await selectMeeting(item.id);
+  } else if (type === "bill") {
+    switchTab("groups");
+    _activateGroupsSubtab("bills");
+  } else if (type === "task") {
+    switchTab("tasks");
+    if (state.paperOrder && state.paperOrder[0] !== "active") bringToFront("active");
+    await refreshTasks();
+    const idx = state.tasksByStatus.active.findIndex((t) => t.id === item.id);
+    if (idx >= 0) {
+      selectTask(idx);
+      const el = document.querySelector(`ul[data-paper-list="active"] li[data-idx="${idx}"]`);
+      if (el) el.scrollIntoView({ block: "nearest" });
+    }
+  }
+}
+
+function _renderSearchResults(groups) {
+  const ul = $("#search-results");
+  if (!ul) return;
+  _searchResultItems = [];
+  _searchActiveIdx = -1;
+  if (!groups || !groups.length) {
+    ul.innerHTML = `<li class="search-empty">No matches.</li>`;
+    return;
+  }
+  let html = "";
+  let flatIdx = 0;
+  for (const g of groups) {
+    html += `<li class="search-result-group-label">${escapeHtml(g.label)}</li>`;
+    for (const it of g.items) {
+      html += `<li class="search-result-item" data-flat-idx="${flatIdx}">
+        <span class="search-result-title">${escapeHtml(it.title || "")}</span>
+        ${it.subtitle ? `<span class="search-result-subtitle">${escapeHtml(it.subtitle)}</span>` : ""}
+      </li>`;
+      _searchResultItems.push(it);
+      flatIdx++;
+    }
+  }
+  ul.innerHTML = html;
+  ul.querySelectorAll(".search-result-item").forEach((el) => {
+    el.addEventListener("click", () => {
+      navigateToSearchResult(_searchResultItems[Number(el.dataset.flatIdx)]);
+    });
+  });
+}
+
+function _setSearchActive(idx) {
+  const items = $$("#search-results .search-result-item");
+  if (!items.length) return;
+  _searchActiveIdx = (idx + items.length) % items.length;
+  items.forEach((el, i) => el.classList.toggle("active", i === _searchActiveIdx));
+  items[_searchActiveIdx]?.scrollIntoView({ block: "nearest" });
+}
+
+const _runGlobalSearch = debounce(async (q) => {
+  const ul = $("#search-results");
+  if (!ul) return;
+  if (!q.trim()) { ul.innerHTML = ""; _searchResultItems = []; _searchActiveIdx = -1; return; }
+  try {
+    const data = await api("/api/search?q=" + encodeURIComponent(q));
+    _renderSearchResults(data.groups || []);
+  } catch (_) {
+    ul.innerHTML = `<li class="search-empty">Search failed.</li>`;
+  }
+}, 180);
 
 // ---------- Task filter toggle ----------
 function updateTaskFilterToggleState() {
@@ -3714,6 +3873,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   })();
 
+  // People shortcut from Relationships submenu
+  $("#dock-sub-people").addEventListener("click", () => {
+    switchTab("groups");
+    document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+    document.querySelector(".groups-subtab[data-subtab='people']").classList.add("active");
+    document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
+    $("#groups-panel-people").classList.remove("hidden");
+  });
+
   // Bills shortcut from Groups submenu
   $("#dock-sub-bills").addEventListener("click", () => {
     switchTab("groups");
@@ -3728,10 +3896,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#dock-search-btn").addEventListener("click", openSearchOverlay);
   $("#search-overlay-backdrop").addEventListener("click", closeSearchOverlay);
 
-  // Global search
-  $("#q").addEventListener("input", () => {
-    if (state.tab === "tasks") refreshTasksDebounced();
-    else if (state.tab === "groups") refreshMeetingsDebounced();
+  // Global search — unified cross-entity results in the overlay
+  $("#q").addEventListener("input", (e) => {
+    _runGlobalSearch(e.target.value);
+  });
+  $("#q").addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); _setSearchActive(_searchActiveIdx + 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); _setSearchActive(_searchActiveIdx - 1); }
+    else if (e.key === "Enter") {
+      const item = _searchResultItems[_searchActiveIdx] || _searchResultItems[0];
+      if (item) { e.preventDefault(); navigateToSearchResult(item); }
+    }
   });
 
   // Tasks filters
@@ -3879,47 +4054,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     switchTab("tasks");
     $("#q").value = day.dataset.date;
     refreshTasks();
-  });
-
-  // Overdue list
-  $("#overdue-list").addEventListener("click", async (e) => {
-    const li = e.target.closest("li[data-overdue-id]");
-    if (!li) return;
-    const tid = li.dataset.overdueId;
-    switchTab("tasks");
-    $("#t-overdue").checked = true;
-    if (state.paperOrder[0] !== "active") bringToFront("active");
-    await refreshTasks();
-    const idx = state.tasksByStatus.active.findIndex((t) => t.id === tid);
-    if (idx >= 0) {
-      selectTask(idx);
-      const el = document.querySelector(`ul[data-paper-list="active"] li[data-idx="${idx}"]`);
-      if (el) el.scrollIntoView({ block: "nearest" });
-    }
-  });
-
-  // By-group
-  $("#group-bars").addEventListener("click", (e) => {
-    const g = e.target.closest(".group-bar");
-    if (!g) return;
-    switchTab("tasks");
-    const want = g.dataset.group;
-    refreshTasks().then(() => {
-      const sel = $("#t-group");
-      if (Array.from(sel.options).some((o) => o.value === want)) {
-        sel.value = want;
-        refreshTasks();
-      }
-    });
-  });
-
-  // Recent meeting
-  $("#recent-meeting-card").addEventListener("click", async () => {
-    const mid = $("#recent-meeting-card").dataset.meetingId;
-    if (!mid) return;
-    switchTab("groups");
-    await refreshMeetings();
-    await selectMeeting(mid);
   });
 
   // NL modal

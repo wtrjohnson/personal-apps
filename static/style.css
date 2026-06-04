@@ -239,6 +239,35 @@ input, select, textarea { font-family: inherit; }
   border: 1px solid var(--border); padding: 2px 7px; border-radius: 6px;
   font-family: var(--mono);
 }
+.search-results {
+  list-style: none; margin: 8px 0 0; padding: 6px;
+  max-height: min(60vh, 480px); overflow-y: auto;
+  background: var(--card); border-radius: var(--r-xl);
+  box-shadow: var(--shadow-pop); border: 1px solid var(--border);
+}
+.search-results:empty { display: none; }
+.search-result-group-label {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--muted-2);
+  padding: 8px 10px 4px;
+}
+.search-result-item {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 8px 10px; border-radius: var(--r-md, 8px); cursor: pointer;
+}
+.search-result-item:hover,
+.search-result-item.active { background: var(--card-soft); }
+.search-result-title {
+  font-size: 14px; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.search-result-subtitle {
+  font-size: 12px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.search-results .search-empty {
+  padding: 14px 10px; font-size: 13px; color: var(--muted); text-align: center;
+}
 
 /* =========================================================
    Shared icon button
@@ -3748,6 +3777,49 @@ table.bills-table tr:last-child td { border-bottom: none; }
 }
 button.attendee-chip--link { cursor: pointer; }
 button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--card-blue); }
+
+/* Removable org chip (person detail) */
+.org-chip-wrap { display: inline-flex; align-items: center; gap: 2px; }
+.chip-remove {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%; line-height: 1;
+  border: none; background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 14px; padding: 0;
+}
+.chip-remove:hover { background: var(--surface); color: var(--danger, #d44); }
+.org-person-card { position: relative; }
+.org-person-unlink { position: absolute; top: 4px; right: 4px; }
+
+/* Inline edit/delete controls on asks & commitments */
+.entity-edit-btn, .entity-del-btn {
+  border: none; background: none; cursor: pointer; font-size: 12px;
+  color: var(--muted); padding: 0 2px; flex-shrink: 0;
+}
+.entity-edit-btn:hover { color: var(--card-blue); }
+.entity-del-btn:hover { color: var(--danger, #d44); }
+
+/* Detail delete button (person / org header) */
+.org-detail-header { display: flex; align-items: center; gap: 8px; }
+.org-detail-header h2 { flex: 1; min-width: 0; margin: 0; }
+.detail-delete-btn {
+  border: 1px solid var(--border); background: transparent; color: var(--muted);
+  border-radius: var(--r-pill); padding: 3px 12px; font-size: 12px; cursor: pointer; flex-shrink: 0;
+}
+.detail-delete-btn:hover { border-color: var(--danger, #d44); color: var(--danger, #d44); }
+
+/* Org edit form */
+.org-edit-name {
+  flex: 1; min-width: 0; font-size: 16px; font-weight: 700; color: var(--ink);
+  background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 2px 6px;
+}
+.org-edit-name:hover, .org-edit-name:focus { border-color: var(--border); outline: none; }
+.org-edit-fields { display: flex; flex-direction: column; gap: 8px; }
+.org-edit-fields input, .org-edit-fields textarea {
+  width: 100%; font: 13px/1.4 var(--sans); color: var(--ink);
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+}
+.org-edit-fields textarea { min-height: 54px; resize: vertical; }
+.org-edit-fields .cta-pill { align-self: flex-start; }
 
 /* People tab: add-person header + person editor */
 .people-list-header { display: flex; justify-content: flex-end; margin-bottom: 8px; }
