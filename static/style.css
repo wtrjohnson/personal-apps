@@ -4064,6 +4064,9 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
    Responsive — phones & iPad (appended; overrides win by source order)
    ========================================================= */
 
+/* Segmented tasks toggle is phone-only; hidden everywhere else. */
+.tasks-segmented { display: none; }
+
 /* ---------- Touch devices (any size): neutralize hover-only menus ---------- */
 @media (hover: none) and (pointer: coarse) {
   .dock-submenu { display: none !important; }
@@ -4137,8 +4140,9 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
   .radial-root { top: 8px; left: 8px; }
 
   /* Tasks: segmented toggle, one full-width list (no overlapping stack) */
+  #view-tasks.active { display: flex; flex-direction: column; }
   .tasks-segmented {
-    display: flex; gap: 4px; margin-bottom: 10px;
+    display: flex; gap: 4px; margin-bottom: 10px; flex: 0 0 auto;
     background: var(--card-soft); border-radius: var(--r-pill); padding: 3px;
   }
   .seg-btn {
@@ -4147,10 +4151,10 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
     cursor: pointer;
   }
   .seg-btn.active { background: var(--card); color: var(--ink); box-shadow: var(--shadow-sm); }
-  .paper-stack { padding-right: 0; position: static; }
+  .paper-stack { padding-right: 0; position: static; flex: 1; min-height: 0; }
   .paper {
     position: static !important; transform: none !important; width: 100% !important;
-    opacity: 1 !important; filter: none !important; box-shadow: var(--shadow-md);
+    height: 100%; opacity: 1 !important; filter: none !important; box-shadow: var(--shadow-md);
   }
   .paper.pos-1, .paper.pos-2 { display: none; }
   .paper.pos-0 { display: flex; }
