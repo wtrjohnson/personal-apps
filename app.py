@@ -1633,6 +1633,22 @@ def api_person_update(contact_id):
     return jsonify({"ok": True, "id": contact_id})
 
 
+@app.route("/api/people/<contact_id>", methods=["DELETE"])
+@app.route("/api/contacts/<contact_id>", methods=["DELETE"])
+def api_person_delete(contact_id):
+    """Delete a contact. FK references (meeting_contacts, contact_organizations) cascade
+    or null out automatically; entity notes are cleaned up explicitly."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM contacts WHERE id=%s", (contact_id,))
+            if not cur.fetchone():
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            cur.execute("DELETE FROM entity_notes WHERE entity_type='contact' AND entity_id=%s",
+                        (contact_id,))
+            cur.execute("DELETE FROM contacts WHERE id=%s", (contact_id,))
+    return jsonify({"ok": True})
+
+
 # --------------------------------------------------
 # BUSINESS CARD SCANNING (Claude Vision → structured contact fields)
 # --------------------------------------------------
@@ -1849,6 +1865,137 @@ def api_organization_detail(org_id):
 @app.route("/api/organizations/<org_id>/brief")
 def api_organization_brief(org_id):
     return jsonify(db_get_pre_meeting_brief(org_id))
+
+
+@app.route("/api/organizations/<org_id>", methods=["PUT"])
+def api_organization_update(org_id):
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "name required"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM organizations WHERE id=%s", (org_id,))
+            if not cur.fetchone():
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            cur.execute("""
+                UPDATE organizations SET name=%s, type=%s, notes=%s, updated_at=NOW()
+                WHERE id=%s
+            """, (name, (data.get("type") or "").strip() or None,
+                  (data.get("notes") or "").strip() or None, org_id))
+    return jsonify({"ok": True, "id": org_id})
+
+
+@app.route("/api/organizations/<org_id>", methods=["DELETE"])
+def api_organization_delete(org_id):
+    """Delete an organization. FK references null out automatically (ON DELETE SET NULL /
+    CASCADE on the join table); entity notes are cleaned up explicitly."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM organizations WHERE id=%s", (org_id,))
+            if not cur.fetchone():
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            cur.execute("DELETE FROM entity_notes WHERE entity_type='organization' AND entity_id=%s",
+                        (org_id,))
+            cur.execute("DELETE FROM organizations WHERE id=%s", (org_id,))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/search")
+def api_search():
+    """Unified search across people, meetings, notes, tasks, organizations and bills.
+    Returns results grouped by category for the global search overlay."""
+    q = (request.args.get("q") or "").strip()
+    try:
+        limit = min(int(request.args.get("limit", 8) or 8), 20)
+    except ValueError:
+        limit = 8
+    if not q:
+        return jsonify({"groups": []})
+    like = f"%{q}%"
+    groups = []
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # People
+            cur.execute("""
+                SELECT id, name, company, title, email FROM contacts
+                WHERE name ILIKE %s OR company ILIKE %s OR email ILIKE %s
+                ORDER BY name LIMIT %s
+            """, (like, like, like, limit))
+            people = [{
+                "type": "person", "id": r["id"], "title": r["name"] or "(no name)",
+                "subtitle": " · ".join([x for x in (r.get("title"), r.get("company"), r.get("email")) if x]),
+            } for r in cur.fetchall()]
+            if people:
+                groups.append({"type": "person", "label": "People", "items": people})
+
+            # Meetings (reuse existing comprehensive match) + entity notes
+            meetings = filter_meetings(db_get_all_meetings(), q=q)[:limit]
+            mn_items = [{
+                "type": "meeting", "id": m.id,
+                "title": m.topic or m.canonical_group or m.filename or "(meeting)",
+                "subtitle": " · ".join([x for x in (m.canonical_group, m.date) if x]),
+            } for m in meetings]
+            cur.execute("""
+                SELECT entity_type, entity_id, body FROM entity_notes
+                WHERE body ILIKE %s ORDER BY created_at DESC LIMIT %s
+            """, (like, limit))
+            for r in cur.fetchall():
+                body = (r["body"] or "").strip().replace("\n", " ")
+                mn_items.append({
+                    "type": "note", "id": r["entity_id"], "entity_type": r["entity_type"],
+                    "title": (body[:80] + ("…" if len(body) > 80 else "")) or "(note)",
+                    "subtitle": "Note",
+                })
+            if mn_items:
+                groups.append({"type": "meeting", "label": "Meetings & Notes", "items": mn_items})
+
+            # Tasks (open)
+            cur.execute("""
+                SELECT id, text, group_name FROM tasks
+                WHERE NOT done AND (text ILIKE %s OR group_name ILIKE %s)
+                ORDER BY source_date DESC NULLS LAST LIMIT %s
+            """, (like, like, limit))
+            tasks = [{
+                "type": "task", "id": r["id"], "title": r["text"],
+                "subtitle": r.get("group_name") or "",
+            } for r in cur.fetchall()]
+            if tasks:
+                groups.append({"type": "task", "label": "Tasks", "items": tasks})
+
+            # Organizations
+            cur.execute("""
+                SELECT id, name, type FROM organizations
+                WHERE name ILIKE %s OR type ILIKE %s
+                ORDER BY name LIMIT %s
+            """, (like, like, limit))
+            orgs = [{
+                "type": "org", "id": r["id"], "title": r["name"],
+                "subtitle": r.get("type") or "",
+            } for r in cur.fetchall()]
+            if orgs:
+                groups.append({"type": "org", "label": "Organizations", "items": orgs})
+
+            # Bills (grouped by type + number)
+            cur.execute("""
+                SELECT br.bill_type, br.bill_number,
+                       (array_agg(br.meeting_id ORDER BY br.created_at DESC))[1] AS meeting_id
+                FROM bill_references br
+                WHERE br.bill_type ILIKE %s OR br.bill_number ILIKE %s
+                   OR (COALESCE(br.bill_type,'') || ' ' || COALESCE(br.bill_number,'')) ILIKE %s
+                GROUP BY br.bill_type, br.bill_number
+                ORDER BY max(br.created_at) DESC LIMIT %s
+            """, (like, like, like, limit))
+            bills = [{
+                "type": "bill",
+                "id": f"{r['bill_type'] or ''} {r['bill_number'] or ''}".strip(),
+                "title": f"{r['bill_type'] or ''} {r['bill_number'] or ''}".strip(),
+                "subtitle": "Bill", "meeting_id": r["meeting_id"],
+            } for r in cur.fetchall()]
+            if bills:
+                groups.append({"type": "bill", "label": "Bills", "items": bills})
+
+    return jsonify({"groups": groups})
 
 
 @app.route("/api/scan-items")
@@ -2183,6 +2330,33 @@ def api_ask_status(ask_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/asks/<ask_id>", methods=["PUT"])
+def api_ask_update(ask_id):
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"ok": False, "error": "text required"}), 400
+    priority = (data.get("priority") or "normal").strip()
+    if priority not in ("high", "normal", "low"):
+        priority = "normal"
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM asks WHERE id=%s", (ask_id,))
+            if not cur.fetchone():
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            cur.execute("UPDATE asks SET text=%s, priority=%s WHERE id=%s",
+                        (text, priority, ask_id))
+    return jsonify({"ok": True, "id": ask_id})
+
+
+@app.route("/api/asks/<ask_id>", methods=["DELETE"])
+def api_ask_delete(ask_id):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM asks WHERE id=%s", (ask_id,))
+    return jsonify({"ok": True})
+
+
 @app.route("/api/commitments")
 def api_commitments():
     status = request.args.get("status")
@@ -2233,6 +2407,31 @@ def api_commitment_status(commitment_id):
         with conn.cursor() as cur:
             cur.execute("UPDATE commitments SET status = %s WHERE id = %s",
                         (status, commitment_id))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/commitments/<commitment_id>", methods=["PUT"])
+def api_commitment_update(commitment_id):
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"ok": False, "error": "text required"}), 400
+    due_date = (data.get("due_date") or "").strip() or None
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM commitments WHERE id=%s", (commitment_id,))
+            if not cur.fetchone():
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            cur.execute("UPDATE commitments SET text=%s, due_date=%s WHERE id=%s",
+                        (text, due_date, commitment_id))
+    return jsonify({"ok": True, "id": commitment_id})
+
+
+@app.route("/api/commitments/<commitment_id>", methods=["DELETE"])
+def api_commitment_delete(commitment_id):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM commitments WHERE id=%s", (commitment_id,))
     return jsonify({"ok": True})
 
 
@@ -2445,6 +2644,8 @@ def api_tasks():
                 )
             if smart_view == "waiting":
                 return not d.get("done") and bool(d.get("has_blockers"))
+            if smart_view == "commitments":
+                return not d.get("done") and bool(d.get("commitment_id"))
             return True
         out = [d for d in out if _smart_filter(d)]
 
