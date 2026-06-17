@@ -32,6 +32,9 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
 AUTH_USERNAME = os.environ.get("DASHBOARD_USERNAME", "admin")
 AUTH_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 SHORTCUT_API_KEY = os.environ.get("SHORTCUT_API_KEY", "")
+CONGRESS_API_KEY = os.environ.get("CONGRESS_API_KEY", "")
+# Rep. Blake Moore (R, UT-01). Overridable so the tracker can follow a different member.
+CONGRESS_MEMBER_BIOGUIDE = os.environ.get("CONGRESS_MEMBER_BIOGUIDE", "M001213")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = SECRET_KEY
@@ -52,6 +55,36 @@ def get_db() -> Generator:
         raise
     finally:
         conn.close()
+
+
+# --------------------------------------------------
+# CONGRESS HELPERS
+# --------------------------------------------------
+
+def _current_congress(d: Optional[date_cls] = None) -> int:
+    """Congress number for a date. A new Congress convenes Jan 3 of each odd year."""
+    override = os.environ.get("CURRENT_CONGRESS")
+    if override:
+        try:
+            return int(override)
+        except ValueError:
+            pass
+    d = d or date_cls.today()
+    if d.year % 2 == 0:
+        start = d.year - 1
+    else:
+        start = d.year if (d.month, d.day) >= (1, 3) else d.year - 2
+    return (start - 1789) // 2 + 1
+
+
+def _normalize_bill_type(s: Optional[str]) -> str:
+    """'H.R.' -> 'HR', ' s ' -> 'S'. Strips dots/spaces, uppercases."""
+    return re.sub(r"[^A-Za-z]", "", (s or "")).upper()
+
+
+def _normalize_bill_number(s: Optional[str]) -> str:
+    """Digits only, e.g. 'No. 1234' -> '1234'."""
+    return re.sub(r"\D", "", (s or ""))
 
 
 def init_db() -> None:
@@ -454,6 +487,48 @@ def init_db() -> None:
                 UPDATE tasks
                 SET text = regexp_replace(text, '\s*@group:.*$', '')
                 WHERE text LIKE '%@group:%'
+            """)
+            # ---- Bill Tracker (Congress.gov) ----
+            # Tag note-flagged bills with a Congress so matches are exact across Congresses.
+            cur.execute("ALTER TABLE bill_references ADD COLUMN IF NOT EXISTS congress INTEGER")
+            cur.execute(
+                "UPDATE bill_references SET congress = %s WHERE congress IS NULL",
+                (_current_congress(),),
+            )
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS bill_refs_cong_typenum
+                    ON bill_references (congress, bill_type, bill_number);
+                CREATE TABLE IF NOT EXISTS tracked_bills (
+                    id                 TEXT PRIMARY KEY,    -- "{congress}-{type}-{number}" lower
+                    congress           INTEGER,
+                    bill_type          TEXT NOT NULL,       -- normalized upper, e.g. HR / S / HRES
+                    bill_number        TEXT NOT NULL,
+                    relationship       TEXT NOT NULL,       -- 'sponsored' | 'cosponsored'
+                    title              TEXT,
+                    introduced_date    DATE,
+                    latest_action      TEXT,
+                    latest_action_date DATE,
+                    url                TEXT,
+                    raw                JSONB DEFAULT '{}',
+                    last_synced        TIMESTAMP DEFAULT NOW(),
+                    created_at         TIMESTAMP DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS tracked_bills_cong_typenum
+                    ON tracked_bills (congress, bill_type, bill_number);
+                CREATE TABLE IF NOT EXISTS bill_match_flags (
+                    id              TEXT PRIMARY KEY,
+                    tracked_bill_id TEXT REFERENCES tracked_bills(id) ON DELETE CASCADE,
+                    bill_ref_id     INTEGER REFERENCES bill_references(id) ON DELETE CASCADE,
+                    status          TEXT NOT NULL DEFAULT 'new',  -- 'new'|'notified'|'dismissed'
+                    noticed_at      TIMESTAMP DEFAULT NOW(),
+                    resolved_at     TIMESTAMP,
+                    UNIQUE (tracked_bill_id, bill_ref_id)
+                );
+                CREATE TABLE IF NOT EXISTS bill_sync_meta (
+                    id          INTEGER PRIMARY KEY DEFAULT 1,
+                    last_synced TIMESTAMP,
+                    last_result JSONB
+                );
             """)
 
 
@@ -1809,15 +1884,291 @@ def api_bill_update(bill_id: int):
     bill_number = (data.get("bill_number") or "").strip()
     if not bill_number:
         return jsonify({"ok": False, "error": "bill_number required"}), 400
+    congress = data.get("congress")
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM bill_references WHERE id = %s", (bill_id,))
             if not cur.fetchone():
                 return jsonify({"ok": False, "error": "Not found"}), 404
+            if congress is None:
+                cur.execute(
+                    "UPDATE bill_references SET bill_type = %s, bill_number = %s WHERE id = %s",
+                    (bill_type, bill_number, bill_id),
+                )
+            else:
+                cur.execute(
+                    "UPDATE bill_references SET bill_type = %s, bill_number = %s, congress = %s WHERE id = %s",
+                    (bill_type, bill_number, int(congress), bill_id),
+                )
+    return jsonify({"ok": True})
+
+
+# --------------------------------------------------
+# BILL TRACKER (Congress.gov)
+# --------------------------------------------------
+
+_CHAMBER_SLUG = {
+    "HR": "house-bill", "S": "senate-bill",
+    "HRES": "house-resolution", "SRES": "senate-resolution",
+    "HJRES": "house-joint-resolution", "SJRES": "senate-joint-resolution",
+    "HCONRES": "house-concurrent-resolution", "SCONRES": "senate-concurrent-resolution",
+}
+
+
+def _ordinal(n: int) -> str:
+    if 10 <= (n % 100) <= 20:
+        suf = "th"
+    else:
+        suf = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suf}"
+
+
+def _bill_human_url(congress: int, btype: str, number: str) -> str:
+    slug = _CHAMBER_SLUG.get(btype)
+    if not slug:
+        return f"https://www.congress.gov/search?q={btype}{number}"
+    return f"https://www.congress.gov/bill/{_ordinal(int(congress))}-congress/{slug}/{number}"
+
+
+def _congress_api_get(path: str, params: Optional[dict] = None) -> dict:
+    import urllib.request
+    import urllib.parse
+    qp = dict(params or {})
+    qp.setdefault("format", "json")
+    qp["api_key"] = CONGRESS_API_KEY
+    url = f"https://api.congress.gov/v3/{path}?" + urllib.parse.urlencode(qp)
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _fetch_member_legislation(kind: str) -> List[dict]:
+    """kind = 'sponsored' | 'cosponsored'. Pages the Congress.gov member endpoint."""
+    key = "sponsoredLegislation" if kind == "sponsored" else "cosponsoredLegislation"
+    path = f"member/{CONGRESS_MEMBER_BIOGUIDE}/{kind}-legislation"
+    items: List[dict] = []
+    offset, limit = 0, 250
+    for _ in range(8):  # cap pages to bound serverless runtime (~2000 records)
+        data = _congress_api_get(path, {"limit": limit, "offset": offset})
+        batch = data.get(key) or []
+        if not batch:
+            break
+        items.extend(batch)
+        total = (data.get("pagination") or {}).get("count")
+        offset += limit
+        if total is not None and offset >= total:
+            break
+    return items
+
+
+def _sync_congress_bills() -> dict:
+    """Pull sponsored + cosponsored legislation, upsert, and recompute match flags."""
+    def _d(s):  # empty string -> NULL date
+        return s or None
+
+    fetched = {
+        "sponsored": _fetch_member_legislation("sponsored"),
+        "cosponsored": _fetch_member_legislation("cosponsored"),
+    }
+    counts = {"sponsored": 0, "cosponsored": 0}
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for kind, items in fetched.items():
+                for it in items:
+                    btype = _normalize_bill_type(it.get("type"))
+                    bnum = _normalize_bill_number(it.get("number"))
+                    cong = it.get("congress")
+                    if not (btype and bnum and cong):
+                        continue
+                    latest = it.get("latestAction") or {}
+                    cur.execute(
+                        """
+                        INSERT INTO tracked_bills
+                            (id, congress, bill_type, bill_number, relationship, title,
+                             introduced_date, latest_action, latest_action_date, url, raw, last_synced)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, NOW())
+                        ON CONFLICT (id) DO UPDATE SET
+                            relationship = EXCLUDED.relationship,
+                            title = EXCLUDED.title,
+                            introduced_date = EXCLUDED.introduced_date,
+                            latest_action = EXCLUDED.latest_action,
+                            latest_action_date = EXCLUDED.latest_action_date,
+                            url = EXCLUDED.url,
+                            raw = EXCLUDED.raw,
+                            last_synced = NOW()
+                        """,
+                        (
+                            f"{cong}-{btype.lower()}-{bnum}", cong, btype, bnum, kind,
+                            it.get("title"), _d(it.get("introducedDate")),
+                            latest.get("text"), _d(latest.get("actionDate")),
+                            _bill_human_url(cong, btype, bnum), json.dumps(it),
+                        ),
+                    )
+                    counts[kind] += 1
+
+            # Recompute matches: exact on (congress, normalized type, normalized number).
+            cur.execute(r"""
+                SELECT tb.id AS tbid, br.id AS brid
+                FROM tracked_bills tb
+                JOIN bill_references br
+                  ON br.congress = tb.congress
+                 AND upper(regexp_replace(br.bill_type, '[^A-Za-z]', '', 'g')) = tb.bill_type
+                 AND regexp_replace(br.bill_number, '\D', '', 'g') = tb.bill_number
+            """)
+            new_matches = 0
+            for p in cur.fetchall():
+                cur.execute(
+                    "INSERT INTO bill_match_flags (id, tracked_bill_id, bill_ref_id) "
+                    "VALUES (%s, %s, %s) ON CONFLICT (tracked_bill_id, bill_ref_id) DO NOTHING",
+                    (uuid.uuid4().hex, p["tbid"], p["brid"]),
+                )
+                if cur.rowcount == 1:
+                    new_matches += 1
+
+            result = {
+                "sponsored_count": counts["sponsored"],
+                "cosponsored_count": counts["cosponsored"],
+                "new_matches": new_matches,
+            }
             cur.execute(
-                "UPDATE bill_references SET bill_type = %s, bill_number = %s WHERE id = %s",
-                (bill_type, bill_number, bill_id),
+                "INSERT INTO bill_sync_meta (id, last_synced, last_result) "
+                "VALUES (1, NOW(), %s::jsonb) "
+                "ON CONFLICT (id) DO UPDATE SET last_synced = NOW(), last_result = EXCLUDED.last_result",
+                (json.dumps(result),),
             )
+    return result
+
+
+@app.route("/api/tracked-bills")
+def api_tracked_bills():
+    a = request.args
+    rel = a.get("relationship", "all")
+    q = (a.get("q") or "").strip()
+    qlike = f"%{q}%"
+    congress_arg = a.get("congress", "current")
+    if congress_arg in ("", "all"):
+        congress = None
+    elif congress_arg == "current":
+        congress = _current_congress()
+    else:
+        try:
+            congress = int(congress_arg)
+        except ValueError:
+            congress = _current_congress()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, congress, bill_type, bill_number, relationship, title,
+                       to_char(introduced_date, 'YYYY-MM-DD') AS introduced_date,
+                       latest_action,
+                       to_char(latest_action_date, 'YYYY-MM-DD') AS latest_action_date,
+                       url
+                FROM tracked_bills
+                WHERE (%(cong)s IS NULL OR congress = %(cong)s)
+                  AND (%(rel)s = 'all' OR relationship = %(rel)s)
+                  AND (%(q)s = '' OR title ILIKE %(qlike)s
+                       OR (bill_type || ' ' || bill_number) ILIKE %(qlike)s)
+                ORDER BY introduced_date DESC NULLS LAST, bill_number
+                """,
+                {"cong": congress, "rel": rel, "q": q, "qlike": qlike},
+            )
+            bills = cur.fetchall()
+            cur.execute("SELECT DISTINCT congress FROM tracked_bills WHERE congress IS NOT NULL ORDER BY congress DESC")
+            congresses = [r["congress"] for r in cur.fetchall()]
+            cur.execute("SELECT last_synced FROM bill_sync_meta WHERE id = 1")
+            meta = cur.fetchone()
+            last_synced = meta["last_synced"] if meta else None
+            cur.execute(
+                "SELECT (%s::timestamp IS NULL OR %s::timestamp::date < CURRENT_DATE) AS needs",
+                (last_synced, last_synced),
+            )
+            needs_sync = cur.fetchone()["needs"]
+
+    return jsonify({
+        "bills": [dict(b) for b in bills],
+        "congresses": congresses,
+        "current_congress": _current_congress(),
+        "last_synced": last_synced.isoformat() if last_synced else None,
+        "needs_sync": bool(needs_sync),
+        "configured": bool(CONGRESS_API_KEY),
+    })
+
+
+@app.route("/api/tracked-bills/sync", methods=["POST"])
+def api_tracked_bills_sync():
+    if not CONGRESS_API_KEY:
+        return jsonify({"ok": False, "error": "Bill tracker not configured"}), 503
+    try:
+        result = _sync_congress_bills()
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/bill-matches")
+def api_bill_matches():
+    status = (request.args.get("status") or "").strip()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT f.id, f.status,
+                       tb.congress, tb.bill_type, tb.bill_number, tb.title,
+                       tb.relationship, tb.url, tb.latest_action,
+                       br.id AS bill_ref_id,
+                       m.id AS meeting_id,
+                       COALESCE(NULLIF(m.topic, ''), m.filename) AS meeting_topic,
+                       to_char(m.file_date, 'YYYY-MM-DD') AS meeting_date,
+                       o.name AS meeting_org,
+                       COALESCE(
+                           json_agg(DISTINCT jsonb_build_object(
+                               'contact_id', c.id, 'name', c.name, 'org', ao.name
+                           )) FILTER (WHERE a.id IS NOT NULL),
+                           '[]'
+                       ) AS askers
+                FROM bill_match_flags f
+                JOIN tracked_bills tb ON tb.id = f.tracked_bill_id
+                JOIN bill_references br ON br.id = f.bill_ref_id
+                JOIN meetings m ON m.id = br.meeting_id
+                LEFT JOIN organizations o ON o.id = m.organization_id
+                LEFT JOIN asks a ON a.bill_ref_id = br.id
+                LEFT JOIN contacts c ON c.id = a.contact_id
+                LEFT JOIN organizations ao ON ao.id = a.organization_id
+                WHERE (%(st)s = '' AND f.status <> 'dismissed')
+                   OR (%(st)s <> '' AND f.status = %(st)s)
+                GROUP BY f.id, tb.congress, tb.bill_type, tb.bill_number, tb.title,
+                         tb.relationship, tb.url, tb.latest_action, br.id,
+                         m.id, m.topic, m.filename, m.file_date, o.name
+                ORDER BY f.noticed_at DESC
+                """,
+                {"st": status},
+            )
+            rows = cur.fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/bill-matches/<flag_id>/status", methods=["POST"])
+def api_bill_match_status(flag_id: str):
+    data = request.get_json(force=True, silent=True) or {}
+    status = (data.get("status") or "").strip()
+    if status not in ("new", "notified", "dismissed"):
+        return jsonify({"ok": False, "error": "invalid status"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if status == "new":
+                cur.execute(
+                    "UPDATE bill_match_flags SET status = %s, resolved_at = NULL WHERE id = %s",
+                    (status, flag_id),
+                )
+            else:
+                cur.execute(
+                    "UPDATE bill_match_flags SET status = %s, resolved_at = NOW() WHERE id = %s",
+                    (status, flag_id),
+                )
+            if cur.rowcount == 0:
+                return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify({"ok": True})
 
 
@@ -3371,9 +3722,9 @@ def api_notes_intake():
                             bn = (bill.get("billNumber") or "").strip()
                             if bt and bn:
                                 cur.execute(
-                                    "INSERT INTO bill_references (meeting_id, bill_type, bill_number)"
-                                    " VALUES (%s, %s, %s)",
-                                    (mid_out, bt, bn)
+                                    "INSERT INTO bill_references (meeting_id, bill_type, bill_number, congress)"
+                                    " VALUES (%s, %s, %s, %s)",
+                                    (mid_out, bt, bn, _current_congress())
                                 )
                                 created["bills"] += 1
 

@@ -17,8 +17,7 @@ const state = {
   people: [],
   stats: null,
   meetingFilters: { group: "", purpose: "", attendee: "", dateFrom: "", dateTo: "", hasOpenTasks: false },
-  smartView: "today",
-  smartViewTasks: [],
+  billsFilter: { relationship: "all", q: "", congress: "current" },
   dailyPlanTasks: [],
   dailyPlanOrder: [],
 };
@@ -563,7 +562,6 @@ async function toggleTaskDone(task) {
     }
   }
   await refreshTasks();
-  if (state.tab === "smart") loadSmartView(state.smartView);
   if (state.meetings.length) refreshMeetings();
   if (state.tab === "home") renderHome();
 }
@@ -3171,7 +3169,7 @@ function switchTab(tab) {
     updateRelDepth();
   }
   if (tab === "tasks")  refreshTasks();
-  if (tab === "smart")  loadSmartView(state.smartView);
+  if (tab === "bills")  loadBillTracker();
 }
 
 // ---------- Search overlay ----------
@@ -3331,87 +3329,159 @@ function _renderFocusPanel(tasks) {
     : "";
 }
 
-// ---------- Smart Views ----------
-async function loadSmartView(viewName) {
-  state.smartView = viewName;
-  $$(".smart-view-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === viewName));
-  const titles = { today: "Today", upcoming: "Upcoming", neglected: "Neglected", quick_wins: "Quick Wins", waiting: "Waiting on…", commitments: "Commitments" };
-  const descs = {
-    today: "Tasks due today or highest urgency.",
-    upcoming: "Deadlines in the next 7 days.",
-    neglected: "High-priority tasks older than 2 weeks.",
-    quick_wins: "Tasks estimating 30 minutes or less.",
-    waiting: "Tasks blocked by unfinished dependencies.",
-    commitments: "Open commitments made to stakeholders.",
-  };
-  const vName = viewName;
-  if ($("#smart-view-title")) $("#smart-view-title").textContent = titles[vName] || vName;
-  if ($("#smart-view-desc"))  $("#smart-view-desc").textContent = descs[vName] || "";
+// ---------- Bill Tracker (Congress.gov) ----------
+let _billsAutoSynced = false;
 
-  const ul = $("#smart-view-tasks");
-  ul.innerHTML = `<li class="empty">Loading…</li>`;
+function _billLabel(b) {
+  return `${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}`;
+}
 
-  if (viewName === "commitments") {
-    try {
-      const allRows = await api("/api/commitments");
-      const rows = allRows.filter((r) => !["completed", "closed_no_action"].includes(r.status));
-      if (!rows.length) {
-        ul.innerHTML = `<li class="empty">No open commitments.</li>`;
-      } else {
-        const byOrg = {};
-        rows.forEach((r) => {
-          const key = r.organization_id || "__none__";
-          if (!byOrg[key]) byOrg[key] = { name: r.org_name || "No organization", items: [] };
-          byOrg[key].items.push(r);
-        });
-        ul.innerHTML = Object.values(byOrg).map((group) => `
-          <li class="smart-commitment-group">
-            <div class="smart-commitment-org">${escapeHtml(group.name)}</div>
-            ${group.items.map((c) => `
-              <div class="smart-commitment-row" data-commitment-id="${escapeHtml(c.id)}">
-                <span class="commitment-dot"></span>
-                <div class="smart-commitment-body">
-                  <div class="smart-commitment-text">${escapeHtml(c.text)}</div>
-                  <div class="smart-commitment-meta">
-                    ${c.meeting_date ? `<span>${escapeHtml(c.meeting_date)}</span>` : ""}
-                    ${c.task_id ? `<span class="commitment-linked-task">Task created</span>` : `<button class="commitment-create-task-btn" data-id="${escapeHtml(c.id)}">+ Create task</button>`}
-                  </div>
-                </div>
-              </div>
-            `).join("")}
-          </li>
-        `).join("");
-        ul.querySelectorAll(".commitment-create-task-btn").forEach((btn) => {
-          btn.addEventListener("click", async () => {
-            btn.disabled = true;
-            btn.textContent = "Creating…";
-            try {
-              await api(`/api/commitments/${btn.dataset.id}/create-task`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
-              loadSmartView("commitments");
-            } catch (e) {
-              btn.disabled = false;
-              btn.textContent = "+ Create task";
-            }
-          });
-        });
-      }
-    } catch (e) {
-      ul.innerHTML = `<li class="empty">Failed to load.</li>`;
-    }
+async function loadBillTracker() {
+  await Promise.all([refreshTrackedBills(), refreshBillMatches()]);
+}
+
+async function refreshTrackedBills() {
+  const body = $("#bills-tracker-body");
+  if (body && !body.children.length) body.innerHTML = `<tr><td colspan="5" class="empty">Loading…</td></tr>`;
+  let data;
+  try {
+    const f = state.billsFilter;
+    const qs = new URLSearchParams({ relationship: f.relationship, q: f.q, congress: f.congress });
+    data = await api("/api/tracked-bills?" + qs.toString());
+  } catch (e) {
+    if (body) body.innerHTML = `<tr><td colspan="5" class="empty">Failed to load.</td></tr>`;
     return;
   }
 
-  try {
-    const data = await api("/api/tasks?smart_view=" + encodeURIComponent(viewName) + "&status=open");
-    state.smartViewTasks = data.tasks;
-    if (!data.tasks.length) {
-      ul.innerHTML = `<li class="empty">No tasks in this view.</li>`;
-    } else {
-      ul.innerHTML = data.tasks.map((t, i) => _taskRow(t, i, "smart-view")).join("");
-    }
-  } catch (e) {
-    ul.innerHTML = `<li class="empty">Failed to load.</li>`;
+  // Sync status label
+  const label = $("#bills-sync-label");
+  if (label) {
+    if (!data.configured) label.textContent = "Not configured";
+    else if (data.last_synced) label.textContent = "Synced " + new Date(data.last_synced).toLocaleString();
+    else label.textContent = "Never synced";
   }
+
+  // Congress selector
+  const sel = $("#bills-congress-select");
+  if (sel) {
+    const cur = data.current_congress;
+    const opts = [`<option value="current">${_ordinalNum(cur)} Congress</option>`];
+    data.congresses.filter((c) => c !== cur).forEach((c) => {
+      opts.push(`<option value="${c}">${_ordinalNum(c)} Congress</option>`);
+    });
+    opts.push(`<option value="all">All Congresses</option>`);
+    sel.innerHTML = opts.join("");
+    sel.value = state.billsFilter.congress;
+  }
+
+  // Bill list
+  if (body) {
+    const bills = data.bills || [];
+    if (!bills.length) {
+      body.innerHTML = `<tr><td colspan="5" class="empty">${data.configured ? "No bills yet — try Sync now." : "Set CONGRESS_API_KEY to enable the tracker."}</td></tr>`;
+    } else {
+      body.innerHTML = bills.map((b) => `
+        <tr>
+          <td><a href="${escapeHtml(b.url || "#")}" target="_blank" rel="noopener">${_billLabel(b)}</a></td>
+          <td class="bill-title-cell">${escapeHtml(b.title || "")}</td>
+          <td><span class="bill-role bill-role-${escapeHtml(b.relationship)}">${b.relationship === "sponsored" ? "Sponsor" : "Cosponsor"}</span></td>
+          <td>${escapeHtml(b.introduced_date || "—")}</td>
+          <td class="bill-action-cell">${escapeHtml(b.latest_action || "")}</td>
+        </tr>
+      `).join("");
+    }
+  }
+
+  // Auto-sync on first open of the day (once per session)
+  if (data.needs_sync && data.configured && !_billsAutoSynced) {
+    _billsAutoSynced = true;
+    await syncBills(true);
+  }
+}
+
+async function refreshBillMatches() {
+  const wrap = $("#bill-matches");
+  if (!wrap) return;
+  let rows;
+  try {
+    rows = await api("/api/bill-matches");
+  } catch (e) {
+    wrap.hidden = true;
+    return;
+  }
+  if (!rows.length) {
+    wrap.hidden = true;
+    wrap.innerHTML = "";
+    return;
+  }
+  wrap.hidden = false;
+  wrap.innerHTML = `
+    <div class="bill-matches-head">Bills we were asked about — Blake has now acted on these</div>
+    ${rows.map((r) => {
+      const askers = (r.askers || []).map((a) =>
+        escapeHtml(a.name || a.org || "someone") + (a.org && a.name ? ` (${escapeHtml(a.org)})` : "")
+      ).filter(Boolean);
+      const askedBy = askers.length ? askers.join(", ") : (r.meeting_org ? escapeHtml(r.meeting_org) : "a meeting note");
+      const verb = r.relationship === "sponsored" ? "introduced" : "cosponsored";
+      const notified = r.status === "notified";
+      return `
+        <div class="bill-match-card${notified ? " is-notified" : ""}" data-flag-id="${escapeHtml(r.id)}">
+          <div class="bill-match-main">
+            <div class="bill-match-bill">
+              <a href="${escapeHtml(r.url || "#")}" target="_blank" rel="noopener">${escapeHtml(r.bill_type)} ${escapeHtml(r.bill_number)}</a>
+              <span class="bill-role bill-role-${escapeHtml(r.relationship)}">Blake ${verb}</span>
+            </div>
+            <div class="bill-match-title">${escapeHtml(r.title || "")}</div>
+            <div class="bill-match-meta">
+              Asked by <strong>${askedBy}</strong>
+              ${r.meeting_date ? ` · ${escapeHtml(r.meeting_date)}` : ""}
+              ${r.meeting_topic ? ` · ${escapeHtml(r.meeting_topic)}` : ""}
+            </div>
+          </div>
+          <div class="bill-match-actions">
+            ${notified
+              ? `<span class="bill-match-done">✓ Notified</span><button class="linkish" data-match-status="new">Undo</button>`
+              : `<button class="primary-btn-sm" data-match-status="notified">Mark notified</button>
+                 <button class="linkish" data-match-status="dismissed">Dismiss</button>`}
+          </div>
+        </div>`;
+    }).join("")}
+  `;
+  wrap.querySelectorAll("[data-match-status]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const card = btn.closest(".bill-match-card");
+      const id = card?.dataset.flagId;
+      if (!id) return;
+      try {
+        await api(`/api/bill-matches/${id}/status`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: btn.dataset.matchStatus }),
+        });
+        refreshBillMatches();
+      } catch (e) { /* ignore */ }
+    });
+  });
+}
+
+async function syncBills(silent) {
+  const btn = $("#bills-sync-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "Syncing…"; }
+  try {
+    await api("/api/tracked-bills/sync", { method: "POST" });
+    await Promise.all([refreshTrackedBills(), refreshBillMatches()]);
+  } catch (e) {
+    const label = $("#bills-sync-label");
+    if (label && !silent) label.textContent = "Sync failed";
+    console.error("bill sync failed", e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Sync now"; }
+  }
+}
+
+function _ordinalNum(n) {
+  const s = ["th", "st", "nd", "rd"], v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
 }
 
 // ---------- Snooze popup ----------
@@ -3444,7 +3514,6 @@ async function confirmSnooze() {
   });
   closeSnoozePopup();
   await refreshTasks();
-  if (state.tab === "smart") loadSmartView(state.smartView);
 }
 
 // ---------- Focus mode ----------
@@ -3492,7 +3561,7 @@ const CMD_STATIC = [
   { label: "Go to Home",        icon: "🏠", action: () => { closeCommandPalette(); switchTab("home"); } },
   { label: "Go to Tasks",       icon: "✓",  action: () => { closeCommandPalette(); switchTab("tasks"); } },
   { label: "Go to Relationships", icon: "🤝", action: () => { closeCommandPalette(); switchTab("groups"); } },
-  { label: "Go to Smart Views", icon: "⚡", action: () => { closeCommandPalette(); switchTab("smart"); } },
+  { label: "Go to Bill Tracker", icon: "📜", action: () => { closeCommandPalette(); switchTab("bills"); } },
   { label: "Add new task",      icon: "+",  action: () => { closeCommandPalette(); openNLModal(); } },
   { label: "Focus Mode",        icon: "🎯", action: () => { closeCommandPalette(); openFocusMode(state.stats?.top_urgency?.[0]); } },
   { label: "Daily Plan",        icon: "📋", action: () => { closeCommandPalette(); openDailyPlan(); } },
@@ -4088,7 +4157,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.key === "Enter") { e.preventDefault(); submitAddSubtaskModal(); }
   });
 
-  // Subtask toggle chips (event delegation on paper-stack + smart-view)
+  // Subtask toggle chips (event delegation on paper-stack)
   document.addEventListener("click", (e) => {
     const chip = e.target.closest("[data-subtask-toggle]");
     if (!chip) return;
@@ -4101,13 +4170,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     const li = e.target.closest("li[data-task-id]");
     if (!li || !e.target.closest(".action-toggle")) return;
     const taskId = li.dataset.taskId;
-    // Find the task in any state list or smart view
-    let task = state.smartViewTasks.find((t) => t.id === taskId);
-    if (!task) {
-      for (const paper of ["active", "backburner", "done"]) {
-        task = state.tasksByStatus[paper].find((t) => t.id === taskId);
-        if (task) break;
-      }
+    // Find the task in any state list
+    let task = null;
+    for (const paper of ["active", "backburner", "done"]) {
+      task = state.tasksByStatus[paper].find((t) => t.id === taskId);
+      if (task) break;
     }
     // Fallback: create minimal task object for toggle
     if (!task) task = { id: taskId, done: li.classList.contains("done") };
@@ -4142,31 +4209,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // Smart view sidebar buttons
-  $("#view-smart")?.addEventListener("click", (e) => {
-    const btn = e.target.closest(".smart-view-btn");
-    if (btn) loadSmartView(btn.dataset.view);
+  // Bill Tracker: sync, sub-tabs, search, congress selector
+  $("#bills-sync-btn")?.addEventListener("click", () => syncBills(false));
+  $("#view-bills")?.addEventListener("click", (e) => {
+    const tab = e.target.closest(".groups-subtab[data-bills-rel]");
+    if (!tab) return;
+    document.querySelectorAll(".groups-subtab[data-bills-rel]").forEach((b) => b.classList.remove("active"));
+    tab.classList.add("active");
+    state.billsFilter.relationship = tab.dataset.billsRel;
+    refreshTrackedBills();
   });
-
-  // Smart view task interactions (toggle, context menu, etc.)
-  $("#smart-view-tasks")?.addEventListener("click", async (e) => {
-    const li = e.target.closest("li[data-task-id]");
-    if (!li) return;
-    const idx = parseInt(li.dataset.idx, 10);
-    const task = state.smartViewTasks[idx];
-    if (!task) return;
-    if (e.target.closest(".action-toggle")) {
-      await toggleTaskDone(task);
-    } else if (e.target.closest(".action-bb")) {
-      await toggleTaskBackburner(task);
-    }
-  });
-  $("#smart-view-tasks")?.addEventListener("contextmenu", (e) => {
-    const li = e.target.closest("li[data-task-id]");
-    if (!li) return;
-    const idx = parseInt(li.dataset.idx, 10);
-    const task = state.smartViewTasks[idx];
-    if (task) openContextMenu(e, task);
+  $("#bills-search")?.addEventListener("input", debounce(() => {
+    state.billsFilter.q = $("#bills-search").value.trim();
+    refreshTrackedBills();
+  }, 250));
+  $("#bills-congress-select")?.addEventListener("change", () => {
+    state.billsFilter.congress = $("#bills-congress-select").value;
+    refreshTrackedBills();
   });
 
   // Snoozed filter
@@ -4183,10 +4242,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
 
-  // Groups sub-tab toggle
-  document.querySelectorAll(".groups-subtab").forEach((btn) => {
+  // Groups sub-tab toggle (scoped to the Relationships bar so it ignores other
+  // reusers of .groups-subtab such as the Bill Tracker's relationship tabs)
+  document.querySelectorAll(".groups-subtabs-bar .groups-subtab").forEach((btn) => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".groups-subtabs-bar .groups-subtab").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       const subtab = btn.dataset.subtab;
       document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
@@ -4400,7 +4460,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.key === "1") { e.preventDefault(); switchTab("home"); return; }
     if (e.key === "2") { e.preventDefault(); switchTab("tasks"); return; }
     if (e.key === "3") { e.preventDefault(); switchTab("groups"); return; }
-    if (e.key === "4") { e.preventDefault(); switchTab("smart"); return; }
+    if (e.key === "4") { e.preventDefault(); switchTab("bills"); return; }
     if (e.key === "f") { e.preventDefault(); openFocusMode(state.stats?.top_urgency?.[0]); return; }
     if (e.key === "w") { e.preventDefault(); openIntakeModal(); return; }
 

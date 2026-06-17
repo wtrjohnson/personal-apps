@@ -2052,62 +2052,112 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .focus-runner-group { font-size: 11px; color: var(--muted); }
 
 /* =========================================================
-   SMART VIEWS
+   BILL TRACKER
    ========================================================= */
-#view-smart { padding: 0; overflow: hidden; }
-#view-smart.active { display: block; }
-.smart-views-layout {
-  display: grid;
-  grid-template-columns: 168px 1fr;
+#view-bills { padding: 0; overflow: hidden; }
+#view-bills.active { display: block; }
+.bills-tracker {
   height: 100%;
   min-height: 0;
-}
-.smart-views-sidebar {
-  background: var(--canvas);
-  border-right: 1px solid var(--border);
-  padding: 20px 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  padding: 22px 26px;
   overflow-y: auto;
 }
-.smart-views-label {
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--muted-2);
-  padding: 0 6px;
-  margin-bottom: 6px;
+.bills-tracker-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
 }
-.smart-view-btn {
+.bills-tracker-title { margin: 0 0 2px; font-size: 20px; font-weight: 700; }
+.bills-tracker-sub { margin: 0; font-size: 13px; color: var(--muted); }
+.bills-tracker-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
-  text-align: left;
-  padding: 8px 10px;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.bills-sync-label { font-size: 12px; color: var(--muted-2); white-space: nowrap; }
+.bills-congress-select {
   font: inherit;
   font-size: 13px;
-  color: var(--ink);
-  background: none;
-  border: none;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
   border-radius: var(--r-md);
+  background: var(--card);
+  color: var(--ink);
   cursor: pointer;
-  transition: background 0.12s, color 0.12s;
 }
-.smart-view-btn:hover { background: var(--border); }
-.smart-view-btn.active {
+
+/* Auto-match feed */
+.bill-matches {
+  border: 1px solid var(--accent);
   background: var(--accent-softer);
+  border-radius: var(--r-lg);
+  padding: 12px 14px;
+  margin-bottom: 18px;
+}
+.bill-matches-head {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
   color: var(--accent-ink);
-  font-weight: 600;
+  margin-bottom: 10px;
 }
-.smart-views-content {
-  padding: 24px 28px;
-  overflow-y: auto;
+.bill-match-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
 }
-.smart-view-header { margin-bottom: 18px; }
-.smart-view-header h2 { margin: 0 0 4px; font-size: 20px; font-weight: 700; }
-.smart-view-desc { margin: 0; font-size: 13px; color: var(--muted); }
+.bill-match-card + .bill-match-card { margin-top: 8px; }
+.bill-match-card.is-notified { opacity: 0.7; }
+.bill-match-main { min-width: 0; }
+.bill-match-bill { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
+.bill-match-bill a { color: var(--accent-ink); text-decoration: none; }
+.bill-match-bill a:hover { text-decoration: underline; }
+.bill-match-title { font-size: 13px; color: var(--ink); margin: 2px 0; }
+.bill-match-meta { font-size: 12px; color: var(--muted); }
+.bill-match-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.bill-match-done { font-size: 13px; color: var(--ok, #16794a); font-weight: 600; }
+
+/* Bill list */
+.bills-subtabs-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+.bills-search {
+  margin-left: auto;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--card);
+  color: var(--ink);
+  min-width: 200px;
+}
+.bills-tracker-table .bill-title-cell { max-width: 360px; }
+.bills-tracker-table .bill-action-cell {
+  max-width: 280px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.bill-role {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 7px;
+  border-radius: var(--r-pill);
+}
+.bill-role-sponsored { background: var(--accent-softer); color: var(--accent-ink); }
+.bill-role-cosponsored { background: var(--card-soft); color: var(--muted); }
 
 /* =========================================================
    SNOOZE POPUP
@@ -3641,34 +3691,7 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
 /* Stakeholder rows */
 .stakeholder-row:hover td { background: var(--surface); }
 
-/* Commitments smart view */
-.smart-commitment-group {
-  list-style: none; padding: 0; margin-bottom: 12px;
-}
-.smart-commitment-org {
-  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em;
-  color: var(--muted); padding: 8px 16px 4px; border-top: 1px solid var(--border);
-}
-.smart-commitment-row {
-  display: flex; align-items: flex-start; gap: 10px;
-  padding: 10px 16px; border-bottom: 1px solid var(--border);
-}
-.commitment-dot {
-  width: 8px; height: 8px; border-radius: 50%; background: #7c3aed;
-  flex-shrink: 0; margin-top: 5px;
-}
-.smart-commitment-body { flex: 1; min-width: 0; }
-.smart-commitment-text { font-size: 14px; color: var(--ink); margin-bottom: 3px; }
-.smart-commitment-meta { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
-.commitment-linked-task {
-  display: inline-flex; padding: 1px 7px; border-radius: var(--r-pill); font-size: 11px;
-  background: #dcfce7; color: #14532d; border: 1px solid #86efac;
-}
-.commitment-create-task-btn {
-  background: none; border: 1px solid var(--border-strong); border-radius: var(--r-pill);
-  color: var(--accent); font-size: 11px; padding: 1px 8px; cursor: pointer;
-}
-.commitment-create-task-btn:hover { background: var(--accent-softer); }
+/* Stakeholder rows (cont.) */
 
 /* Pre-meeting brief in intake Phase 1 */
 .intake-brief {
@@ -3889,14 +3912,12 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
   .paper.pos-0 { display: flex; }
   .peek-edge { display: none !important; }
 
-  /* Smart views: stacked, sidebar becomes a horizontal scroll strip */
-  .smart-views-layout { grid-template-columns: 1fr; }
-  .smart-views-sidebar {
-    flex-direction: row; overflow-x: auto; gap: 6px;
-    -webkit-overflow-scrolling: touch; padding-bottom: 4px;
-  }
-  .smart-views-label { display: none; }
-  .smart-view-btn { flex: 0 0 auto; height: 40px; white-space: nowrap; }
+  /* Bill Tracker: tighter padding, wrap the header/actions */
+  .bills-tracker { padding: 16px 14px; }
+  .bills-tracker-header { flex-direction: column; gap: 10px; }
+  .bills-tracker-actions { flex-wrap: wrap; }
+  .bills-search { margin-left: 0; min-width: 0; flex: 1; }
+  .bill-match-card { flex-direction: column; align-items: flex-start; gap: 8px; }
 
   /* Modals / drawers / overlays: use more of the screen, scroll long bodies */
   .modal-backdrop { padding: 12px; }
