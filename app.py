@@ -530,6 +530,9 @@ def init_db() -> None:
                     last_result JSONB
                 );
             """)
+            # "Will's Bills" — bills the user is personally working on. Kept out of the
+            # sync upsert's SET list so the flag survives re-syncs.
+            cur.execute("ALTER TABLE tracked_bills ADD COLUMN IF NOT EXISTS working_on BOOLEAN NOT NULL DEFAULT FALSE")
 
 
 if DATABASE_URL:
@@ -2080,10 +2083,11 @@ def api_tracked_bills():
                        to_char(introduced_date, 'YYYY-MM-DD') AS introduced_date,
                        latest_action,
                        to_char(latest_action_date, 'YYYY-MM-DD') AS latest_action_date,
-                       url
+                       url, working_on
                 FROM tracked_bills
                 WHERE (%(cong)s IS NULL OR congress = %(cong)s)
-                  AND (%(rel)s = 'all' OR relationship = %(rel)s)
+                  AND (%(rel)s = 'all' OR (%(rel)s = 'working' AND working_on)
+                       OR relationship = %(rel)s)
                   AND (%(q)s = '' OR title ILIKE %(qlike)s
                        OR (bill_type || ' ' || bill_number) ILIKE %(qlike)s)
                 ORDER BY introduced_date DESC NULLS LAST, bill_number
@@ -2091,6 +2095,20 @@ def api_tracked_bills():
                 {"cong": congress, "rel": rel, "q": q, "qlike": qlike},
             )
             bills = cur.fetchall()
+            # Counts for the selected Congress, independent of relationship/search filters.
+            cur.execute(
+                """
+                SELECT
+                    count(*) AS all,
+                    count(*) FILTER (WHERE relationship = 'sponsored')   AS sponsored,
+                    count(*) FILTER (WHERE relationship = 'cosponsored') AS cosponsored,
+                    count(*) FILTER (WHERE working_on)                   AS working
+                FROM tracked_bills
+                WHERE (%(cong)s IS NULL OR congress = %(cong)s)
+                """,
+                {"cong": congress},
+            )
+            counts = dict(cur.fetchone())
             cur.execute("SELECT DISTINCT congress FROM tracked_bills WHERE congress IS NOT NULL ORDER BY congress DESC")
             congresses = [r["congress"] for r in cur.fetchall()]
             cur.execute("SELECT last_synced FROM bill_sync_meta WHERE id = 1")
@@ -2104,6 +2122,7 @@ def api_tracked_bills():
 
     return jsonify({
         "bills": [dict(b) for b in bills],
+        "counts": counts,
         "congresses": congresses,
         "current_congress": _current_congress(),
         "last_synced": last_synced.isoformat() if last_synced else None,
@@ -2121,6 +2140,18 @@ def api_tracked_bills_sync():
         return jsonify({"ok": True, **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/tracked-bills/<bill_id>/working", methods=["POST"])
+def api_tracked_bill_working(bill_id: str):
+    data = request.get_json(force=True, silent=True) or {}
+    working = bool(data.get("working", True))
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE tracked_bills SET working_on = %s WHERE id = %s", (working, bill_id))
+            if cur.rowcount == 0:
+                return jsonify({"ok": False, "error": "Not found"}), 404
+    return jsonify({"ok": True})
 
 
 @app.route("/api/bill-matches")

@@ -3331,6 +3331,7 @@ function _renderFocusPanel(tasks) {
 
 // ---------- Bill Tracker (Congress.gov) ----------
 let _billsAutoSynced = false;
+let _billsRendered = {};   // id -> bill, for the right-click context menu
 
 function _billLabel(b) {
   return `${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}`;
@@ -3374,15 +3375,24 @@ async function refreshTrackedBills() {
     sel.value = state.billsFilter.congress;
   }
 
+  // Count badges on the sub-tabs
+  const counts = data.counts || {};
+  $$("[data-bills-count]").forEach((el) => {
+    const n = counts[el.dataset.billsCount];
+    el.textContent = (n === undefined || n === null) ? "" : n;
+  });
+
   // Bill list
   if (body) {
     const bills = data.bills || [];
+    _billsRendered = {};
+    bills.forEach((b) => { _billsRendered[b.id] = b; });
     if (!bills.length) {
       body.innerHTML = `<tr><td colspan="5" class="empty">${data.configured ? "No bills yet — try Sync now." : "Set CONGRESS_API_KEY to enable the tracker."}</td></tr>`;
     } else {
       body.innerHTML = bills.map((b) => `
-        <tr>
-          <td><a href="${escapeHtml(b.url || "#")}" target="_blank" rel="noopener">${_billLabel(b)}</a></td>
+        <tr data-bill-id="${escapeHtml(b.id)}">
+          <td>${b.working_on ? `<span class="bill-star" title="Will's Bills">★</span>` : ""}<a href="${escapeHtml(b.url || "#")}" target="_blank" rel="noopener">${_billLabel(b)}</a></td>
           <td class="bill-title-cell">${escapeHtml(b.title || "")}</td>
           <td><span class="bill-role bill-role-${escapeHtml(b.relationship)}">${b.relationship === "sponsored" ? "Sponsor" : "Cosponsor"}</span></td>
           <td>${escapeHtml(b.introduced_date || "—")}</td>
@@ -3467,7 +3477,7 @@ async function refreshBillMatches() {
 async function syncBills(silent) {
   const btn = $("#bills-sync-btn");
   const label = $("#bills-sync-label");
-  if (btn) { btn.disabled = true; btn.textContent = "Syncing…"; }
+  if (btn) { btn.disabled = true; btn.textContent = "Syncing…"; btn.classList.add("is-syncing"); }
   try {
     const r = await fetch("/api/tracked-bills/sync", { method: "POST" });
     const data = await r.json().catch(() => ({}));
@@ -3479,8 +3489,35 @@ async function syncBills(silent) {
     if (label) label.textContent = "Sync failed: " + e.message;
     console.error("bill sync failed", e);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = "Sync now"; }
+    if (btn) { btn.disabled = false; btn.textContent = "Sync now"; btn.classList.remove("is-syncing"); }
   }
+}
+
+// Right-click a bill row → toggle "Will's Bills"
+function openBillContextMenu(e, bill) {
+  e.preventDefault();
+  const menu = $("#bill-ctx-menu");
+  if (!menu) return;
+  menu.dataset.billId = bill.id;
+  menu.innerHTML = bill.working_on
+    ? `<div class="ctx-item" data-bill-action="unset">☆ Remove from Will's Bills</div>`
+    : `<div class="ctx-item" data-bill-action="set">★ Add to Will's Bills</div>`;
+  const menuW = 220, menuH = 48;
+  let x = e.clientX, y = e.clientY;
+  if (x + menuW > window.innerWidth)  x = window.innerWidth - menuW - 8;
+  if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - 8;
+  menu.style.left = x + "px";
+  menu.style.top = y + "px";
+  menu.classList.remove("hidden");
+  menu.classList.add("visible");
+}
+
+function closeBillContextMenu() {
+  const menu = $("#bill-ctx-menu");
+  if (!menu) return;
+  menu.classList.remove("visible");
+  menu.classList.add("hidden");
+  delete menu.dataset.billId;
 }
 
 function _ordinalNum(n) {
@@ -4231,6 +4268,35 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.billsFilter.congress = $("#bills-congress-select").value;
     refreshTrackedBills();
   });
+  // Right-click a bill row → Will's Bills toggle menu
+  $("#bills-tracker-body")?.addEventListener("contextmenu", (e) => {
+    const tr = e.target.closest("tr[data-bill-id]");
+    if (!tr) return;
+    const bill = _billsRendered[tr.dataset.billId];
+    if (bill) openBillContextMenu(e, bill);
+  });
+  $("#bill-ctx-menu")?.addEventListener("click", async (e) => {
+    const item = e.target.closest(".ctx-item");
+    const menu = $("#bill-ctx-menu");
+    const id = menu?.dataset.billId;
+    if (!item || !id) return;
+    const working = item.dataset.billAction === "set";
+    closeBillContextMenu();
+    try {
+      await api(`/api/tracked-bills/${id}/working`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ working }),
+      });
+      refreshTrackedBills();
+    } catch (err) { console.error("toggle Will's Bills failed", err); }
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#bill-ctx-menu")) closeBillContextMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeBillContextMenu();
+  }, true);
 
   // Snoozed filter
   $("#t-snoozed")?.addEventListener("change", () => { refreshTasks(); updateTaskFilterToggleState(); });

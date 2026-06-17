@@ -331,9 +331,10 @@
           <div class="bill-matches" id="bill-matches" hidden></div>
 
           <div class="bills-subtabs-bar">
-            <button class="groups-subtab active" data-bills-rel="all">All</button>
-            <button class="groups-subtab" data-bills-rel="sponsored">Sponsored</button>
-            <button class="groups-subtab" data-bills-rel="cosponsored">Cosponsored</button>
+            <button class="groups-subtab active" data-bills-rel="all">All <span class="bills-count" data-bills-count="all"></span></button>
+            <button class="groups-subtab" data-bills-rel="sponsored">Sponsored <span class="bills-count" data-bills-count="sponsored"></span></button>
+            <button class="groups-subtab" data-bills-rel="cosponsored">Cosponsored <span class="bills-count" data-bills-count="cosponsored"></span></button>
+            <button class="groups-subtab" data-bills-rel="working">Will's Bills <span class="bills-count" data-bills-count="working"></span></button>
             <input type="text" id="bills-search" class="bills-search" placeholder="Search bills…" autocomplete="off">
           </div>
 
@@ -369,6 +370,7 @@
 
   <!-- Context menu -->
   <div id="ctx-menu" class="ctx-menu hidden" role="menu"></div>
+  <div id="bill-ctx-menu" class="ctx-menu hidden" role="menu"></div>
 
   <!-- Toast container -->
   <div id="toast-container" class="toast-container"></div>
