@@ -221,46 +221,6 @@
       <!-- RELATIONSHIPS (merged meetings + groups) -->
       <section class="view" id="view-groups">
 
-        <!-- Floating radial filter menu (position: absolute within this view) -->
-        <div class="radial-root" id="radial-root">
-          <button class="radial-trigger" id="radial-trigger" aria-label="Filters &amp; Import" title="Filters &amp; Import">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="10" y1="18" x2="14" y2="18"/>
-            </svg>
-          </button>
-          <button class="radial-clear-btn" id="radial-clear-btn" hidden title="Clear all filters">×</button>
-          <button class="radial-item" data-radial="group" data-label="Group">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.2"/><path d="M2.8 19.5c.8-3.2 3.3-5 6.2-5s5.4 1.8 6.2 5"/><circle cx="17" cy="8" r="2.5"/><path d="M15 13.5c2.5 0 4.4 1.3 5.2 4"/></svg>
-          </button>
-          <button class="radial-item" data-radial="purpose" data-label="Purpose">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
-          </button>
-          <button class="radial-item" data-radial="attendee" data-label="Attendees">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-          </button>
-          <button class="radial-item" data-radial="date" data-label="Date">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17"/><path d="M8 3v4M16 3v4"/></svg>
-          </button>
-          <button class="radial-item" data-radial="open-tasks" id="radial-open-tasks" data-label="Open tasks only">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="m8 12 3 3 5-6"/></svg>
-          </button>
-          <button class="radial-item" data-radial="import" data-label="Import notes">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          </button>
-          <div class="radial-sub-ring" id="rsub-group"></div>
-          <div class="radial-sub-ring" id="rsub-purpose"></div>
-          <div class="radial-popup" id="rpop-attendee">
-            <div class="rpop-label">Filter by attendee</div>
-            <input id="rpop-attendee-input" type="text" placeholder="Search by name…" autocomplete="off">
-          </div>
-          <div class="radial-popup" id="rpop-date">
-            <div class="rpop-date-grid">
-              <label>From</label><input id="rpop-date-from" type="date">
-              <label>To</label><input id="rpop-date-to" type="date">
-            </div>
-          </div>
-        </div>
-
         <!-- 3-column layout -->
         <div class="rel-layout">
 
