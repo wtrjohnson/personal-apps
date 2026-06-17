@@ -1938,7 +1938,12 @@ def _congress_api_get(path: str, params: Optional[dict] = None) -> dict:
     qp.setdefault("format", "json")
     qp["api_key"] = CONGRESS_API_KEY
     url = f"https://api.congress.gov/v3/{path}?" + urllib.parse.urlencode(qp)
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    # Congress.gov is behind Cloudflare, which blocks the default Python-urllib
+    # User-Agent (HTTP 403, "error code: 1010"). Send a normal UA.
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; PersonalAppsBillTracker/1.0)",
+    })
     try:
         with urllib.request.urlopen(req, timeout=25) as resp:
             return json.loads(resp.read().decode("utf-8"))
