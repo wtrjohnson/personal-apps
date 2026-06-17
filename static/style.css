@@ -673,6 +673,10 @@ input, select, textarea { font-family: inherit; }
 }
 #view-tasks.active { display: grid; }
 
+/* Segmented Active/Done/Backburner toggle is phone-only; desktop uses the
+   stacked paper UI with peek edges. Shown via @media (max-width: 600px). */
+.tasks-segmented { display: none; }
+
 .paper-stack {
   position: relative;
   height: 100%;
