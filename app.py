@@ -1933,13 +1933,24 @@ def _bill_human_url(congress: int, btype: str, number: str) -> str:
 def _congress_api_get(path: str, params: Optional[dict] = None) -> dict:
     import urllib.request
     import urllib.parse
+    import urllib.error
     qp = dict(params or {})
     qp.setdefault("format", "json")
     qp["api_key"] = CONGRESS_API_KEY
     url = f"https://api.congress.gov/v3/{path}?" + urllib.parse.urlencode(qp)
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        raise RuntimeError(f"Congress.gov returned HTTP {e.code} for /{path}: {body}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Could not reach Congress.gov: {e.reason}") from e
 
 
 def _fetch_member_legislation(kind: str) -> List[dict]:

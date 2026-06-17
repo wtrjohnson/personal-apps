@@ -3466,13 +3466,17 @@ async function refreshBillMatches() {
 
 async function syncBills(silent) {
   const btn = $("#bills-sync-btn");
+  const label = $("#bills-sync-label");
   if (btn) { btn.disabled = true; btn.textContent = "Syncing…"; }
   try {
-    await api("/api/tracked-bills/sync", { method: "POST" });
+    const r = await fetch("/api/tracked-bills/sync", { method: "POST" });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${r.status}`);
+    }
     await Promise.all([refreshTrackedBills(), refreshBillMatches()]);
   } catch (e) {
-    const label = $("#bills-sync-label");
-    if (label && !silent) label.textContent = "Sync failed";
+    if (label) label.textContent = "Sync failed: " + e.message;
     console.error("bill sync failed", e);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = "Sync now"; }
