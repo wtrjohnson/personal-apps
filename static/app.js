@@ -3338,7 +3338,54 @@ function _billLabel(b) {
 }
 
 async function loadBillTracker() {
-  await Promise.all([refreshTrackedBills(), refreshBillMatches()]);
+  await Promise.all([refreshTrackedBills(), refreshBillMatches(), refreshBillSchedule()]);
+}
+
+async function refreshBillSchedule() {
+  const wrap = $("#bill-schedule");
+  if (!wrap) return;
+  let rows;
+  try {
+    rows = await api("/api/bill-schedule?congress=" + encodeURIComponent(state.billsFilter.congress));
+  } catch (e) {
+    wrap.hidden = true;
+    return;
+  }
+  if (!rows.length) {
+    wrap.hidden = true;
+    wrap.innerHTML = "";
+    return;
+  }
+  wrap.hidden = false;
+  const fmtDate = (s) => {
+    const d = new Date(s + "T00:00:00");
+    return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  };
+  wrap.innerHTML = `
+    <div class="bill-schedule-head">Upcoming — scheduled committee &amp; floor action on tracked bills</div>
+    ${rows.map((r) => {
+      const isFloor = r.source === "floor";
+      const kind = isFloor ? "House floor"
+        : `${escapeHtml(r.event_type || "Meeting")}${r.committee_name ? " — " + escapeHtml(r.committee_name) : ""}`;
+      const statusOff = r.status && r.status !== "Scheduled";
+      return `
+        <div class="bill-schedule-row${statusOff ? " is-off" : ""}">
+          <div class="bill-schedule-date">${escapeHtml(fmtDate(r.event_date))}</div>
+          <div class="bill-schedule-main">
+            <div class="bill-schedule-kind">
+              <span class="bill-sched-tag bill-sched-${isFloor ? "floor" : "committee"}">${escapeHtml(kind)}</span>
+              ${statusOff ? `<span class="bill-sched-status">${escapeHtml(r.status)}</span>` : ""}
+              ${r.working_on ? `<span class="bill-star" title="Will's Bills">★</span>` : ""}
+            </div>
+            <div class="bill-schedule-bill">
+              <a href="${escapeHtml(r.bill_url || r.url || "#")}" target="_blank" rel="noopener">${escapeHtml(r.bill_type)} ${escapeHtml(r.bill_number)}</a>
+              ${r.bill_title ? `<span class="bill-schedule-title">${escapeHtml(r.bill_title)}</span>` : ""}
+            </div>
+            ${r.location ? `<div class="bill-schedule-loc">${escapeHtml(r.location)}</div>` : ""}
+          </div>
+        </div>`;
+    }).join("")}
+  `;
 }
 
 async function refreshTrackedBills() {
@@ -3485,6 +3532,11 @@ async function syncBills(silent) {
       throw new Error(data.error || `HTTP ${r.status}`);
     }
     await Promise.all([refreshTrackedBills(), refreshBillMatches()]);
+    // Refresh the upcoming schedule too — best-effort, never fails the bill sync.
+    try {
+      await fetch("/api/bill-schedule/sync", { method: "POST" });
+    } catch (e2) { console.error("schedule sync failed", e2); }
+    await refreshBillSchedule();
   } catch (e) {
     if (label) label.textContent = "Sync failed: " + e.message;
     console.error("bill sync failed", e);
@@ -4267,6 +4319,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#bills-congress-select")?.addEventListener("change", () => {
     state.billsFilter.congress = $("#bills-congress-select").value;
     refreshTrackedBills();
+    refreshBillSchedule();
   });
   // Right-click a bill row → Will's Bills toggle menu
   $("#bills-tracker-body")?.addEventListener("contextmenu", (e) => {

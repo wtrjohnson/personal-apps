@@ -533,6 +533,30 @@ def init_db() -> None:
             # "Will's Bills" — bills the user is personally working on. Kept out of the
             # sync upsert's SET list so the flag survives re-syncs.
             cur.execute("ALTER TABLE tracked_bills ADD COLUMN IF NOT EXISTS working_on BOOLEAN NOT NULL DEFAULT FALSE")
+            # Upcoming committee hearings/markups + House-floor consideration for tracked bills.
+            cur.execute("ALTER TABLE bill_sync_meta ADD COLUMN IF NOT EXISTS schedule_last_synced TIMESTAMP")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS bill_schedule_events (
+                    id             TEXT PRIMARY KEY,   -- 'cm-{eventId}-{TYPE}{NUM}' | 'floor-{YYYYMMDD}-{TYPE}{NUM}'
+                    source         TEXT NOT NULL,      -- 'committee' | 'floor'
+                    congress       INTEGER,
+                    bill_type      TEXT NOT NULL,      -- normalized upper
+                    bill_number    TEXT NOT NULL,
+                    chamber        TEXT,
+                    event_type     TEXT,               -- 'Hearing'|'Markup'|'Meeting'|'Floor'
+                    status         TEXT,               -- 'Scheduled'|'Canceled'|'Postponed'|'Rescheduled'
+                    event_date     TIMESTAMP,          -- committee meeting datetime; floor = week-of Monday
+                    title          TEXT,
+                    committee_name TEXT,
+                    location       TEXT,
+                    url            TEXT,
+                    raw            JSONB DEFAULT '{}',
+                    last_seen      TIMESTAMP DEFAULT NOW(),
+                    created_at     TIMESTAMP DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS bill_sched_typenum ON bill_schedule_events (congress, bill_type, bill_number);
+                CREATE INDEX IF NOT EXISTS bill_sched_date ON bill_schedule_events (event_date);
+            """)
 
 
 if DATABASE_URL:
@@ -1961,6 +1985,18 @@ def _congress_api_get(path: str, params: Optional[dict] = None) -> dict:
         raise RuntimeError(f"Could not reach Congress.gov: {e.reason}") from e
 
 
+def _http_get_bytes(url: str, timeout: int = 20) -> bytes:
+    """Plain GET with a browser User-Agent (docs.house.gov, like Congress.gov, 403s the
+    default urllib UA). Raises on HTTP/network errors."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; PersonalAppsBillTracker/1.0)",
+        "Accept": "*/*",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
 def _fetch_member_legislation(kind: str) -> List[dict]:
     """kind = 'sponsored' | 'cosponsored'. Pages the Congress.gov member endpoint."""
     key = "sponsoredLegislation" if kind == "sponsored" else "cosponsoredLegislation"
@@ -2058,6 +2094,191 @@ def _sync_congress_bills() -> dict:
     return result
 
 
+# ---- Schedule sync (committee meetings + House floor) ----
+
+_COMMITTEE_DETAIL_CAP = 250   # hard cap on per-meeting detail fetches per sync
+
+
+def _cmp_ts(s) -> str:
+    """Normalize an API/DB timestamp to a lexicographically-comparable ISO string
+    (YYYY-MM-DDTHH:MM:SS), so we can compare the API's updateDate string against the
+    DB datetime without timezone/type errors."""
+    return str(s or "").replace(" ", "T")[:19]
+
+
+def _tracked_bill_keys(cur) -> set:
+    """Set of (congress, NORMTYPE, NORMNUM) for every tracked bill — events that don't
+    match a tracked bill are ignored to bound storage."""
+    cur.execute("SELECT congress, bill_type, bill_number FROM tracked_bills")
+    return {(r["congress"], r["bill_type"], r["bill_number"]) for r in cur.fetchall()}
+
+
+def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
+    """Page House committee meetings (newest updateDate first), fetch details, and store
+    upcoming Hearing/Markup events whose related bills are tracked."""
+    stored = 0
+    fetched = 0
+    offset, limit = 0, 250
+    stop = False
+    today = date_cls.today()
+    while not stop and fetched < _COMMITTEE_DETAIL_CAP:
+        data = _congress_api_get(
+            f"committee-meeting/{congress}/house",
+            {"limit": limit, "offset": offset, "sort": "updateDate+desc"},
+        )
+        batch = data.get("committeeMeetings") or []
+        if not batch:
+            break
+        for m in batch:
+            # Incremental: the list is newest-updated first, so once we pass the last
+            # schedule sync we can stop (skip on first run, when `since` is None).
+            upd = m.get("updateDate")
+            if since and upd and _cmp_ts(upd) < _cmp_ts(since):
+                stop = True
+                break
+            event_id = m.get("eventId")
+            if not event_id:
+                continue
+            if fetched >= _COMMITTEE_DETAIL_CAP:
+                stop = True
+                break
+            fetched += 1
+            try:
+                detail = _congress_api_get(f"committee-meeting/{congress}/house/{event_id}")
+            except Exception:
+                continue
+            cm = detail.get("committeeMeeting") or {}
+            mdate = cm.get("date")
+            if not mdate:
+                continue
+            # Only forward-looking events.
+            try:
+                mday = datetime.fromisoformat(mdate.replace("Z", "+00:00")).date()
+            except (ValueError, AttributeError):
+                continue
+            if mday < today:
+                continue
+            related = ((cm.get("relatedItems") or {}).get("bills") or {})
+            bills = related.get("bill") if isinstance(related, dict) else related
+            if isinstance(bills, dict):
+                bills = [bills]
+            if not bills:
+                continue
+            committees = cm.get("committees") or {}
+            citem = committees.get("item") if isinstance(committees, dict) else committees
+            if isinstance(citem, list):
+                citem = citem[0] if citem else {}
+            committee_name = (citem or {}).get("name") if isinstance(citem, dict) else None
+            loc = cm.get("location") or {}
+            location = " ".join(str(v) for v in (loc.get("room"), loc.get("building")) if v) or None
+            ev_type = cm.get("type") or "Meeting"
+            ev_status = cm.get("meetingStatus") or "Scheduled"
+            title = cm.get("title")
+            for b in bills:
+                cong = b.get("congress")
+                btype = _normalize_bill_type(b.get("type"))
+                bnum = _normalize_bill_number(b.get("number"))
+                if not (cong and btype and bnum):
+                    continue
+                if (cong, btype, bnum) not in keys:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO bill_schedule_events
+                        (id, source, congress, bill_type, bill_number, chamber, event_type,
+                         status, event_date, title, committee_name, location, url, raw, last_seen)
+                    VALUES (%s,'committee',%s,%s,%s,'House',%s,%s,%s,%s,%s,%s,%s,%s::jsonb,NOW())
+                    ON CONFLICT (id) DO UPDATE SET
+                        event_type = EXCLUDED.event_type, status = EXCLUDED.status,
+                        event_date = EXCLUDED.event_date, title = EXCLUDED.title,
+                        committee_name = EXCLUDED.committee_name, location = EXCLUDED.location,
+                        url = EXCLUDED.url, raw = EXCLUDED.raw, last_seen = NOW()
+                    """,
+                    (
+                        f"cm-{event_id}-{btype}{bnum}", cong, btype, bnum, ev_type, ev_status,
+                        mdate, title, committee_name, location,
+                        f"https://www.congress.gov/committee-meeting/{cong}/house/{event_id}",
+                        json.dumps(cm)[:8000],
+                    ),
+                )
+                stored += 1
+        offset += limit
+    return stored
+
+
+def _sync_house_floor(cur, congress: int, keys: set) -> int:
+    """Best-effort: parse the House weekly 'bills this week' XML for the current and next
+    week, recording tracked bills scheduled for the floor. Never raises."""
+    import xml.etree.ElementTree as ET
+    today = date_cls.today()
+    monday = today - timedelta(days=today.weekday())
+    stored = 0
+    for wk in (monday, monday + timedelta(days=7)):
+        ymd = wk.strftime("%Y%m%d")
+        try:
+            raw = _http_get_bytes(f"https://docs.house.gov/billsthisweek/{ymd}/{ymd}.xml")
+            root = ET.fromstring(raw)
+        except Exception:
+            continue
+        # The feed is "self-describing"; scan all elements for bill identifiers like
+        # "H.R. 1234" / "HR1234" regardless of the exact element name.
+        seen = set()
+        for el in root.iter():
+            text = (el.text or "").strip()
+            if not text or len(text) > 14:
+                continue
+            # Bill ids appear in their own self-describing nodes; strip separators
+            # ("H.R. 1234" / "H.J.Res. 7" / "S. 47") then match canonical types.
+            compact = re.sub(r"[^A-Za-z0-9]", "", text).upper()
+            m = re.match(r"^(HR|S|HRES|SRES|HJRES|SJRES|HCONRES|SCONRES)(\d{1,5})$", compact)
+            if not m:
+                continue
+            btype, bnum = m.group(1), m.group(2)
+            if btype not in _CHAMBER_SLUG or not bnum:
+                continue
+            if (congress, btype, bnum) in seen:
+                continue
+            seen.add((congress, btype, bnum))
+            if (congress, btype, bnum) not in keys:
+                continue
+            cur.execute(
+                """
+                INSERT INTO bill_schedule_events
+                    (id, source, congress, bill_type, bill_number, chamber, event_type,
+                     status, event_date, title, committee_name, location, url, raw, last_seen)
+                VALUES (%s,'floor',%s,%s,%s,'House','Floor','Scheduled',%s,%s,NULL,NULL,%s,'{}'::jsonb,NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    event_date = EXCLUDED.event_date, title = EXCLUDED.title, last_seen = NOW()
+                """,
+                (
+                    f"floor-{ymd}-{btype}{bnum}", congress, btype, bnum, wk.isoformat(),
+                    f"House floor — week of {wk.strftime('%b %-d')}",
+                    f"https://docs.house.gov/billsthisweek/{ymd}/",
+                ),
+            )
+            stored += 1
+    return stored
+
+
+def _sync_bill_schedule() -> dict:
+    """Refresh upcoming committee + House-floor events for tracked bills."""
+    congress = _current_congress()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            keys = _tracked_bill_keys(cur)
+            cur.execute("SELECT schedule_last_synced FROM bill_sync_meta WHERE id = 1")
+            row = cur.fetchone()
+            since = (row or {}).get("schedule_last_synced")
+            committee_events = _sync_committee_meetings(cur, congress, keys, since)
+            floor_events = _sync_house_floor(cur, congress, keys)
+            cur.execute("DELETE FROM bill_schedule_events WHERE event_date < CURRENT_DATE - INTERVAL '3 days'")
+            cur.execute(
+                "INSERT INTO bill_sync_meta (id, schedule_last_synced) VALUES (1, NOW()) "
+                "ON CONFLICT (id) DO UPDATE SET schedule_last_synced = NOW()"
+            )
+    return {"committee_events": committee_events, "floor_events": floor_events}
+
+
 @app.route("/api/tracked-bills")
 def api_tracked_bills():
     a = request.args
@@ -2152,6 +2373,52 @@ def api_tracked_bill_working(bill_id: str):
             if cur.rowcount == 0:
                 return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify({"ok": True})
+
+
+@app.route("/api/bill-schedule")
+def api_bill_schedule():
+    congress_arg = request.args.get("congress", "current")
+    if congress_arg in ("", "all"):
+        congress = None
+    elif congress_arg == "current":
+        congress = _current_congress()
+    else:
+        try:
+            congress = int(congress_arg)
+        except ValueError:
+            congress = _current_congress()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT e.id, e.source, e.congress, e.bill_type, e.bill_number, e.event_type,
+                       e.status, to_char(e.event_date, 'YYYY-MM-DD') AS event_date,
+                       e.title, e.committee_name, e.location, e.url,
+                       tb.title AS bill_title, tb.relationship, tb.working_on,
+                       tb.url AS bill_url
+                FROM bill_schedule_events e
+                JOIN tracked_bills tb
+                  ON tb.congress = e.congress AND tb.bill_type = e.bill_type
+                 AND tb.bill_number = e.bill_number
+                WHERE e.event_date >= CURRENT_DATE
+                  AND (%(cong)s IS NULL OR e.congress = %(cong)s)
+                ORDER BY e.event_date ASC, e.bill_type, e.bill_number
+                """,
+                {"cong": congress},
+            )
+            rows = cur.fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/bill-schedule/sync", methods=["POST"])
+def api_bill_schedule_sync():
+    if not CONGRESS_API_KEY:
+        return jsonify({"ok": False, "error": "Bill tracker not configured"}), 503
+    try:
+        result = _sync_bill_schedule()
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/bill-matches")
