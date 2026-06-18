@@ -3331,6 +3331,7 @@ function _renderFocusPanel(tasks) {
 
 // ---------- Bill Tracker (Congress.gov) ----------
 let _billsAutoSynced = false;
+let _scheduleAutoSynced = false;
 let _billsRendered = {};   // id -> bill, for the right-click context menu
 
 function _billLabel(b) {
@@ -3341,51 +3342,82 @@ async function loadBillTracker() {
   await Promise.all([refreshTrackedBills(), refreshBillMatches(), refreshBillSchedule()]);
 }
 
+function _scheduleStatusLine(data) {
+  // Returns {text, error} for the panel status line.
+  if (!data.configured) return { text: "Set CONGRESS_API_KEY to enable", error: true };
+  if (data.last_error) return { text: "⚠ last sync failed: " + data.last_error, error: true };
+  const res = data.last_result || {};
+  if (res.floor_ok === false) {
+    const c = res.committee_events ?? 0;
+    return { text: `⚠ House floor feed unavailable · ${c} committee`, error: true };
+  }
+  if (data.last_synced) {
+    const when = new Date(data.last_synced).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const c = res.committee_events, f = res.floor_events;
+    const counts = (c == null && f == null) ? "" : ` · ${c ?? 0} committee · ${f ?? 0} floor`;
+    return { text: `Updated ${when}${counts}`, error: false };
+  }
+  return { text: "Not yet checked", error: false };
+}
+
 async function refreshBillSchedule() {
   const wrap = $("#bill-schedule");
   if (!wrap) return;
-  let rows;
-  try {
-    rows = await api("/api/bill-schedule?congress=" + encodeURIComponent(state.billsFilter.congress));
-  } catch (e) {
-    wrap.hidden = true;
-    return;
-  }
-  if (!rows.length) {
-    wrap.hidden = true;
-    wrap.innerHTML = "";
-    return;
-  }
   wrap.hidden = false;
+  let data;
+  try {
+    data = await api("/api/bill-schedule?congress=" + encodeURIComponent(state.billsFilter.congress));
+  } catch (e) {
+    wrap.innerHTML = `<div class="bill-schedule-head">Upcoming — sponsored bills</div>
+      <div class="bill-schedule-status is-error">⚠ couldn't load the schedule</div>`;
+    return;
+  }
+  const events = data.events || [];
+  const status = _scheduleStatusLine(data);
   const fmtDate = (s) => {
     const d = new Date(s + "T00:00:00");
     return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
   };
+  const body = events.length
+    ? events.map((r) => {
+        const isFloor = r.source === "floor";
+        const kind = isFloor ? "House floor"
+          : `${escapeHtml(r.event_type || "Meeting")}${r.committee_name ? " — " + escapeHtml(r.committee_name) : ""}`;
+        const statusOff = r.status && r.status !== "Scheduled";
+        return `
+          <div class="bill-schedule-row${statusOff ? " is-off" : ""}">
+            <div class="bill-schedule-date">${escapeHtml(fmtDate(r.event_date))}</div>
+            <div class="bill-schedule-main">
+              <div class="bill-schedule-kind">
+                <span class="bill-sched-tag bill-sched-${isFloor ? "floor" : "committee"}">${escapeHtml(kind)}</span>
+                ${statusOff ? `<span class="bill-sched-status">${escapeHtml(r.status)}</span>` : ""}
+                ${r.working_on ? `<span class="bill-star" title="Will's Bills">★</span>` : ""}
+              </div>
+              <div class="bill-schedule-bill">
+                <a href="${escapeHtml(r.bill_url || r.url || "#")}" target="_blank" rel="noopener">${escapeHtml(r.bill_type)} ${escapeHtml(r.bill_number)}</a>
+                ${r.bill_title ? `<span class="bill-schedule-title">${escapeHtml(r.bill_title)}</span>` : ""}
+              </div>
+              ${r.location ? `<div class="bill-schedule-loc">${escapeHtml(r.location)}</div>` : ""}
+            </div>
+          </div>`;
+      }).join("")
+    : `<div class="bill-schedule-empty">No upcoming committee or floor action for your sponsored bills.</div>`;
   wrap.innerHTML = `
-    <div class="bill-schedule-head">Upcoming — scheduled committee &amp; floor action on tracked bills</div>
-    ${rows.map((r) => {
-      const isFloor = r.source === "floor";
-      const kind = isFloor ? "House floor"
-        : `${escapeHtml(r.event_type || "Meeting")}${r.committee_name ? " — " + escapeHtml(r.committee_name) : ""}`;
-      const statusOff = r.status && r.status !== "Scheduled";
-      return `
-        <div class="bill-schedule-row${statusOff ? " is-off" : ""}">
-          <div class="bill-schedule-date">${escapeHtml(fmtDate(r.event_date))}</div>
-          <div class="bill-schedule-main">
-            <div class="bill-schedule-kind">
-              <span class="bill-sched-tag bill-sched-${isFloor ? "floor" : "committee"}">${escapeHtml(kind)}</span>
-              ${statusOff ? `<span class="bill-sched-status">${escapeHtml(r.status)}</span>` : ""}
-              ${r.working_on ? `<span class="bill-star" title="Will's Bills">★</span>` : ""}
-            </div>
-            <div class="bill-schedule-bill">
-              <a href="${escapeHtml(r.bill_url || r.url || "#")}" target="_blank" rel="noopener">${escapeHtml(r.bill_type)} ${escapeHtml(r.bill_number)}</a>
-              ${r.bill_title ? `<span class="bill-schedule-title">${escapeHtml(r.bill_title)}</span>` : ""}
-            </div>
-            ${r.location ? `<div class="bill-schedule-loc">${escapeHtml(r.location)}</div>` : ""}
-          </div>
-        </div>`;
-    }).join("")}
+    <div class="bill-schedule-head">Upcoming — scheduled committee &amp; floor action on <strong>sponsored</strong> bills</div>
+    <div class="bill-schedule-status${status.error ? " is-error" : ""}">${escapeHtml(status.text)}</div>
+    ${body}
   `;
+
+  // Own once-a-day auto-refresh, independent of the bill sync.
+  if (data.needs_sync && data.configured && !_scheduleAutoSynced) {
+    _scheduleAutoSynced = true;
+    const st = wrap.querySelector(".bill-schedule-status");
+    if (st) { st.textContent = "Checking…"; st.classList.remove("is-error"); }
+    try {
+      await fetch("/api/bill-schedule/sync", { method: "POST" });
+    } catch (e) { /* surfaced on reload via stored error */ }
+    await refreshBillSchedule();
+  }
 }
 
 async function refreshTrackedBills() {
@@ -3404,7 +3436,9 @@ async function refreshTrackedBills() {
   // Sync status label
   const label = $("#bills-sync-label");
   if (label) {
+    label.classList.toggle("is-error", !!data.last_error);
     if (!data.configured) label.textContent = "Not configured";
+    else if (data.last_error) label.textContent = "⚠ last sync failed: " + data.last_error;
     else if (data.last_synced) label.textContent = "Synced " + new Date(data.last_synced).toLocaleString();
     else label.textContent = "Never synced";
   }

@@ -1,0 +1,32 @@
+name: Bill tracker sync
+
+# Twice-daily Congress.gov sync for the Bill Tracker. Times are UTC (GitHub cron
+# can't track DST): 11:00 UTC ≈ 6 AM ET and 21:00 UTC ≈ 4 PM ET in winter (7 AM / 5 PM
+# in summer). GitHub may run scheduled jobs a few minutes late under load.
+#
+# Requires two repo secrets:
+#   CRON_SECRET  – must match the CRON_SECRET env var set in Vercel
+#   APP_URL      – production base URL, e.g. https://your-app.vercel.app (no trailing slash)
+#
+# Each step is a separate request so each stays within Vercel's per-invocation time limit.
+
+on:
+  schedule:
+    - cron: "0 11 * * *"
+    - cron: "0 21 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync bills
+        run: |
+          curl -fsS --max-time 120 -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/sync?job=bills"
+      - name: Sync schedule
+        run: |
+          curl -fsS --max-time 120 -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/cron/sync?job=schedule"

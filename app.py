@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -35,6 +36,8 @@ SHORTCUT_API_KEY = os.environ.get("SHORTCUT_API_KEY", "")
 CONGRESS_API_KEY = os.environ.get("CONGRESS_API_KEY", "")
 # Rep. Blake Moore (R, UT-01). Overridable so the tracker can follow a different member.
 CONGRESS_MEMBER_BIOGUIDE = os.environ.get("CONGRESS_MEMBER_BIOGUIDE", "M001213")
+# Shared secret for the scheduled-sync endpoint (GitHub Actions sends it as a bearer token).
+CRON_SECRET = os.environ.get("CRON_SECRET", "")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = SECRET_KEY
@@ -535,6 +538,10 @@ def init_db() -> None:
             cur.execute("ALTER TABLE tracked_bills ADD COLUMN IF NOT EXISTS working_on BOOLEAN NOT NULL DEFAULT FALSE")
             # Upcoming committee hearings/markups + House-floor consideration for tracked bills.
             cur.execute("ALTER TABLE bill_sync_meta ADD COLUMN IF NOT EXISTS schedule_last_synced TIMESTAMP")
+            # Failure visibility for manual + scheduled syncs.
+            cur.execute("ALTER TABLE bill_sync_meta ADD COLUMN IF NOT EXISTS last_error TEXT")
+            cur.execute("ALTER TABLE bill_sync_meta ADD COLUMN IF NOT EXISTS schedule_last_result JSONB")
+            cur.execute("ALTER TABLE bill_sync_meta ADD COLUMN IF NOT EXISTS schedule_last_error TEXT")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS bill_schedule_events (
                     id             TEXT PRIMARY KEY,   -- 'cm-{eventId}-{TYPE}{NUM}' | 'floor-{YYYYMMDD}-{TYPE}{NUM}'
@@ -574,7 +581,7 @@ if DATABASE_URL:
 def require_login() -> Optional[Any]:
     if request.path.startswith("/static/"):
         return None
-    if request.endpoint in ("login", "logout", "shortcut_add_task"):
+    if request.endpoint in ("login", "logout", "shortcut_add_task", "cron_sync"):
         return None
     if not session.get("logged_in"):
         return redirect(url_for("login"))
@@ -2086,17 +2093,34 @@ def _sync_congress_bills() -> dict:
                 "new_matches": new_matches,
             }
             cur.execute(
-                "INSERT INTO bill_sync_meta (id, last_synced, last_result) "
-                "VALUES (1, NOW(), %s::jsonb) "
-                "ON CONFLICT (id) DO UPDATE SET last_synced = NOW(), last_result = EXCLUDED.last_result",
+                "INSERT INTO bill_sync_meta (id, last_synced, last_result, last_error) "
+                "VALUES (1, NOW(), %s::jsonb, NULL) "
+                "ON CONFLICT (id) DO UPDATE SET last_synced = NOW(), "
+                "last_result = EXCLUDED.last_result, last_error = NULL",
                 (json.dumps(result),),
             )
     return result
 
 
+def _record_sync_error(field: str, message: str) -> None:
+    """Persist a sync failure so the UI can surface it later (field: last_error |
+    schedule_last_error)."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO bill_sync_meta (id, {field}) VALUES (1, %s) "
+                    f"ON CONFLICT (id) DO UPDATE SET {field} = EXCLUDED.{field}",
+                    (message[:500],),
+                )
+    except Exception:
+        pass
+
+
 # ---- Schedule sync (committee meetings + House floor) ----
 
-_COMMITTEE_DETAIL_CAP = 250   # hard cap on per-meeting detail fetches per sync
+_COMMITTEE_DETAIL_CAP = 40    # hard cap on per-meeting detail fetches per sync (Hobby-safe)
+_COMMITTEE_TIME_BUDGET = 7.0  # seconds; stop fetching details to stay under the ~10s limit
 
 
 def _cmp_ts(s) -> str:
@@ -2107,21 +2131,27 @@ def _cmp_ts(s) -> str:
 
 
 def _tracked_bill_keys(cur) -> set:
-    """Set of (congress, NORMTYPE, NORMNUM) for every tracked bill — events that don't
-    match a tracked bill are ignored to bound storage."""
-    cur.execute("SELECT congress, bill_type, bill_number FROM tracked_bills")
+    """Set of (congress, NORMTYPE, NORMNUM) for every **sponsored** tracked bill — the
+    Upcoming panel only covers sponsored bills (cosponsored hearings are noise). Events that
+    don't match are ignored to bound storage."""
+    cur.execute("SELECT congress, bill_type, bill_number FROM tracked_bills WHERE relationship = 'sponsored'")
     return {(r["congress"], r["bill_type"], r["bill_number"]) for r in cur.fetchall()}
 
 
 def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
     """Page House committee meetings (newest updateDate first), fetch details, and store
-    upcoming Hearing/Markup events whose related bills are tracked."""
+    upcoming Hearing/Markup events whose related bills are tracked. Time-boxed so a single
+    invocation stays well under Vercel Hobby's ~10s function limit; incremental updateDate
+    paging + twice-daily runs fill in coverage over successive runs."""
     stored = 0
     fetched = 0
     offset, limit = 0, 250
     stop = False
     today = date_cls.today()
+    deadline = time.monotonic() + _COMMITTEE_TIME_BUDGET
     while not stop and fetched < _COMMITTEE_DETAIL_CAP:
+        if time.monotonic() > deadline:
+            break
         data = _congress_api_get(
             f"committee-meeting/{congress}/house",
             {"limit": limit, "offset": offset, "sort": "updateDate+desc"},
@@ -2139,7 +2169,7 @@ def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
             event_id = m.get("eventId")
             if not event_id:
                 continue
-            if fetched >= _COMMITTEE_DETAIL_CAP:
+            if fetched >= _COMMITTEE_DETAIL_CAP or time.monotonic() > deadline:
                 stop = True
                 break
             fetched += 1
@@ -2206,18 +2236,21 @@ def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
     return stored
 
 
-def _sync_house_floor(cur, congress: int, keys: set) -> int:
+def _sync_house_floor(cur, congress: int, keys: set):
     """Best-effort: parse the House weekly 'bills this week' XML for the current and next
-    week, recording tracked bills scheduled for the floor. Never raises."""
+    week, recording tracked bills scheduled for the floor. Never raises. Returns
+    (stored_count, ok) where ok is False if neither week's feed could be fetched."""
     import xml.etree.ElementTree as ET
     today = date_cls.today()
     monday = today - timedelta(days=today.weekday())
     stored = 0
+    fetched_any = False
     for wk in (monday, monday + timedelta(days=7)):
         ymd = wk.strftime("%Y%m%d")
         try:
             raw = _http_get_bytes(f"https://docs.house.gov/billsthisweek/{ymd}/{ymd}.xml")
             root = ET.fromstring(raw)
+            fetched_any = True
         except Exception:
             continue
         # The feed is "self-describing"; scan all elements for bill identifiers like
@@ -2257,11 +2290,11 @@ def _sync_house_floor(cur, congress: int, keys: set) -> int:
                 ),
             )
             stored += 1
-    return stored
+    return stored, fetched_any
 
 
 def _sync_bill_schedule() -> dict:
-    """Refresh upcoming committee + House-floor events for tracked bills."""
+    """Refresh upcoming committee + House-floor events for tracked (sponsored) bills."""
     congress = _current_congress()
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -2270,13 +2303,28 @@ def _sync_bill_schedule() -> dict:
             row = cur.fetchone()
             since = (row or {}).get("schedule_last_synced")
             committee_events = _sync_committee_meetings(cur, congress, keys, since)
-            floor_events = _sync_house_floor(cur, congress, keys)
-            cur.execute("DELETE FROM bill_schedule_events WHERE event_date < CURRENT_DATE - INTERVAL '3 days'")
+            floor_events, floor_ok = _sync_house_floor(cur, congress, keys)
+            # Drop any events whose bill is no longer a sponsored tracked bill.
             cur.execute(
-                "INSERT INTO bill_sync_meta (id, schedule_last_synced) VALUES (1, NOW()) "
-                "ON CONFLICT (id) DO UPDATE SET schedule_last_synced = NOW()"
+                """
+                DELETE FROM bill_schedule_events e
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM tracked_bills tb
+                    WHERE tb.congress = e.congress AND tb.bill_type = e.bill_type
+                      AND tb.bill_number = e.bill_number AND tb.relationship = 'sponsored'
+                )
+                """
             )
-    return {"committee_events": committee_events, "floor_events": floor_events}
+            cur.execute("DELETE FROM bill_schedule_events WHERE event_date < CURRENT_DATE - INTERVAL '3 days'")
+            result = {"committee_events": committee_events, "floor_events": floor_events, "floor_ok": floor_ok}
+            cur.execute(
+                "INSERT INTO bill_sync_meta (id, schedule_last_synced, schedule_last_result, schedule_last_error) "
+                "VALUES (1, NOW(), %s::jsonb, NULL) "
+                "ON CONFLICT (id) DO UPDATE SET schedule_last_synced = NOW(), "
+                "schedule_last_result = EXCLUDED.schedule_last_result, schedule_last_error = NULL",
+                (json.dumps(result),),
+            )
+    return result
 
 
 @app.route("/api/tracked-bills")
@@ -2332,9 +2380,10 @@ def api_tracked_bills():
             counts = dict(cur.fetchone())
             cur.execute("SELECT DISTINCT congress FROM tracked_bills WHERE congress IS NOT NULL ORDER BY congress DESC")
             congresses = [r["congress"] for r in cur.fetchall()]
-            cur.execute("SELECT last_synced FROM bill_sync_meta WHERE id = 1")
+            cur.execute("SELECT last_synced, last_error FROM bill_sync_meta WHERE id = 1")
             meta = cur.fetchone()
             last_synced = meta["last_synced"] if meta else None
+            last_error = meta["last_error"] if meta else None
             cur.execute(
                 "SELECT (%s::timestamp IS NULL OR %s::timestamp::date < CURRENT_DATE) AS needs",
                 (last_synced, last_synced),
@@ -2347,6 +2396,7 @@ def api_tracked_bills():
         "congresses": congresses,
         "current_congress": _current_congress(),
         "last_synced": last_synced.isoformat() if last_synced else None,
+        "last_error": last_error,
         "needs_sync": bool(needs_sync),
         "configured": bool(CONGRESS_API_KEY),
     })
@@ -2360,6 +2410,7 @@ def api_tracked_bills_sync():
         result = _sync_congress_bills()
         return jsonify({"ok": True, **result})
     except Exception as e:
+        _record_sync_error("last_error", str(e))
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
@@ -2401,13 +2452,32 @@ def api_bill_schedule():
                   ON tb.congress = e.congress AND tb.bill_type = e.bill_type
                  AND tb.bill_number = e.bill_number
                 WHERE e.event_date >= CURRENT_DATE
+                  AND tb.relationship = 'sponsored'
                   AND (%(cong)s IS NULL OR e.congress = %(cong)s)
                 ORDER BY e.event_date ASC, e.bill_type, e.bill_number
                 """,
                 {"cong": congress},
             )
             rows = cur.fetchall()
-    return jsonify([dict(r) for r in rows])
+            cur.execute(
+                "SELECT schedule_last_synced, schedule_last_result, schedule_last_error "
+                "FROM bill_sync_meta WHERE id = 1"
+            )
+            meta = cur.fetchone() or {}
+            last_synced = meta.get("schedule_last_synced")
+            cur.execute(
+                "SELECT (%s::timestamp IS NULL OR %s::timestamp::date < CURRENT_DATE) AS needs",
+                (last_synced, last_synced),
+            )
+            needs_sync = cur.fetchone()["needs"]
+    return jsonify({
+        "events": [dict(r) for r in rows],
+        "last_synced": last_synced.isoformat() if last_synced else None,
+        "last_result": meta.get("schedule_last_result"),
+        "last_error": meta.get("schedule_last_error"),
+        "needs_sync": bool(needs_sync),
+        "configured": bool(CONGRESS_API_KEY),
+    })
 
 
 @app.route("/api/bill-schedule/sync", methods=["POST"])
@@ -2418,7 +2488,34 @@ def api_bill_schedule_sync():
         result = _sync_bill_schedule()
         return jsonify({"ok": True, **result})
     except Exception as e:
+        _record_sync_error("schedule_last_error", str(e))
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/cron/sync", methods=["POST", "GET"])
+def cron_sync():
+    """Scheduled-sync entry point for an external scheduler (GitHub Actions). Exempt from
+    session login (see require_login allowlist); authenticated by CRON_SECRET. Runs one job
+    per call (`?job=bills|schedule`) so each stays within the serverless time limit."""
+    if not CRON_SECRET:
+        return jsonify({"ok": False, "error": "CRON_SECRET not configured"}), 503
+    provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() \
+        or request.headers.get("X-API-Key", "").strip()
+    if provided != CRON_SECRET:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    if not CONGRESS_API_KEY:
+        return jsonify({"ok": False, "error": "Bill tracker not configured"}), 503
+    job = (request.args.get("job") or "bills").strip()
+    try:
+        if job == "schedule":
+            result = _sync_bill_schedule()
+        else:
+            job = "bills"
+            result = _sync_congress_bills()
+        return jsonify({"ok": True, "job": job, **result})
+    except Exception as e:
+        _record_sync_error("schedule_last_error" if job == "schedule" else "last_error", str(e))
+        return jsonify({"ok": False, "job": job, "error": str(e)}), 500
 
 
 @app.route("/api/bill-matches")
