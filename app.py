@@ -523,6 +523,7 @@ class Meeting:
     body_html: str
     mtime: Optional[float]
     canvas_image: Optional[str] = None
+    organization_id: Optional[str] = None
     _tasks_full: List[dict] = None  # [{id, text, type, done}] for editing
 
     def summary(self) -> Dict[str, Any]:
@@ -539,6 +540,7 @@ class Meeting:
             "attendees": self.attendees,
             "open_action_items_count": len(self.action_items_open),
             "open_reminders_count": len(self.reminders_open),
+            "organization_id": self.organization_id,
         }
 
     def full(self) -> Dict[str, Any]:
@@ -1007,6 +1009,7 @@ def _row_to_meeting(row: dict, task_rows: List[dict]) -> Meeting:
         body_html=row["body_html"] or "",
         mtime=row["mtime"],
         canvas_image=row.get("canvas_image"),
+        organization_id=row.get("organization_id"),
     )
 
 
@@ -1603,7 +1606,16 @@ def api_contacts_upsert():
                     card_image=COALESCE(EXCLUDED.card_image, contacts.card_image),
                     updated_at=NOW()
             """, (cid, name, company, title, email, phone, notes, card_image))
-    return jsonify({"ok": True, "id": cid, "name": name})
+            # Close the loop: a typed company becomes a canonical organization the
+            # contact is linked to, so it appears in the Organizations list.
+            org_id = None
+            if company:
+                org_id = _org_for_name(cur, company)
+                if org_id:
+                    _link_contact_org(cur, cid, org_id)
+                    cur.execute("UPDATE contacts SET organization_id=%s WHERE id=%s",
+                                (org_id, cid))
+    return jsonify({"ok": True, "id": cid, "name": name, "org_id": org_id})
 
 
 @app.route("/api/people/<contact_id>", methods=["PUT"])
@@ -1630,7 +1642,18 @@ def api_person_update(contact_id):
                   (data.get("phone") or "").strip(),
                   data.get("card_image") or None,
                   contact_id))
-    return jsonify({"ok": True, "id": contact_id})
+            # Close the loop: a typed company becomes a canonical organization the
+            # contact is linked to. Only act when company is non-empty so we never
+            # wipe an existing org link (e.g. from attendee-derived enrichment).
+            org_id = None
+            company = (data.get("company") or "").strip()
+            if company:
+                org_id = _org_for_name(cur, company)
+                if org_id:
+                    _link_contact_org(cur, contact_id, org_id)
+                    cur.execute("UPDATE contacts SET organization_id=%s WHERE id=%s",
+                                (org_id, contact_id))
+    return jsonify({"ok": True, "id": contact_id, "org_id": org_id})
 
 
 @app.route("/api/people/<contact_id>", methods=["DELETE"])
@@ -1739,6 +1762,12 @@ def api_meeting_link_contact(mid: str):
                 "INSERT INTO meeting_contacts (meeting_id, contact_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
                 (mid, cid)
             )
+            # Close the loop: if the meeting belongs to an org, the linked contact
+            # belongs to it too (mirrors attendee handling in _upsert_attendee_contacts).
+            cur.execute("SELECT organization_id FROM meetings WHERE id=%s", (mid,))
+            row = cur.fetchone()
+            if row and row["organization_id"]:
+                _link_contact_org(cur, cid, row["organization_id"])
     return jsonify({"ok": True})
 
 
@@ -1899,6 +1928,44 @@ def api_organization_delete(org_id):
                         (org_id,))
             cur.execute("DELETE FROM organizations WHERE id=%s", (org_id,))
     return jsonify({"ok": True})
+
+
+@app.route("/api/organizations/merge", methods=["POST"])
+def api_organization_merge():
+    """Merge a duplicate organization into a survivor: repoint every reference from
+    `from_id` to `to_id`, then delete the now-empty source org. One-way / destructive."""
+    data = request.get_json(force=True, silent=True) or {}
+    from_id = (data.get("from_id") or "").strip()
+    to_id = (data.get("to_id") or "").strip()
+    if not from_id or not to_id:
+        return jsonify({"ok": False, "error": "from_id and to_id required"}), 400
+    if from_id == to_id:
+        return jsonify({"ok": False, "error": "from_id and to_id must differ"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM organizations WHERE id IN (%s, %s)", (from_id, to_id))
+            if len({r["id"] for r in cur.fetchall()}) != 2:
+                return jsonify({"ok": False, "error": "both organizations must exist"}), 404
+            params = {"from": from_id, "to": to_id}
+            # Repoint every simple organization_id FK column.
+            for tbl in ("meetings", "asks", "commitments", "followup_triggers",
+                        "tasks", "contacts"):
+                cur.execute(
+                    f"UPDATE {tbl} SET organization_id=%(to)s WHERE organization_id=%(from)s",
+                    params)
+            # entity_notes has no FK — repoint by polymorphic id.
+            cur.execute(
+                "UPDATE entity_notes SET entity_id=%(to)s "
+                "WHERE entity_type='organization' AND entity_id=%(from)s", params)
+            # contact_organizations has a composite PK; insert-then-delete to dodge collisions.
+            cur.execute(
+                "INSERT INTO contact_organizations (contact_id, organization_id) "
+                "SELECT contact_id, %(to)s FROM contact_organizations "
+                "WHERE organization_id=%(from)s ON CONFLICT DO NOTHING", params)
+            cur.execute(
+                "DELETE FROM contact_organizations WHERE organization_id=%(from)s", params)
+            cur.execute("DELETE FROM organizations WHERE id=%(from)s", params)
+    return jsonify({"ok": True, "to_id": to_id})
 
 
 @app.route("/api/search")
@@ -2132,8 +2199,13 @@ def api_entity_note_add():
     body = (data.get("body") or "").strip()
     if etype not in _NOTE_TYPES or not eid or not body:
         return jsonify({"ok": False, "error": "entity_type, entity_id, body required"}), 400
+    # Table derived from the _NOTE_TYPES whitelist, never from raw input.
+    entity_table = "contacts" if etype == "contact" else "organizations"
     with get_db() as conn:
         with conn.cursor() as cur:
+            cur.execute(f"SELECT 1 FROM {entity_table} WHERE id=%s", (eid,))
+            if not cur.fetchone():
+                return jsonify({"ok": False, "error": "entity not found"}), 404
             cur.execute("""
                 INSERT INTO entity_notes (entity_type, entity_id, body)
                 VALUES (%s, %s, %s) RETURNING id
@@ -3363,6 +3435,13 @@ def api_notes_intake():
 
                     # Turn attendees into linked People contacts
                     _upsert_attendee_contacts(cur, mid_out, note_attendees, org_id_out)
+
+                    # Close the loop: people called out on the canvas (type=person)
+                    # become contacts linked to this meeting + org too, not just body text.
+                    person_names = [i["text"] for i in confirmed_items
+                                    if i.get("type") == "person" and i.get("text")]
+                    if person_names:
+                        _upsert_attendee_contacts(cur, mid_out, "; ".join(person_names), org_id_out)
 
                     # Bill references
                     if bill_items:

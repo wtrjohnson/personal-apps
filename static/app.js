@@ -795,6 +795,10 @@ async function submitEditModal() {
   closeEditModal();
   await refreshTasks();
   if (state.meetings.length) refreshMeetings();
+  // If a person detail panel is open, refresh it so a reassigned task moves with it.
+  if (_currentPersonId && !$("#person-detail-panel")?.classList.contains("hidden")) {
+    selectPerson(_currentPersonId);
+  }
 }
 
 // ---------- Source-note drawer ----------
@@ -885,7 +889,9 @@ async function openDrawer(task) {
 
     el.innerHTML = `
       <header>
-        <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
+        <h1>${m.organization_id
+              ? `<span class="detail-org-link" data-org-id="${escapeHtml(m.organization_id)}" title="Open organization" style="cursor:pointer;text-decoration:underline dotted">${escapeHtml(m.group)}</span>`
+              : escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
         <div class="meta">${meta.join("")}</div>
         ${sourceBadge}${commitmentBadge}${askBadge}
         <a href="#" class="open-full" data-mid="${m.id}">Open full meeting view →</a>
@@ -1251,7 +1257,9 @@ function renderDetail(m) {
   $("#detail").innerHTML = `
     <header>
       <div class="detail-header-row">
-        <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
+        <h1>${m.organization_id
+              ? `<span class="detail-org-link" data-org-id="${escapeHtml(m.organization_id)}" title="Open organization" style="cursor:pointer;text-decoration:underline dotted">${escapeHtml(m.group)}</span>`
+              : escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
         <div style="display: flex; gap: 8px;">
           <button class="detail-edit-btn" data-mid="${escapeHtml(m.id)}" title="Edit meeting metadata">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L21 3"/></svg>
@@ -1509,6 +1517,12 @@ $("#detail").addEventListener("click", async (e) => {
   }
 });
 
+// Clickable org name (meeting detail header / drawer) → jump to the org record.
+document.addEventListener("click", (e) => {
+  const orgLink = e.target.closest(".detail-org-link[data-org-id]");
+  if (orgLink) navToOrg(orgLink.dataset.orgId);
+});
+
 function renderGroupsTable(groups) {
   // Legacy function kept for compatibility — now delegates to org table
   renderOrgsTable(groups.map((g) => ({
@@ -1522,7 +1536,10 @@ function renderGroupsTable(groups) {
   })));
 }
 
+let _lastOrgs = [];   // most recently rendered orgs, for the merge dialog
+
 function renderOrgsTable(orgs) {
+  _lastOrgs = orgs || [];
   const tbody = $("#orgs-body");
   if (!tbody) return;
   if (!orgs.length) {
@@ -1541,6 +1558,50 @@ function renderOrgsTable(orgs) {
   `).join("");
   tbody.querySelectorAll(".stakeholder-row").forEach((row) => {
     row.addEventListener("click", () => selectOrg(row.dataset.orgId));
+  });
+}
+
+// Merge a duplicate organization into a survivor. Repoints every reference on the
+// backend, then refreshes the list. Destructive and one-way.
+function openMergeOrgsDialog() {
+  const orgs = _lastOrgs || [];
+  if (orgs.length < 2) { alert("You need at least two organizations to merge."); return; }
+  const opts = orgs.map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.name)}</option>`).join("");
+  const backdrop = document.createElement("div");
+  backdrop.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1000;";
+  backdrop.innerHTML = `
+    <div style="background:var(--card,#fff);color:var(--fg,inherit);padding:20px;border-radius:10px;min-width:340px;box-shadow:0 8px 30px rgba(0,0,0,.3);">
+      <h3 style="margin:0 0 12px;">Merge organizations</h3>
+      <label style="display:block;margin-bottom:4px;font-weight:600;">Merge this org…</label>
+      <select id="_merge-from" style="width:100%;padding:8px;margin-bottom:12px;">${opts}</select>
+      <label style="display:block;margin-bottom:4px;font-weight:600;">…into this one (survivor)</label>
+      <select id="_merge-to" style="width:100%;padding:8px;margin-bottom:12px;">${opts}</select>
+      <p style="color:var(--muted);font-size:13px;margin:0 0 12px;">The first org is deleted; all its meetings, asks, commitments, tasks and people move to the survivor. This cannot be undone.</p>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button id="_merge-cancel" class="btn">Cancel</button>
+        <button id="_merge-ok" class="btn btn-primary">Merge</button>
+      </div>
+    </div>`;
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.querySelector("#_merge-cancel").addEventListener("click", close);
+  backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(); });
+  backdrop.querySelector("#_merge-ok").addEventListener("click", async () => {
+    const fromId = backdrop.querySelector("#_merge-from").value;
+    const toId = backdrop.querySelector("#_merge-to").value;
+    if (fromId === toId) { alert("Pick two different organizations."); return; }
+    const fromName = (orgs.find((o) => o.id === fromId) || {}).name || fromId;
+    const toName = (orgs.find((o) => o.id === toId) || {}).name || toId;
+    if (!confirm(`Merge "${fromName}" into "${toName}"? "${fromName}" will be deleted.`)) return;
+    try {
+      await api("/api/organizations/merge", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from_id: fromId, to_id: toId }),
+      });
+    } catch (e) { alert("Merge failed."); return; }
+    close();
+    await loadGroups();
+    if (state.selectedOrgId === fromId) selectOrg(toId, { skipToggle: true });
   });
 }
 
@@ -2068,23 +2129,24 @@ async function selectPerson(contactId) {
     });
     // Org chips → open that org
     content.querySelectorAll(".attendee-chip--link[data-org-id]").forEach((chip) => {
-      chip.addEventListener("click", () => {
-        document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
-        document.querySelector(".groups-subtab[data-subtab='orgs']")?.classList.add("active");
-        document.querySelectorAll(".groups-panel").forEach((pp) => pp.classList.add("hidden"));
-        $("#groups-panel-orgs")?.classList.remove("hidden");
-        selectOrg(chip.dataset.orgId, { skipToggle: true });
-      });
+      chip.addEventListener("click", () => navToOrg(chip.dataset.orgId));
     });
-    // + org → prompt for org name, link, refresh
+    // + org → pick an existing org (datalist) or create a new one, then refresh both
+    // the person panel AND the Organizations list so the link is visible everywhere.
     $("#person-add-org")?.addEventListener("click", async () => {
-      const name = prompt("Add this person to which organization?");
-      if (!name || !name.trim()) return;
+      const orgs = await api("/api/organizations").catch(() => []);
+      const name = await _promptOrgName(orgs);
+      if (!name) return;
+      // Tie to an existing org when the typed name matches one (case-insensitive);
+      // otherwise send the name so the backend creates a new canonical org.
+      const match = (orgs || []).find(
+        (o) => (o.name || "").trim().toLowerCase() === name.toLowerCase());
       await api(`/api/people/${contactId}/organizations`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim() }),
+        body: JSON.stringify(match ? { org_id: match.id } : { name }),
       });
       selectPerson(contactId);
+      loadGroups();
     });
     // Unlink an organization from this person
     content.querySelectorAll("[data-unlink-org]").forEach((btn) => {
@@ -3350,6 +3412,50 @@ function _activateGroupsSubtab(subtab) {
   $(`#groups-panel-${subtab}`)?.classList.remove("hidden");
 }
 
+// Jump to an organization's canonical record from anywhere in the app.
+function navToOrg(orgId) {
+  if (!orgId) return;
+  switchTab("groups");
+  _activateGroupsSubtab("orgs");
+  selectOrg(orgId, { skipToggle: true });
+}
+
+// Org picker: a typed input backed by a datalist of existing orgs so the user ties
+// to an existing organization instead of creating a near-duplicate. Resolves to the
+// chosen/typed name, or null if cancelled.
+function _promptOrgName(orgs) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1000;";
+    const options = (orgs || [])
+      .map((o) => `<option value="${escapeHtml(o.name || "")}"></option>`).join("");
+    backdrop.innerHTML = `
+      <div style="background:var(--card,#fff);color:var(--fg,inherit);padding:20px;border-radius:10px;min-width:300px;box-shadow:0 8px 30px rgba(0,0,0,.3);">
+        <label style="display:block;margin-bottom:8px;font-weight:600;">Add this person to which organization?</label>
+        <input id="_org-picker-input" list="_org-picker-list" autocomplete="off"
+               placeholder="Type or pick an organization"
+               style="width:100%;box-sizing:border-box;padding:8px;margin-bottom:12px;" />
+        <datalist id="_org-picker-list">${options}</datalist>
+        <div style="display:flex;gap:8px;justify-content:flex-end;">
+          <button id="_org-picker-cancel" class="btn">Cancel</button>
+          <button id="_org-picker-ok" class="btn btn-primary">Add</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    const input = backdrop.querySelector("#_org-picker-input");
+    input.focus();
+    const close = (val) => { backdrop.remove(); resolve(val); };
+    const submit = () => close(input.value.trim() || null);
+    backdrop.querySelector("#_org-picker-ok").addEventListener("click", submit);
+    backdrop.querySelector("#_org-picker-cancel").addEventListener("click", () => close(null));
+    backdrop.addEventListener("click", (e) => { if (e.target === backdrop) close(null); });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); submit(); }
+      if (e.key === "Escape") { e.preventDefault(); close(null); }
+    });
+  });
+}
+
 async function navigateToSearchResult(item) {
   if (!item) return;
   closeSearchOverlay();
@@ -3510,12 +3616,12 @@ async function loadSmartView(viewName) {
         const byOrg = {};
         rows.forEach((r) => {
           const key = r.organization_id || "__none__";
-          if (!byOrg[key]) byOrg[key] = { name: r.org_name || "No organization", items: [] };
+          if (!byOrg[key]) byOrg[key] = { id: r.organization_id || null, name: r.org_name || "No organization", items: [] };
           byOrg[key].items.push(r);
         });
         ul.innerHTML = Object.values(byOrg).map((group) => `
           <li class="smart-commitment-group">
-            <div class="smart-commitment-org">${escapeHtml(group.name)}</div>
+            <div class="smart-commitment-org"${group.id ? ` data-org-id="${escapeHtml(group.id)}" title="Open organization" style="cursor:pointer;text-decoration:underline dotted"` : ""}>${escapeHtml(group.name)}</div>
             ${group.items.map((c) => `
               <div class="smart-commitment-row" data-commitment-id="${escapeHtml(c.id)}">
                 <span class="commitment-dot"></span>
@@ -3530,6 +3636,9 @@ async function loadSmartView(viewName) {
             `).join("")}
           </li>
         `).join("");
+        ul.querySelectorAll(".smart-commitment-org[data-org-id]").forEach((el) => {
+          el.addEventListener("click", () => navToOrg(el.dataset.orgId));
+        });
         ul.querySelectorAll(".commitment-create-task-btn").forEach((btn) => {
           btn.addEventListener("click", async () => {
             btn.disabled = true;
@@ -4452,6 +4561,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   $("#add-person-btn")?.addEventListener("click", openAddPersonModal);
+  $("#merge-orgs-btn")?.addEventListener("click", openMergeOrgsDialog);
 
   // Intake modal
   $("#intake-modal-close").addEventListener("click", closeIntakeModal);
