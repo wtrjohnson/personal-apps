@@ -1248,6 +1248,7 @@ function renderDetail(m) {
 
   $("#detail").innerHTML = `
     <header>
+      <button class="detail-back" title="Back to meetings">← Meetings</button>
       <div class="detail-header-row">
         <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
         <div style="display: flex; gap: 8px;">
@@ -1303,13 +1304,11 @@ function renderDetail(m) {
   if (ci) ci.addEventListener("click", () => _openCanvasFullscreen(ci.src));
 
   $("#detail").querySelectorAll(".attendee-chip--link").forEach((chip) => {
-    chip.addEventListener("click", () => {
-      document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
-      document.querySelector(".groups-subtab[data-subtab='people']")?.classList.add("active");
-      document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
-      $("#groups-panel-people")?.classList.remove("hidden");
-      selectPerson(chip.dataset.personId);
-    });
+    chip.addEventListener("click", () => toggleDetailPersonCard(chip));
+  });
+
+  $("#detail .detail-back")?.addEventListener("click", () => {
+    if (state.selectedMeetingId != null) selectMeeting(state.selectedMeetingId);
   });
 
   $("#detail").querySelectorAll(".detail-contact-unlink").forEach((btn) => {
@@ -1855,6 +1854,7 @@ function renderPeopleTable(people) {
 
 let _currentPersonId = null;   // contact id being edited; null = creating a new person
 let _pePendingCard = null;     // data URL of a freshly scanned card, sent on save
+let _personRefresh = null;     // how the person-card editor refreshes itself after a save
 
 function _personEditorFields(p = {}) {
   const f = (id, label, val, type = "text") =>
@@ -1932,7 +1932,7 @@ function _wirePersonEditor() {
       }
       _pePendingCard = null;
       await loadGroups();
-      if (savedId) selectPerson(savedId);
+      if (savedId) { if (_personRefresh) _personRefresh(savedId); else selectPerson(savedId); }
     } catch {
       alert("Save failed");
     }
@@ -1980,27 +1980,36 @@ function _wireEntityNotes(scope, entityType, entityId, refresh) {
 function openAddPersonModal() {
   _currentPersonId = null;
   _pePendingCard = null;
-  $$("#people-body .stakeholder-row").forEach((r) => r.classList.remove("active"));
-  const panel = $("#person-detail-panel");
-  const content = $("#person-detail-content");
-  if (!panel || !content) return;
-  panel.classList.remove("hidden");
-  content.innerHTML = `
-    <div class="org-detail-header"><h2>Add person</h2></div>
-    ${_personEditorFields({})}`;
+  _personRefresh = (id) => selectPerson(id);
+  const tbody = $("#people-body");
+  if (!tbody) return;
+  tbody.querySelectorAll(".person-expand").forEach((el) => el.remove());
+  tbody.querySelectorAll(".stakeholder-row.active").forEach((r) => r.classList.remove("active"));
+  const tr = document.createElement("tr");
+  tr.className = "person-expand";
+  tr.dataset.personId = "__new__";
+  tr.innerHTML = `<td class="person-expand-cell" colspan="4"><div class="person-expand-inner">
+      <div class="org-detail-header"><h2>Add person</h2></div>
+      ${_personEditorFields({})}
+    </div></td>`;
+  tbody.prepend(tr);
   _wirePersonEditor();
+  tr.scrollIntoView({ block: "nearest", behavior: "smooth" });
   setTimeout(() => $("#pe-name")?.focus(), 10);
 }
 
-async function selectPerson(contactId) {
+// Render a person's full detail card into `container` and wire all its controls.
+// Shared by the People-window inline expansion and the in-meeting attendee card.
+//   opts.onRefresh     — re-render in place after a non-destructive edit (default: re-render container)
+//   opts.onSaveRefresh — how to refresh after the editor save (which reloads the people list)
+//   opts.onDelete      — called after the contact is deleted (default: reload groups)
+async function renderPersonInto(container, contactId, opts = {}) {
+  if (!container) return;
+  const refresh = opts.onRefresh || (() => renderPersonInto(container, contactId, opts));
   _currentPersonId = contactId;
   _pePendingCard = null;
-  $$("#people-body .stakeholder-row").forEach((r) =>
-    r.classList.toggle("active", r.dataset.personId === contactId));
-  const panel = $("#person-detail-panel");
-  const content = $("#person-detail-content");
-  if (!panel || !content) return;
-  panel.classList.remove("hidden");
+  _personRefresh = opts.onSaveRefresh || refresh;
+  const content = container;
   content.innerHTML = `<div class="detail-empty">Loading…</div>`;
   try {
     const p = await api(`/api/people/${contactId}`);
@@ -2059,7 +2068,7 @@ async function selectPerson(contactId) {
       ${_entityNotesHtml(p.entity_notes)}
     `;
     _wirePersonEditor();
-    _wireEntityNotes(content, "contact", contactId, () => selectPerson(contactId));
+    _wireEntityNotes(content, "contact", contactId, refresh);
     content.querySelectorAll(".org-meeting-row[data-mid]").forEach((row) => {
       if (!row.dataset.mid) return;
       row.addEventListener("click", () => selectMeeting(row.dataset.mid));
@@ -2082,7 +2091,7 @@ async function selectPerson(contactId) {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: name.trim() }),
       });
-      selectPerson(contactId);
+      refresh();
     });
     // Unlink an organization from this person
     content.querySelectorAll("[data-unlink-org]").forEach((btn) => {
@@ -2090,15 +2099,14 @@ async function selectPerson(contactId) {
         e.stopPropagation();
         if (!confirm("Remove this person from that organization?")) return;
         await api(`/api/people/${contactId}/organizations/${btn.dataset.unlinkOrg}`, { method: "DELETE" });
-        selectPerson(contactId);
+        refresh();
       });
     });
     // Delete this contact
     $("#person-delete")?.addEventListener("click", async () => {
       if (!confirm(`Delete ${p.name}? This permanently removes the contact.`)) return;
       await api(`/api/people/${contactId}`, { method: "DELETE" });
-      $("#person-detail-panel")?.classList.add("hidden");
-      loadGroups();
+      if (opts.onDelete) opts.onDelete(); else loadGroups();
     });
     // Person's tasks open the task drawer
     content.querySelectorAll("[data-person-task-id]").forEach((row) => {
@@ -2110,6 +2118,54 @@ async function selectPerson(contactId) {
   } catch {
     content.innerHTML = `<div class="detail-empty">Couldn't load person.</div>`;
   }
+}
+
+// People window: click a person row → expand their info inline directly below the row.
+// Click the same row again (or another) to collapse/swap — that's how you "click out".
+async function selectPerson(contactId) {
+  const tbody = $("#people-body");
+  if (!tbody) return;
+  const wasOpen = !!tbody.querySelector(
+    `.person-expand[data-person-id="${CSS.escape(contactId)}"]`);
+  // Collapse any currently-open expansion and clear active states.
+  tbody.querySelectorAll(".person-expand").forEach((el) => el.remove());
+  tbody.querySelectorAll(".stakeholder-row.active").forEach((r) => r.classList.remove("active"));
+  if (wasOpen) { _currentPersonId = null; return; }   // re-click → just collapse
+  const row = tbody.querySelector(`.stakeholder-row[data-person-id="${CSS.escape(contactId)}"]`);
+  if (!row) return;
+  row.classList.add("active");
+  const tr = document.createElement("tr");
+  tr.className = "person-expand";
+  tr.dataset.personId = contactId;
+  tr.innerHTML = `<td class="person-expand-cell" colspan="4"><div class="person-expand-inner"></div></td>`;
+  row.after(tr);
+  await renderPersonInto(tr.querySelector(".person-expand-inner"), contactId, {
+    onSaveRefresh: (id) => selectPerson(id),   // editor save reloads the list, then re-expand
+    onDelete: () => loadGroups(),
+  });
+  tr.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+// Meeting detail: click an attendee chip → expand their info inline inside the detail.
+function toggleDetailPersonCard(chip) {
+  const detail = $("#detail");
+  if (!detail) return;
+  const pid = chip.dataset.personId;
+  const existing = detail.querySelector(".detail-person-card");
+  const wasOpenForThis = existing && existing.dataset.personId === pid;
+  if (existing) existing.remove();
+  detail.querySelectorAll(".attendee-chip--link.active").forEach((c) => c.classList.remove("active"));
+  if (wasOpenForThis) return;   // re-click → just collapse
+  chip.classList.add("active");
+  const card = document.createElement("div");
+  card.className = "detail-person-card";
+  card.dataset.personId = pid;
+  const header = detail.querySelector("header");
+  if (header) header.after(card); else detail.prepend(card);
+  renderPersonInto(card, pid, {
+    onDelete: () => { card.remove(); chip.classList.remove("active"); loadGroups(); },
+  });
+  card.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
 // ---------- Import modal ----------
@@ -3378,6 +3434,15 @@ async function refreshBillSchedule() {
     const d = new Date(s + "T00:00:00");
     return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
   };
+  // The source notice for this event: committee meeting/markup page or the House
+  // floor schedule on docs.house.gov — distinct from the congress.gov bill page.
+  const sourceLink = (r) => {
+    if (!r.url) return "";
+    const label = r.source === "floor" ? "House floor schedule ↗"
+      : /markup/i.test(r.event_type || "") ? "Markup notice ↗"
+      : "Meeting notice ↗";
+    return `<a class="bill-schedule-source" href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${label}</a>`;
+  };
   const body = events.length
     ? events.map((r) => {
         const isFloor = r.source === "floor";
@@ -3398,15 +3463,32 @@ async function refreshBillSchedule() {
                 ${r.bill_title ? `<span class="bill-schedule-title">${escapeHtml(r.bill_title)}</span>` : ""}
               </div>
               ${r.location ? `<div class="bill-schedule-loc">${escapeHtml(r.location)}</div>` : ""}
+              ${sourceLink(r)}
             </div>
           </div>`;
       }).join("")
     : `<div class="bill-schedule-empty">No upcoming committee or floor action for your sponsored bills.</div>`;
+  const collapsed = localStorage.getItem("billScheduleCollapsed") === "1";
+  wrap.classList.toggle("collapsed", collapsed);
   wrap.innerHTML = `
-    <div class="bill-schedule-head">Upcoming — scheduled committee &amp; floor action on <strong>sponsored</strong> bills</div>
-    <div class="bill-schedule-status${status.error ? " is-error" : ""}">${escapeHtml(status.text)}</div>
-    ${body}
+    <button type="button" class="bill-schedule-head" aria-expanded="${!collapsed}">
+      <span class="bill-schedule-chevron">${collapsed ? "▸" : "▾"}</span>
+      <span>Upcoming — scheduled committee &amp; floor action on <strong>sponsored</strong> bills</span>
+      <span class="bill-schedule-count">${events.length}</span>
+    </button>
+    <div class="bill-schedule-body">
+      <div class="bill-schedule-status${status.error ? " is-error" : ""}">${escapeHtml(status.text)}</div>
+      ${body}
+    </div>
   `;
+  wrap.querySelector(".bill-schedule-head")?.addEventListener("click", () => {
+    const nowCollapsed = !wrap.classList.contains("collapsed");
+    wrap.classList.toggle("collapsed", nowCollapsed);
+    localStorage.setItem("billScheduleCollapsed", nowCollapsed ? "1" : "0");
+    const chev = wrap.querySelector(".bill-schedule-chevron");
+    if (chev) chev.textContent = nowCollapsed ? "▸" : "▾";
+    wrap.querySelector(".bill-schedule-head")?.setAttribute("aria-expanded", String(!nowCollapsed));
+  });
 
   // Own once-a-day auto-refresh, independent of the bill sync.
   if (data.needs_sync && data.configured && !_scheduleAutoSynced) {
