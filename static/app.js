@@ -17,8 +17,7 @@ const state = {
   people: [],
   stats: null,
   meetingFilters: { group: "", purpose: "", attendee: "", dateFrom: "", dateTo: "", hasOpenTasks: false },
-  smartView: "today",
-  smartViewTasks: [],
+  billsFilter: { relationship: "all", q: "", congress: "current" },
   dailyPlanTasks: [],
   dailyPlanOrder: [],
 };
@@ -563,7 +562,6 @@ async function toggleTaskDone(task) {
     }
   }
   await refreshTasks();
-  if (state.tab === "smart") loadSmartView(state.smartView);
   if (state.meetings.length) refreshMeetings();
   if (state.tab === "home") renderHome();
 }
@@ -2114,155 +2112,6 @@ async function selectPerson(contactId) {
   }
 }
 
-// ---------- Radial menu ----------
-const TRIG_CX = 35;   // trigger center x in view-groups coords (14 + 21)
-const TRIG_CY = 35;   // trigger center y
-const MAIN_RADIUS = 138; // needs ≥138px for 44px circles at 20° steps with 4px gap
-const SUB_RADIUS  = 95;
-
-const RADIAL_MAIN = [
-  { name: "group",      angle: -10 },
-  { name: "purpose",    angle:  10 },
-  { name: "attendee",   angle:  30 },
-  { name: "date",       angle:  50 },
-  { name: "open-tasks", angle:  70 },
-  { name: "import",     angle:  90 },
-];
-
-function initRadialPositions() {
-  RADIAL_MAIN.forEach(({ name, angle }, i) => {
-    const rad = angle * Math.PI / 180;
-    const tx = TRIG_CX + MAIN_RADIUS * Math.cos(rad);
-    const ty = TRIG_CY + MAIN_RADIUS * Math.sin(rad);
-    const el = $(`[data-radial="${name}"]`);
-    if (!el) return;
-    el.style.setProperty("--tx", tx.toFixed(1) + "px");
-    el.style.setProperty("--ty", ty.toFixed(1) + "px");
-    el.style.setProperty("--ox", TRIG_CX + "px");
-    el.style.setProperty("--oy", TRIG_CY + "px");
-    el.style.transitionDelay = (i * 32) + "ms";
-  });
-}
-
-let _subTimer = null;
-let _openSubName = null;
-
-function openRadial() {
-  const root = $("#radial-root");
-  if (!root) return;
-  // Restore stagger-in delays
-  RADIAL_MAIN.forEach(({ name }, i) => {
-    const el = $(`[data-radial="${name}"]`);
-    if (el) el.style.transitionDelay = (i * 32) + "ms";
-  });
-  root.classList.add("open");
-}
-
-function closeRadial() {
-  const root = $("#radial-root");
-  if (!root) return;
-  closeRadialSub();
-  // Collapse all at once (no stagger on close)
-  RADIAL_MAIN.forEach(({ name }) => {
-    const el = $(`[data-radial="${name}"]`);
-    if (el) el.style.transitionDelay = "0ms";
-  });
-  root.classList.remove("open");
-}
-
-function toggleRadial() {
-  const root = $("#radial-root");
-  if (!root) return;
-  if (root.classList.contains("open")) closeRadial();
-  else openRadial();
-}
-
-function openRadialSub(name) {
-  clearTimeout(_subTimer);
-  if (_openSubName === name) return;
-  closeRadialSub(false);
-  _openSubName = name;
-
-  if (name === "group" || name === "purpose") {
-    const values = name === "group" ? state.facets.groups : state.facets.purposes;
-    if (!values.length) return;
-    buildSubRing(name);
-    const sub = $(`#rsub-${name}`);
-    if (sub) requestAnimationFrame(() => sub.classList.add("open"));
-  } else if (name === "attendee" || name === "date") {
-    const pop = $(`#rpop-${name}`);
-    if (!pop) return;
-    const parentAngle = RADIAL_MAIN.find((m) => m.name === name)?.angle ?? 30;
-    positionPopupNear(pop, parentAngle);
-    pop.classList.add("open");
-    if (name === "attendee") setTimeout(() => $("#rpop-attendee-input")?.focus(), 60);
-  }
-}
-
-function closeRadialSub(clearState = true) {
-  $$(".radial-sub-ring").forEach((el) => el.classList.remove("open"));
-  $$(".radial-popup").forEach((el) => el.classList.remove("open"));
-  if (clearState) _openSubName = null;
-}
-
-function buildSubRing(filterName) {
-  const parentConfig = RADIAL_MAIN.find((m) => m.name === filterName);
-  if (!parentConfig) return;
-
-  const parentRad = parentConfig.angle * Math.PI / 180;
-  const px = TRIG_CX + MAIN_RADIUS * Math.cos(parentRad);
-  const py = TRIG_CY + MAIN_RADIUS * Math.sin(parentRad);
-
-  const allValues = filterName === "group" ? state.facets.groups : state.facets.purposes;
-  const values = allValues.slice(0, 10); // cap at 10 to avoid overlap
-  const activeValue = state.meetingFilters[filterName] || "";
-
-  const maxSpan = Math.min(110, Math.max(0, (values.length - 1) * 24));
-  const spanEach = values.length > 1 ? maxSpan / (values.length - 1) : 0;
-  const startAngle = parentConfig.angle - maxSpan / 2;
-
-  const container = $(`#rsub-${filterName}`);
-  if (!container) return;
-
-  container.innerHTML = values.map((val, i) => {
-    const a = (startAngle + i * spanEach) * Math.PI / 180;
-    const tx = px + SUB_RADIUS * Math.cos(a);
-    const ty = py + SUB_RADIUS * Math.sin(a);
-    const isActive = val === activeValue;
-    return `<button class="radial-sub-item${isActive ? " active" : ""}"
-      data-sub-filter="${filterName}" data-value="${escapeHtml(val)}"
-      style="--tx:${tx.toFixed(1)}px;--ty:${ty.toFixed(1)}px;--ox:${px.toFixed(1)}px;--oy:${py.toFixed(1)}px;transition-delay:${i * 22}ms"
-    >${escapeHtml(val)}</button>`;
-  }).join("");
-}
-
-function positionPopupNear(popupEl, parentAngle) {
-  const rad = parentAngle * Math.PI / 180;
-  const px = TRIG_CX + MAIN_RADIUS * Math.cos(rad);
-  const py = TRIG_CY + MAIN_RADIUS * Math.sin(rad);
-  popupEl.style.left = (px + 46) + "px";
-  popupEl.style.top  = Math.max(4, py - 18) + "px";
-}
-
-function updateRadialFilterState() {
-  const mf = state.meetingFilters;
-  const hasAny = !!(mf.group || mf.purpose || mf.attendee || mf.dateFrom || mf.dateTo || mf.hasOpenTasks);
-
-  // Active dot: purely visual, hides when clear btn is visible (they occupy same spot)
-  const dot = $("#radial-active-dot");
-  if (dot) dot.classList.toggle("visible", false); // clear btn replaces dot when active
-
-  // Clear-all badge: shows only when filters are active
-  const clearBtn = $("#radial-clear-btn");
-  if (clearBtn) clearBtn.hidden = !hasAny;
-
-  $('[data-radial="group"]')?.classList.toggle("filtered", !!mf.group);
-  $('[data-radial="purpose"]')?.classList.toggle("filtered", !!mf.purpose);
-  $('[data-radial="attendee"]')?.classList.toggle("filtered", !!mf.attendee);
-  $('[data-radial="date"]')?.classList.toggle("filtered", !!(mf.dateFrom || mf.dateTo));
-  $('[data-radial="open-tasks"]')?.classList.toggle("toggled", !!mf.hasOpenTasks);
-}
-
 // ---------- Import modal ----------
 let _importFiles = [];
 
@@ -3320,7 +3169,7 @@ function switchTab(tab) {
     updateRelDepth();
   }
   if (tab === "tasks")  refreshTasks();
-  if (tab === "smart")  loadSmartView(state.smartView);
+  if (tab === "bills")  loadBillTracker();
 }
 
 // ---------- Search overlay ----------
@@ -3480,87 +3329,286 @@ function _renderFocusPanel(tasks) {
     : "";
 }
 
-// ---------- Smart Views ----------
-async function loadSmartView(viewName) {
-  state.smartView = viewName;
-  $$(".smart-view-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === viewName));
-  const titles = { today: "Today", upcoming: "Upcoming", neglected: "Neglected", quick_wins: "Quick Wins", waiting: "Waiting on…", commitments: "Commitments" };
-  const descs = {
-    today: "Tasks due today or highest urgency.",
-    upcoming: "Deadlines in the next 7 days.",
-    neglected: "High-priority tasks older than 2 weeks.",
-    quick_wins: "Tasks estimating 30 minutes or less.",
-    waiting: "Tasks blocked by unfinished dependencies.",
-    commitments: "Open commitments made to stakeholders.",
+// ---------- Bill Tracker (Congress.gov) ----------
+let _billsAutoSynced = false;
+let _scheduleAutoSynced = false;
+let _billsRendered = {};   // id -> bill, for the right-click context menu
+
+function _billLabel(b) {
+  return `${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}`;
+}
+
+async function loadBillTracker() {
+  await Promise.all([refreshTrackedBills(), refreshBillMatches(), refreshBillSchedule()]);
+}
+
+function _scheduleStatusLine(data) {
+  // Returns {text, error} for the panel status line.
+  if (!data.configured) return { text: "Set CONGRESS_API_KEY to enable", error: true };
+  if (data.last_error) return { text: "⚠ last sync failed: " + data.last_error, error: true };
+  const res = data.last_result || {};
+  if (res.floor_ok === false) {
+    const c = res.committee_events ?? 0;
+    return { text: `⚠ House floor feed unavailable · ${c} committee`, error: true };
+  }
+  if (data.last_synced) {
+    const when = new Date(data.last_synced).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const c = res.committee_events, f = res.floor_events;
+    const counts = (c == null && f == null) ? "" : ` · ${c ?? 0} committee · ${f ?? 0} floor`;
+    return { text: `Updated ${when}${counts}`, error: false };
+  }
+  return { text: "Not yet checked", error: false };
+}
+
+async function refreshBillSchedule() {
+  const wrap = $("#bill-schedule");
+  if (!wrap) return;
+  wrap.hidden = false;
+  let data;
+  try {
+    data = await api("/api/bill-schedule?congress=" + encodeURIComponent(state.billsFilter.congress));
+  } catch (e) {
+    wrap.innerHTML = `<div class="bill-schedule-head">Upcoming — sponsored bills</div>
+      <div class="bill-schedule-status is-error">⚠ couldn't load the schedule</div>`;
+    return;
+  }
+  const events = data.events || [];
+  const status = _scheduleStatusLine(data);
+  const fmtDate = (s) => {
+    const d = new Date(s + "T00:00:00");
+    return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
   };
-  const vName = viewName;
-  if ($("#smart-view-title")) $("#smart-view-title").textContent = titles[vName] || vName;
-  if ($("#smart-view-desc"))  $("#smart-view-desc").textContent = descs[vName] || "";
-
-  const ul = $("#smart-view-tasks");
-  ul.innerHTML = `<li class="empty">Loading…</li>`;
-
-  if (viewName === "commitments") {
-    try {
-      const allRows = await api("/api/commitments");
-      const rows = allRows.filter((r) => !["completed", "closed_no_action"].includes(r.status));
-      if (!rows.length) {
-        ul.innerHTML = `<li class="empty">No open commitments.</li>`;
-      } else {
-        const byOrg = {};
-        rows.forEach((r) => {
-          const key = r.organization_id || "__none__";
-          if (!byOrg[key]) byOrg[key] = { name: r.org_name || "No organization", items: [] };
-          byOrg[key].items.push(r);
-        });
-        ul.innerHTML = Object.values(byOrg).map((group) => `
-          <li class="smart-commitment-group">
-            <div class="smart-commitment-org">${escapeHtml(group.name)}</div>
-            ${group.items.map((c) => `
-              <div class="smart-commitment-row" data-commitment-id="${escapeHtml(c.id)}">
-                <span class="commitment-dot"></span>
-                <div class="smart-commitment-body">
-                  <div class="smart-commitment-text">${escapeHtml(c.text)}</div>
-                  <div class="smart-commitment-meta">
-                    ${c.meeting_date ? `<span>${escapeHtml(c.meeting_date)}</span>` : ""}
-                    ${c.task_id ? `<span class="commitment-linked-task">Task created</span>` : `<button class="commitment-create-task-btn" data-id="${escapeHtml(c.id)}">+ Create task</button>`}
-                  </div>
-                </div>
+  const body = events.length
+    ? events.map((r) => {
+        const isFloor = r.source === "floor";
+        const kind = isFloor ? "House floor"
+          : `${escapeHtml(r.event_type || "Meeting")}${r.committee_name ? " — " + escapeHtml(r.committee_name) : ""}`;
+        const statusOff = r.status && r.status !== "Scheduled";
+        return `
+          <div class="bill-schedule-row${statusOff ? " is-off" : ""}">
+            <div class="bill-schedule-date">${escapeHtml(fmtDate(r.event_date))}</div>
+            <div class="bill-schedule-main">
+              <div class="bill-schedule-kind">
+                <span class="bill-sched-tag bill-sched-${isFloor ? "floor" : "committee"}">${escapeHtml(kind)}</span>
+                ${statusOff ? `<span class="bill-sched-status">${escapeHtml(r.status)}</span>` : ""}
+                ${r.working_on ? `<span class="bill-star" title="Will's Bills">★</span>` : ""}
               </div>
-            `).join("")}
-          </li>
-        `).join("");
-        ul.querySelectorAll(".commitment-create-task-btn").forEach((btn) => {
-          btn.addEventListener("click", async () => {
-            btn.disabled = true;
-            btn.textContent = "Creating…";
-            try {
-              await api(`/api/commitments/${btn.dataset.id}/create-task`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
-              loadSmartView("commitments");
-            } catch (e) {
-              btn.disabled = false;
-              btn.textContent = "+ Create task";
-            }
-          });
-        });
-      }
-    } catch (e) {
-      ul.innerHTML = `<li class="empty">Failed to load.</li>`;
-    }
+              <div class="bill-schedule-bill">
+                <a href="${escapeHtml(r.bill_url || r.url || "#")}" target="_blank" rel="noopener">${escapeHtml(r.bill_type)} ${escapeHtml(r.bill_number)}</a>
+                ${r.bill_title ? `<span class="bill-schedule-title">${escapeHtml(r.bill_title)}</span>` : ""}
+              </div>
+              ${r.location ? `<div class="bill-schedule-loc">${escapeHtml(r.location)}</div>` : ""}
+            </div>
+          </div>`;
+      }).join("")
+    : `<div class="bill-schedule-empty">No upcoming committee or floor action for your sponsored bills.</div>`;
+  wrap.innerHTML = `
+    <div class="bill-schedule-head">Upcoming — scheduled committee &amp; floor action on <strong>sponsored</strong> bills</div>
+    <div class="bill-schedule-status${status.error ? " is-error" : ""}">${escapeHtml(status.text)}</div>
+    ${body}
+  `;
+
+  // Own once-a-day auto-refresh, independent of the bill sync.
+  if (data.needs_sync && data.configured && !_scheduleAutoSynced) {
+    _scheduleAutoSynced = true;
+    const st = wrap.querySelector(".bill-schedule-status");
+    if (st) { st.textContent = "Checking…"; st.classList.remove("is-error"); }
+    try {
+      await fetch("/api/bill-schedule/sync", { method: "POST" });
+    } catch (e) { /* surfaced on reload via stored error */ }
+    await refreshBillSchedule();
+  }
+}
+
+async function refreshTrackedBills() {
+  const body = $("#bills-tracker-body");
+  if (body && !body.children.length) body.innerHTML = `<tr><td colspan="5" class="empty">Loading…</td></tr>`;
+  let data;
+  try {
+    const f = state.billsFilter;
+    const qs = new URLSearchParams({ relationship: f.relationship, q: f.q, congress: f.congress });
+    data = await api("/api/tracked-bills?" + qs.toString());
+  } catch (e) {
+    if (body) body.innerHTML = `<tr><td colspan="5" class="empty">Failed to load.</td></tr>`;
     return;
   }
 
-  try {
-    const data = await api("/api/tasks?smart_view=" + encodeURIComponent(viewName) + "&status=open");
-    state.smartViewTasks = data.tasks;
-    if (!data.tasks.length) {
-      ul.innerHTML = `<li class="empty">No tasks in this view.</li>`;
-    } else {
-      ul.innerHTML = data.tasks.map((t, i) => _taskRow(t, i, "smart-view")).join("");
-    }
-  } catch (e) {
-    ul.innerHTML = `<li class="empty">Failed to load.</li>`;
+  // Sync status label
+  const label = $("#bills-sync-label");
+  if (label) {
+    label.classList.toggle("is-error", !!data.last_error);
+    if (!data.configured) label.textContent = "Not configured";
+    else if (data.last_error) label.textContent = "⚠ last sync failed: " + data.last_error;
+    else if (data.last_synced) label.textContent = "Synced " + new Date(data.last_synced).toLocaleString();
+    else label.textContent = "Never synced";
   }
+
+  // Congress selector
+  const sel = $("#bills-congress-select");
+  if (sel) {
+    const cur = data.current_congress;
+    const opts = [`<option value="current">${_ordinalNum(cur)} Congress</option>`];
+    data.congresses.filter((c) => c !== cur).forEach((c) => {
+      opts.push(`<option value="${c}">${_ordinalNum(c)} Congress</option>`);
+    });
+    opts.push(`<option value="all">All Congresses</option>`);
+    sel.innerHTML = opts.join("");
+    sel.value = state.billsFilter.congress;
+  }
+
+  // Count badges on the sub-tabs
+  const counts = data.counts || {};
+  $$("[data-bills-count]").forEach((el) => {
+    const n = counts[el.dataset.billsCount];
+    el.textContent = (n === undefined || n === null) ? "" : n;
+  });
+
+  // Bill list
+  if (body) {
+    const bills = data.bills || [];
+    _billsRendered = {};
+    bills.forEach((b) => { _billsRendered[b.id] = b; });
+    if (!bills.length) {
+      body.innerHTML = `<tr><td colspan="5" class="empty">${data.configured ? "No bills yet — try Sync now." : "Set CONGRESS_API_KEY to enable the tracker."}</td></tr>`;
+    } else {
+      body.innerHTML = bills.map((b) => `
+        <tr data-bill-id="${escapeHtml(b.id)}">
+          <td>${b.working_on ? `<span class="bill-star" title="Will's Bills">★</span>` : ""}<a href="${escapeHtml(b.url || "#")}" target="_blank" rel="noopener">${_billLabel(b)}</a></td>
+          <td class="bill-title-cell">${escapeHtml(b.title || "")}</td>
+          <td><span class="bill-role bill-role-${escapeHtml(b.relationship)}">${b.relationship === "sponsored" ? "Sponsor" : "Cosponsor"}</span></td>
+          <td>${escapeHtml(b.introduced_date || "—")}</td>
+          <td class="bill-action-cell">${escapeHtml(b.latest_action || "")}</td>
+        </tr>
+      `).join("");
+    }
+  }
+
+  // Auto-sync on first open of the day (once per session)
+  if (data.needs_sync && data.configured && !_billsAutoSynced) {
+    _billsAutoSynced = true;
+    await syncBills(true);
+  }
+}
+
+async function refreshBillMatches() {
+  const wrap = $("#bill-matches");
+  if (!wrap) return;
+  let rows;
+  try {
+    rows = await api("/api/bill-matches");
+  } catch (e) {
+    wrap.hidden = true;
+    return;
+  }
+  if (!rows.length) {
+    wrap.hidden = true;
+    wrap.innerHTML = "";
+    return;
+  }
+  wrap.hidden = false;
+  wrap.innerHTML = `
+    <div class="bill-matches-head">Bills we were asked about — Blake has now acted on these</div>
+    ${rows.map((r) => {
+      const askers = (r.askers || []).map((a) =>
+        escapeHtml(a.name || a.org || "someone") + (a.org && a.name ? ` (${escapeHtml(a.org)})` : "")
+      ).filter(Boolean);
+      const askedBy = askers.length ? askers.join(", ") : (r.meeting_org ? escapeHtml(r.meeting_org) : "a meeting note");
+      const verb = r.relationship === "sponsored" ? "introduced" : "cosponsored";
+      const notified = r.status === "notified";
+      return `
+        <div class="bill-match-card${notified ? " is-notified" : ""}" data-flag-id="${escapeHtml(r.id)}">
+          <div class="bill-match-main">
+            <div class="bill-match-bill">
+              <a href="${escapeHtml(r.url || "#")}" target="_blank" rel="noopener">${escapeHtml(r.bill_type)} ${escapeHtml(r.bill_number)}</a>
+              <span class="bill-role bill-role-${escapeHtml(r.relationship)}">Blake ${verb}</span>
+            </div>
+            <div class="bill-match-title">${escapeHtml(r.title || "")}</div>
+            <div class="bill-match-meta">
+              Asked by <strong>${askedBy}</strong>
+              ${r.meeting_date ? ` · ${escapeHtml(r.meeting_date)}` : ""}
+              ${r.meeting_topic ? ` · ${escapeHtml(r.meeting_topic)}` : ""}
+            </div>
+          </div>
+          <div class="bill-match-actions">
+            ${notified
+              ? `<span class="bill-match-done">✓ Notified</span><button class="linkish" data-match-status="new">Undo</button>`
+              : `<button class="primary-btn-sm" data-match-status="notified">Mark notified</button>
+                 <button class="linkish" data-match-status="dismissed">Dismiss</button>`}
+          </div>
+        </div>`;
+    }).join("")}
+  `;
+  wrap.querySelectorAll("[data-match-status]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const card = btn.closest(".bill-match-card");
+      const id = card?.dataset.flagId;
+      if (!id) return;
+      try {
+        await api(`/api/bill-matches/${id}/status`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: btn.dataset.matchStatus }),
+        });
+        refreshBillMatches();
+      } catch (e) { /* ignore */ }
+    });
+  });
+}
+
+async function syncBills(silent) {
+  const btn = $("#bills-sync-btn");
+  const label = $("#bills-sync-label");
+  if (btn) { btn.disabled = true; btn.textContent = "Syncing…"; btn.classList.add("is-syncing"); }
+  try {
+    const r = await fetch("/api/tracked-bills/sync", { method: "POST" });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${r.status}`);
+    }
+    await Promise.all([refreshTrackedBills(), refreshBillMatches()]);
+    // Refresh the upcoming schedule too — best-effort, never fails the bill sync.
+    try {
+      await fetch("/api/bill-schedule/sync", { method: "POST" });
+    } catch (e2) { console.error("schedule sync failed", e2); }
+    await refreshBillSchedule();
+  } catch (e) {
+    if (label) label.textContent = "Sync failed: " + e.message;
+    console.error("bill sync failed", e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Sync now"; btn.classList.remove("is-syncing"); }
+  }
+}
+
+// Right-click a bill row → toggle "Will's Bills"
+function openBillContextMenu(e, bill) {
+  e.preventDefault();
+  const menu = $("#bill-ctx-menu");
+  if (!menu) return;
+  menu.dataset.billId = bill.id;
+  menu.innerHTML = bill.working_on
+    ? `<div class="ctx-item" data-bill-action="unset">☆ Remove from Will's Bills</div>`
+    : `<div class="ctx-item" data-bill-action="set">★ Add to Will's Bills</div>`;
+  const menuW = 220, menuH = 48;
+  let x = e.clientX, y = e.clientY;
+  if (x + menuW > window.innerWidth)  x = window.innerWidth - menuW - 8;
+  if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - 8;
+  menu.style.left = x + "px";
+  menu.style.top = y + "px";
+  menu.classList.remove("hidden");
+  menu.classList.add("visible");
+}
+
+function closeBillContextMenu() {
+  const menu = $("#bill-ctx-menu");
+  if (!menu) return;
+  menu.classList.remove("visible");
+  menu.classList.add("hidden");
+  delete menu.dataset.billId;
+}
+
+function _ordinalNum(n) {
+  const s = ["th", "st", "nd", "rd"], v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
 }
 
 // ---------- Snooze popup ----------
@@ -3593,7 +3641,6 @@ async function confirmSnooze() {
   });
   closeSnoozePopup();
   await refreshTasks();
-  if (state.tab === "smart") loadSmartView(state.smartView);
 }
 
 // ---------- Focus mode ----------
@@ -3641,7 +3688,7 @@ const CMD_STATIC = [
   { label: "Go to Home",        icon: "🏠", action: () => { closeCommandPalette(); switchTab("home"); } },
   { label: "Go to Tasks",       icon: "✓",  action: () => { closeCommandPalette(); switchTab("tasks"); } },
   { label: "Go to Relationships", icon: "🤝", action: () => { closeCommandPalette(); switchTab("groups"); } },
-  { label: "Go to Smart Views", icon: "⚡", action: () => { closeCommandPalette(); switchTab("smart"); } },
+  { label: "Go to Bill Tracker", icon: "📜", action: () => { closeCommandPalette(); switchTab("bills"); } },
   { label: "Add new task",      icon: "+",  action: () => { closeCommandPalette(); openNLModal(); } },
   { label: "Focus Mode",        icon: "🎯", action: () => { closeCommandPalette(); openFocusMode(state.stats?.top_urgency?.[0]); } },
   { label: "Daily Plan",        icon: "📋", action: () => { closeCommandPalette(); openDailyPlan(); } },
@@ -4237,7 +4284,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.key === "Enter") { e.preventDefault(); submitAddSubtaskModal(); }
   });
 
-  // Subtask toggle chips (event delegation on paper-stack + smart-view)
+  // Subtask toggle chips (event delegation on paper-stack)
   document.addEventListener("click", (e) => {
     const chip = e.target.closest("[data-subtask-toggle]");
     if (!chip) return;
@@ -4250,13 +4297,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     const li = e.target.closest("li[data-task-id]");
     if (!li || !e.target.closest(".action-toggle")) return;
     const taskId = li.dataset.taskId;
-    // Find the task in any state list or smart view
-    let task = state.smartViewTasks.find((t) => t.id === taskId);
-    if (!task) {
-      for (const paper of ["active", "backburner", "done"]) {
-        task = state.tasksByStatus[paper].find((t) => t.id === taskId);
-        if (task) break;
-      }
+    // Find the task in any state list
+    let task = null;
+    for (const paper of ["active", "backburner", "done"]) {
+      task = state.tasksByStatus[paper].find((t) => t.id === taskId);
+      if (task) break;
     }
     // Fallback: create minimal task object for toggle
     if (!task) task = { id: taskId, done: li.classList.contains("done") };
@@ -4291,146 +4336,61 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // Smart view sidebar buttons
-  $("#view-smart")?.addEventListener("click", (e) => {
-    const btn = e.target.closest(".smart-view-btn");
-    if (btn) loadSmartView(btn.dataset.view);
+  // Bill Tracker: sync, sub-tabs, search, congress selector
+  $("#bills-sync-btn")?.addEventListener("click", () => syncBills(false));
+  $("#view-bills")?.addEventListener("click", (e) => {
+    const tab = e.target.closest(".groups-subtab[data-bills-rel]");
+    if (!tab) return;
+    document.querySelectorAll(".groups-subtab[data-bills-rel]").forEach((b) => b.classList.remove("active"));
+    tab.classList.add("active");
+    state.billsFilter.relationship = tab.dataset.billsRel;
+    refreshTrackedBills();
   });
-
-  // Smart view task interactions (toggle, context menu, etc.)
-  $("#smart-view-tasks")?.addEventListener("click", async (e) => {
-    const li = e.target.closest("li[data-task-id]");
-    if (!li) return;
-    const idx = parseInt(li.dataset.idx, 10);
-    const task = state.smartViewTasks[idx];
-    if (!task) return;
-    if (e.target.closest(".action-toggle")) {
-      await toggleTaskDone(task);
-    } else if (e.target.closest(".action-bb")) {
-      await toggleTaskBackburner(task);
-    }
+  $("#bills-search")?.addEventListener("input", debounce(() => {
+    state.billsFilter.q = $("#bills-search").value.trim();
+    refreshTrackedBills();
+  }, 250));
+  $("#bills-congress-select")?.addEventListener("change", () => {
+    state.billsFilter.congress = $("#bills-congress-select").value;
+    refreshTrackedBills();
+    refreshBillSchedule();
   });
-  $("#smart-view-tasks")?.addEventListener("contextmenu", (e) => {
-    const li = e.target.closest("li[data-task-id]");
-    if (!li) return;
-    const idx = parseInt(li.dataset.idx, 10);
-    const task = state.smartViewTasks[idx];
-    if (task) openContextMenu(e, task);
+  // Right-click a bill row → Will's Bills toggle menu
+  $("#bills-tracker-body")?.addEventListener("contextmenu", (e) => {
+    const tr = e.target.closest("tr[data-bill-id]");
+    if (!tr) return;
+    const bill = _billsRendered[tr.dataset.billId];
+    if (bill) openBillContextMenu(e, bill);
   });
+  $("#bill-ctx-menu")?.addEventListener("click", async (e) => {
+    const item = e.target.closest(".ctx-item");
+    const menu = $("#bill-ctx-menu");
+    const id = menu?.dataset.billId;
+    if (!item || !id) return;
+    const working = item.dataset.billAction === "set";
+    closeBillContextMenu();
+    try {
+      await api(`/api/tracked-bills/${id}/working`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ working }),
+      });
+      refreshTrackedBills();
+    } catch (err) { console.error("toggle Will's Bills failed", err); }
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#bill-ctx-menu")) closeBillContextMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeBillContextMenu();
+  }, true);
 
   // Snoozed filter
   $("#t-snoozed")?.addEventListener("change", () => { refreshTasks(); updateTaskFilterToggleState(); });
 
-  // ---- Radial menu setup ----
-  initRadialPositions();
-
-  // Trigger: click to toggle ring
-  $("#radial-trigger")?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    toggleRadial();
-  });
-
-  // Clear-all button
-  $("#radial-clear-btn")?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    state.meetingFilters = { group: "", purpose: "", attendee: "", dateFrom: "", dateTo: "", hasOpenTasks: false };
-    const ai = $("#rpop-attendee-input"); if (ai) ai.value = "";
-    const df = $("#rpop-date-from");      if (df) df.value = "";
-    const dt = $("#rpop-date-to");        if (dt) dt.value = "";
-    closeRadial();
-    updateRadialFilterState();
-    refreshMeetings();
-  });
-
-  // Main ring items: hover → open sub-ring; click → immediate action or toggle sub
-  $$("[data-radial]").forEach((el) => {
-    const name = el.dataset.radial;
-
-    el.addEventListener("mouseenter", () => {
-      clearTimeout(_subTimer);
-      if (name !== "import" && name !== "open-tasks") {
-        _subTimer = setTimeout(() => openRadialSub(name), 100);
-      }
-    });
-    el.addEventListener("mouseleave", () => {
-      clearTimeout(_subTimer);
-      _subTimer = setTimeout(closeRadialSub, 420);
-    });
-
-    el.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (name === "import") {
-        closeRadial();
-        openImportModal();
-      } else if (name === "open-tasks") {
-        state.meetingFilters.hasOpenTasks = !state.meetingFilters.hasOpenTasks;
-        updateRadialFilterState();
-        refreshMeetings();
-      } else {
-        // Toggle sub-ring open/closed
-        if (_openSubName === name) closeRadialSub();
-        else openRadialSub(name);
-      }
-    });
-  });
-
-  // Cancel sub-close when hovering sub-items or popups (mouseover bubbles)
-  document.addEventListener("mouseover", (e) => {
-    if (e.target.closest(".radial-sub-item, .radial-popup")) {
-      clearTimeout(_subTimer);
-    }
-  });
-  document.addEventListener("mouseout", (e) => {
-    const leaving   = e.target.closest(".radial-sub-item, .radial-popup");
-    const goingTo   = e.relatedTarget?.closest(".radial-sub-item, .radial-popup, [data-radial]");
-    if (leaving && !goingTo) {
-      _subTimer = setTimeout(closeRadialSub, 420);
-    }
-  });
-
-  // Sub-ring item clicks (group / purpose values)
-  document.addEventListener("click", (e) => {
-    const si = e.target.closest(".radial-sub-item");
-    if (!si) return;
-    const filter = si.dataset.subFilter;
-    const value  = si.dataset.value;
-    if (!filter) return;
-    // Toggle: click active value to deselect
-    state.meetingFilters[filter] = state.meetingFilters[filter] === value ? "" : value;
-    closeRadial();
-    updateRadialFilterState();
-    refreshMeetings();
-  });
-
-  // Attendee popup input
-  $("#rpop-attendee-input")?.addEventListener("input", () => {
-    state.meetingFilters.attendee = $("#rpop-attendee-input").value.trim();
-    updateRadialFilterState();
-    refreshMeetingsDebounced();
-  });
-
-  // Date popup inputs
-  $("#rpop-date-from")?.addEventListener("change", () => {
-    state.meetingFilters.dateFrom = $("#rpop-date-from").value;
-    updateRadialFilterState();
-    refreshMeetings();
-  });
-  $("#rpop-date-to")?.addEventListener("change", () => {
-    state.meetingFilters.dateTo = $("#rpop-date-to").value;
-    updateRadialFilterState();
-    refreshMeetings();
-  });
-
   // Relationships back buttons
   document.querySelector("#rel-back-to-list")?.addEventListener("click", () => selectOrg(null));
   document.querySelector("#rel-back-to-meetings")?.addEventListener("click", () => selectMeeting(null));
-
-  // Close ring when clicking outside radial root
-  document.addEventListener("click", (e) => {
-    if (!e.target.closest("#radial-root") && $("#radial-root")?.classList.contains("open")) {
-      closeRadial();
-    }
-  });
 
   // Meeting list click
   $("#meetings").addEventListener("click", (e) => {
@@ -4439,10 +4399,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
 
-  // Groups sub-tab toggle
-  document.querySelectorAll(".groups-subtab").forEach((btn) => {
+  // Groups sub-tab toggle (scoped to the Relationships bar so it ignores other
+  // reusers of .groups-subtab such as the Bill Tracker's relationship tabs)
+  document.querySelectorAll(".groups-subtabs-bar .groups-subtab").forEach((btn) => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".groups-subtabs-bar .groups-subtab").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       const subtab = btn.dataset.subtab;
       document.querySelectorAll(".groups-panel").forEach((p) => p.classList.add("hidden"));
@@ -4649,7 +4610,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!$("#edit-modal-backdrop").classList.contains("hidden"))    { closeEditModal(); return; }
       if (!$("#nl-modal-backdrop").classList.contains("hidden"))       { closeNLModal(); return; }
       if (state.drawerTask) { closeDrawer(); return; }
-      if ($("#radial-root")?.classList.contains("open")) { closeRadial(); return; }
       if (typing) { document.activeElement.blur(); return; }
     }
     if (typing) return;
@@ -4657,7 +4617,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.key === "1") { e.preventDefault(); switchTab("home"); return; }
     if (e.key === "2") { e.preventDefault(); switchTab("tasks"); return; }
     if (e.key === "3") { e.preventDefault(); switchTab("groups"); return; }
-    if (e.key === "4") { e.preventDefault(); switchTab("smart"); return; }
+    if (e.key === "4") { e.preventDefault(); switchTab("bills"); return; }
     if (e.key === "f") { e.preventDefault(); openFocusMode(state.stats?.top_urgency?.[0]); return; }
     if (e.key === "w") { e.preventDefault(); openIntakeModal(); return; }
 

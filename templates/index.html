@@ -221,46 +221,6 @@
       <!-- RELATIONSHIPS (merged meetings + groups) -->
       <section class="view" id="view-groups">
 
-        <!-- Floating radial filter menu (position: absolute within this view) -->
-        <div class="radial-root" id="radial-root">
-          <button class="radial-trigger" id="radial-trigger" aria-label="Filters &amp; Import" title="Filters &amp; Import">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="4" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="10" y1="18" x2="14" y2="18"/>
-            </svg>
-          </button>
-          <button class="radial-clear-btn" id="radial-clear-btn" hidden title="Clear all filters">×</button>
-          <button class="radial-item" data-radial="group" data-label="Group">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.2"/><path d="M2.8 19.5c.8-3.2 3.3-5 6.2-5s5.4 1.8 6.2 5"/><circle cx="17" cy="8" r="2.5"/><path d="M15 13.5c2.5 0 4.4 1.3 5.2 4"/></svg>
-          </button>
-          <button class="radial-item" data-radial="purpose" data-label="Purpose">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
-          </button>
-          <button class="radial-item" data-radial="attendee" data-label="Attendees">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-          </button>
-          <button class="radial-item" data-radial="date" data-label="Date">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17"/><path d="M8 3v4M16 3v4"/></svg>
-          </button>
-          <button class="radial-item" data-radial="open-tasks" id="radial-open-tasks" data-label="Open tasks only">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="m8 12 3 3 5-6"/></svg>
-          </button>
-          <button class="radial-item" data-radial="import" data-label="Import notes">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          </button>
-          <div class="radial-sub-ring" id="rsub-group"></div>
-          <div class="radial-sub-ring" id="rsub-purpose"></div>
-          <div class="radial-popup" id="rpop-attendee">
-            <div class="rpop-label">Filter by attendee</div>
-            <input id="rpop-attendee-input" type="text" placeholder="Search by name…" autocomplete="off">
-          </div>
-          <div class="radial-popup" id="rpop-date">
-            <div class="rpop-date-grid">
-              <label>From</label><input id="rpop-date-from" type="date">
-              <label>To</label><input id="rpop-date-to" type="date">
-            </div>
-          </div>
-        </div>
-
         <!-- 3-column layout -->
         <div class="rel-layout">
 
@@ -352,42 +312,48 @@
         </div>
       </section>
 
-      <!-- SMART VIEWS -->
-      <section class="view" id="view-smart">
-        <div class="smart-views-layout">
-          <div class="smart-views-sidebar">
-            <div class="smart-views-label">Smart Views</div>
-            <button class="smart-view-btn active" data-view="today">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
-              Today
-            </button>
-            <button class="smart-view-btn" data-view="upcoming">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17"/><path d="M8 3v4M16 3v4"/></svg>
-              Upcoming
-            </button>
-            <button class="smart-view-btn" data-view="neglected">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-              Neglected
-            </button>
-            <button class="smart-view-btn" data-view="quick_wins">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-              Quick Wins
-            </button>
-            <button class="smart-view-btn" data-view="waiting">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-              Waiting
-            </button>
-            <button class="smart-view-btn" data-view="commitments">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-              Commitments
-            </button>
-          </div>
-          <div class="smart-views-content">
-            <div class="smart-view-header" id="smart-view-header">
-              <h2 id="smart-view-title">Today</h2>
-              <p id="smart-view-desc" class="smart-view-desc"></p>
+      <!-- BILL TRACKER -->
+      <section class="view" id="view-bills">
+        <div class="bills-tracker">
+          <div class="bills-tracker-header">
+            <div class="bills-tracker-title-block">
+              <h2 class="bills-tracker-title">Bill Tracker</h2>
+              <p class="bills-tracker-sub">Rep. Blake Moore — sponsored &amp; cosponsored legislation</p>
             </div>
-            <ul class="tasks" id="smart-view-tasks"></ul>
+            <div class="bills-tracker-actions">
+              <select id="bills-congress-select" class="bills-congress-select" title="Congress"></select>
+              <span id="bills-sync-label" class="bills-sync-label"></span>
+              <button id="bills-sync-btn" class="secondary-btn-sm">Sync now</button>
+            </div>
+          </div>
+
+          <!-- Upcoming committee hearings/markups + House-floor consideration for tracked bills -->
+          <div class="bill-schedule" id="bill-schedule"></div>
+
+          <!-- Auto-match feed: bills someone asked us about that Blake has now (co)sponsored -->
+          <div class="bill-matches" id="bill-matches" hidden></div>
+
+          <div class="bills-subtabs-bar">
+            <button class="groups-subtab active" data-bills-rel="all">All <span class="bills-count" data-bills-count="all"></span></button>
+            <button class="groups-subtab" data-bills-rel="sponsored">Sponsored <span class="bills-count" data-bills-count="sponsored"></span></button>
+            <button class="groups-subtab" data-bills-rel="cosponsored">Cosponsored <span class="bills-count" data-bills-count="cosponsored"></span></button>
+            <button class="groups-subtab" data-bills-rel="working">Will's Bills <span class="bills-count" data-bills-count="working"></span></button>
+            <input type="text" id="bills-search" class="bills-search" placeholder="Search bills…" autocomplete="off">
+          </div>
+
+          <div class="bills-list-wrap">
+            <table class="groups bills-tracker-table">
+              <thead>
+                <tr>
+                  <th>Bill</th>
+                  <th>Title</th>
+                  <th>Role</th>
+                  <th>Introduced</th>
+                  <th>Latest action</th>
+                </tr>
+              </thead>
+              <tbody id="bills-tracker-body"></tbody>
+            </table>
           </div>
         </div>
       </section>
@@ -407,6 +373,7 @@
 
   <!-- Context menu -->
   <div id="ctx-menu" class="ctx-menu hidden" role="menu"></div>
+  <div id="bill-ctx-menu" class="ctx-menu hidden" role="menu"></div>
 
   <!-- Toast container -->
   <div id="toast-container" class="toast-container"></div>
@@ -740,8 +707,8 @@
         <button class="dock-sub-item" id="dock-sub-bills">Bills</button>
       </div>
     </div>
-    <button class="dock-btn" data-tab="smart" title="Smart Views (4)">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+    <button class="dock-btn" data-tab="bills" title="Bill Tracker (4)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 3H14l5 5v11.5A1.5 1.5 0 0 1 17.5 21h-13A1.5 1.5 0 0 1 3 19.5v-15A1.5 1.5 0 0 1 4.5 3z"/><path d="M14 3v5h5"/><path d="M8 13h7M8 17h7"/></svg>
     </button>
     <div class="dock-divider"></div>
     <button class="dock-btn dock-search-btn" id="dock-search-btn" title="Search (/)">
