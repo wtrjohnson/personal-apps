@@ -1870,19 +1870,13 @@ const _TL_META = {
   task_completed: { cls: "done",       icon: "✓", title: "Task completed" },
   note:           { cls: "note",       icon: "📝", title: "Note" },
   bill:           { cls: "bill",       icon: "📄", title: "Bill referenced" },
+  bill_notified:  { cls: "billnotif",  icon: "📣", title: "Bill update — notified" },
 };
 
-async function renderOrgTimeline(orgId, container) {
+// Renders a list of timeline events (shared by the org and person timelines) into a
+// container. Meeting events are clickable into the meeting detail.
+function _renderTimelineEvents(events, container) {
   if (!container) return;
-  let events;
-  try {
-    const r = await api(`/api/organizations/${orgId}/timeline`);
-    events = r.events || [];
-  } catch {
-    container.innerHTML = `<div class="detail-empty-inline">Couldn't load the timeline.</div>`;
-    return;
-  }
-  if (state.selectedOrgId !== orgId) return;   // user navigated away mid-fetch
   if (!events.length) {
     container.innerHTML = `<div class="detail-empty-inline">No activity yet.</div>`;
     return;
@@ -1927,6 +1921,34 @@ async function renderOrgTimeline(orgId, container) {
   container.querySelectorAll(".tl-event--click[data-mid]").forEach((row) => {
     row.addEventListener("click", () => selectMeeting(row.dataset.mid));
   });
+}
+
+async function renderOrgTimeline(orgId, container) {
+  if (!container) return;
+  let events;
+  try {
+    const r = await api(`/api/organizations/${orgId}/timeline`);
+    events = r.events || [];
+  } catch {
+    container.innerHTML = `<div class="detail-empty-inline">Couldn't load the timeline.</div>`;
+    return;
+  }
+  if (state.selectedOrgId !== orgId) return;   // user navigated away mid-fetch
+  _renderTimelineEvents(events, container);
+}
+
+async function renderPersonTimeline(contactId, container) {
+  if (!container) return;
+  let events;
+  try {
+    const r = await api(`/api/people/${contactId}/timeline`);
+    events = r.events || [];
+  } catch {
+    container.innerHTML = `<div class="detail-empty-inline">Couldn't load the timeline.</div>`;
+    return;
+  }
+  if (_currentPersonId !== contactId) return;   // user navigated away mid-fetch
+  _renderTimelineEvents(events, container);
 }
 
 function renderPeopleTable(people) {
@@ -2163,9 +2185,16 @@ async function renderPersonInto(container, contactId, opts = {}) {
       </div>
       ${meetingsHtml ? `<div class="org-detail-section"><div class="drawer-section-label">Meeting History</div>${meetingsHtml}</div>` : ""}
       ${_entityNotesHtml(p.entity_notes)}
+      <div class="org-detail-section org-timeline-wrap">
+        <div class="drawer-section-label">Activity</div>
+        <div class="org-timeline" id="person-timeline">
+          <div class="detail-empty-inline">Loading timeline…</div>
+        </div>
+      </div>
     `;
     _wirePersonEditor();
     _wireEntityNotes(content, "contact", contactId, refresh);
+    renderPersonTimeline(contactId, content.querySelector("#person-timeline"));
     content.querySelectorAll(".org-meeting-row[data-mid]").forEach((row) => {
       if (!row.dataset.mid) return;
       row.addEventListener("click", () => selectMeeting(row.dataset.mid));

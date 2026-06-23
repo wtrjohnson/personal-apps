@@ -1710,6 +1710,7 @@ input, select, textarea { font-family: inherit; }
 .tl-dot--trigger    { border-color: #0891b2; }
 .tl-dot--done       { border-color: #16a34a; color: #16a34a; }
 .tl-dot--note       { border-color: var(--border-strong); }
+.tl-dot--billnotif  { border-color: #16a34a; color: #16a34a; }
 .tl-event--click { cursor: pointer; }
 .tl-event--click .tl-body { border-radius: var(--r-sm); transition: background 0.12s; }
 .tl-event--click:hover .tl-body { background: var(--card-soft); }
