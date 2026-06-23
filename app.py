@@ -527,6 +527,16 @@ def init_db() -> None:
                     resolved_at     TIMESTAMP,
                     UNIQUE (tracked_bill_id, bill_ref_id)
                 );
+                CREATE TABLE IF NOT EXISTS bill_match_notifications (
+                    id          SERIAL PRIMARY KEY,
+                    flag_id     TEXT REFERENCES bill_match_flags(id) ON DELETE CASCADE,
+                    entity_type TEXT NOT NULL,           -- 'organization' | 'contact'
+                    entity_id   TEXT NOT NULL,
+                    created_at  TIMESTAMP DEFAULT NOW(),
+                    UNIQUE (flag_id, entity_type, entity_id)
+                );
+                CREATE INDEX IF NOT EXISTS bill_match_notifs_entity
+                    ON bill_match_notifications (entity_type, entity_id);
                 CREATE TABLE IF NOT EXISTS bill_sync_meta (
                     id          INTEGER PRIMARY KEY DEFAULT 1,
                     last_synced TIMESTAMP,
@@ -1327,6 +1337,166 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
         "completed_tasks": completed_tasks,
         "entity_notes": entity_notes,
     }
+
+
+def db_get_org_timeline(org_id: str, limit: int = 200) -> list:
+    """A single chronological feed of everything that happened for this org: meetings,
+    asks, commitments, follow-up triggers, tasks (created + completed), notes, and bill
+    references — merged via UNION ALL and sorted newest-first. Each row shares the shape
+    {kind, id, ts, label, status, meeting_id, priority, extra, action_count, reminder_count}.
+    Tasks match by explicit organization_id OR by their group_name slug, mirroring
+    db_get_org_profile."""
+    _group_slug = "trim('-' FROM regexp_replace(lower(t.group_name), '[^a-z0-9]+', '-', 'g'))"
+    sql = f"""
+    WITH ev AS (
+        SELECT 'meeting' AS kind, m.id::text AS id,
+               COALESCE(m.dtstart::timestamp, m.file_date::timestamp) AS ts,
+               NULLIF(m.topic,'') AS label, m.status AS status,
+               m.id::text AS meeting_id, NULL::text AS priority, NULL::text AS extra,
+               (SELECT count(*) FROM tasks t WHERE t.meeting_id = m.id AND t.type='action'   AND NOT t.done)::int AS action_count,
+               (SELECT count(*) FROM tasks t WHERE t.meeting_id = m.id AND t.type='reminder' AND NOT t.done)::int AS reminder_count,
+               m.canonical_group AS fallback
+        FROM meetings m WHERE m.organization_id = %(org)s
+
+        UNION ALL
+        SELECT 'ask', a.id::text, a.created_at::timestamp, a.text, a.status,
+               a.meeting_id::text, a.priority, NULL, 0, 0, NULL
+        FROM asks a WHERE a.organization_id = %(org)s
+
+        UNION ALL
+        SELECT 'commitment', c.id::text, c.created_at::timestamp, c.text, c.status,
+               c.meeting_id::text, NULL, to_char(c.due_date,'YYYY-MM-DD'), 0, 0, NULL
+        FROM commitments c WHERE c.organization_id = %(org)s
+
+        UNION ALL
+        SELECT 'trigger', ft.id::text, ft.created_at::timestamp,
+               ft.condition_text || ' → ' || ft.action_text, ft.status,
+               ft.meeting_id::text, NULL, NULL, 0, 0, NULL
+        FROM followup_triggers ft WHERE ft.organization_id = %(org)s
+
+        UNION ALL
+        SELECT 'task_created', t.id::text, t.created_at::timestamp, t.text,
+               CASE WHEN t.done THEN 'done' ELSE 'open' END,
+               t.meeting_id::text, t.priority, NULLIF(t.deadline,''), 0, 0, NULL
+        FROM tasks t WHERE (t.organization_id = %(org)s OR {_group_slug} = %(org)s)
+
+        UNION ALL
+        SELECT 'task_completed', co.id::text, co.completed_at::timestamp, co.task_text, 'done',
+               t.meeting_id::text, NULL, NULL, 0, 0, NULL
+        FROM completions co JOIN tasks t ON t.id = co.task_id
+        WHERE (t.organization_id = %(org)s OR {_group_slug} = %(org)s)
+
+        UNION ALL
+        SELECT 'note', en.id::text, en.created_at::timestamp, en.body, NULL,
+               NULL, NULL, NULL, 0, 0, NULL
+        FROM entity_notes en
+        WHERE en.entity_type = 'organization' AND en.entity_id = %(org)s
+
+        UNION ALL
+        SELECT 'bill', br.id::text, br.created_at::timestamp,
+               br.bill_type || ' ' || br.bill_number, NULL,
+               br.meeting_id::text, NULL, NULL, 0, 0, NULL
+        FROM bill_references br JOIN meetings m ON br.meeting_id = m.id
+        WHERE m.organization_id = %(org)s
+
+        UNION ALL
+        SELECT 'bill_notified', bn.id::text, bn.created_at::timestamp,
+               tb.bill_type || ' ' || tb.bill_number || ' — notified (Blake ' ||
+                 CASE WHEN tb.relationship = 'sponsored' THEN 'introduced' ELSE 'cosponsored' END || ')',
+               NULL, NULL, NULL, NULL, 0, 0, NULL
+        FROM bill_match_notifications bn
+        JOIN bill_match_flags f ON f.id = bn.flag_id
+        JOIN tracked_bills tb   ON tb.id = f.tracked_bill_id
+        WHERE bn.entity_type = 'organization' AND bn.entity_id = %(org)s
+    )
+    SELECT kind, id,
+           to_char(ts, 'YYYY-MM-DD"T"HH24:MI:SS') AS ts,
+           COALESCE(label, fallback) AS label,
+           status, meeting_id, priority, extra, action_count, reminder_count
+    FROM ev
+    ORDER BY ts DESC NULLS LAST
+    LIMIT %(limit)s
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, {"org": org_id, "limit": limit})
+            return [dict(r) for r in cur.fetchall()]
+
+
+def db_get_person_timeline(contact_id: str, limit: int = 200) -> list:
+    """Person analogue of db_get_org_timeline: a single chronological feed of everything
+    tied to this contact — meetings attended, asks/commitments/triggers raised, tasks
+    (created + completed), notes, and bill notifications — merged via UNION ALL, newest-first.
+    Row shape matches the org timeline so the frontend can reuse one renderer."""
+    sql = """
+    WITH ev AS (
+        SELECT 'meeting' AS kind, m.id::text AS id,
+               COALESCE(m.dtstart::timestamp, m.file_date::timestamp) AS ts,
+               NULLIF(m.topic,'') AS label, m.status AS status,
+               m.id::text AS meeting_id, NULL::text AS priority, NULL::text AS extra,
+               (SELECT count(*) FROM tasks t WHERE t.meeting_id = m.id AND t.type='action'   AND NOT t.done)::int AS action_count,
+               (SELECT count(*) FROM tasks t WHERE t.meeting_id = m.id AND t.type='reminder' AND NOT t.done)::int AS reminder_count,
+               m.canonical_group AS fallback
+        FROM meetings m
+        JOIN meeting_contacts mc ON mc.meeting_id = m.id
+        WHERE mc.contact_id = %(cid)s
+
+        UNION ALL
+        SELECT 'ask', a.id::text, a.created_at::timestamp, a.text, a.status,
+               a.meeting_id::text, a.priority, NULL, 0, 0, NULL
+        FROM asks a WHERE a.contact_id = %(cid)s
+
+        UNION ALL
+        SELECT 'commitment', c.id::text, c.created_at::timestamp, c.text, c.status,
+               c.meeting_id::text, NULL, to_char(c.due_date,'YYYY-MM-DD'), 0, 0, NULL
+        FROM commitments c WHERE c.contact_id = %(cid)s
+
+        UNION ALL
+        SELECT 'trigger', ft.id::text, ft.created_at::timestamp,
+               ft.condition_text || ' → ' || ft.action_text, ft.status,
+               ft.meeting_id::text, NULL, NULL, 0, 0, NULL
+        FROM followup_triggers ft WHERE ft.contact_id = %(cid)s
+
+        UNION ALL
+        SELECT 'task_created', t.id::text, t.created_at::timestamp, t.text,
+               CASE WHEN t.done THEN 'done' ELSE 'open' END,
+               t.meeting_id::text, t.priority, NULLIF(t.deadline,''), 0, 0, NULL
+        FROM tasks t WHERE t.contact_id = %(cid)s
+
+        UNION ALL
+        SELECT 'task_completed', co.id::text, co.completed_at::timestamp, co.task_text, 'done',
+               t.meeting_id::text, NULL, NULL, 0, 0, NULL
+        FROM completions co JOIN tasks t ON t.id = co.task_id
+        WHERE t.contact_id = %(cid)s
+
+        UNION ALL
+        SELECT 'note', en.id::text, en.created_at::timestamp, en.body, NULL,
+               NULL, NULL, NULL, 0, 0, NULL
+        FROM entity_notes en
+        WHERE en.entity_type = 'contact' AND en.entity_id = %(cid)s
+
+        UNION ALL
+        SELECT 'bill_notified', bn.id::text, bn.created_at::timestamp,
+               tb.bill_type || ' ' || tb.bill_number || ' — notified (Blake ' ||
+                 CASE WHEN tb.relationship = 'sponsored' THEN 'introduced' ELSE 'cosponsored' END || ')',
+               NULL, NULL, NULL, NULL, 0, 0, NULL
+        FROM bill_match_notifications bn
+        JOIN bill_match_flags f ON f.id = bn.flag_id
+        JOIN tracked_bills tb   ON tb.id = f.tracked_bill_id
+        WHERE bn.entity_type = 'contact' AND bn.entity_id = %(cid)s
+    )
+    SELECT kind, id,
+           to_char(ts, 'YYYY-MM-DD"T"HH24:MI:SS') AS ts,
+           COALESCE(label, fallback) AS label,
+           status, meeting_id, priority, extra, action_count, reminder_count
+    FROM ev
+    ORDER BY ts DESC NULLS LAST
+    LIMIT %(limit)s
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, {"cid": contact_id, "limit": limit})
+            return [dict(r) for r in cur.fetchall()]
 
 
 def db_get_pre_meeting_brief(org_id: str) -> dict:
@@ -2560,6 +2730,36 @@ def api_bill_matches():
     return jsonify([dict(r) for r in rows])
 
 
+def _bill_match_notif_targets(cur, flag_id: str) -> set:
+    """Distinct (entity_type, entity_id) pairs that should receive a timeline record for a
+    bill match: every organization/person who asked about the bill reference, plus the
+    organization that owned the meeting where it was raised. NULL ids are skipped."""
+    cur.execute(
+        """
+        SELECT DISTINCT entity_type, entity_id FROM (
+            SELECT 'organization' AS entity_type, m.organization_id AS entity_id
+            FROM bill_match_flags f
+            JOIN bill_references br ON br.id = f.bill_ref_id
+            JOIN meetings m ON m.id = br.meeting_id
+            WHERE f.id = %(fid)s
+            UNION
+            SELECT 'organization', a.organization_id
+            FROM bill_match_flags f
+            JOIN asks a ON a.bill_ref_id = f.bill_ref_id
+            WHERE f.id = %(fid)s
+            UNION
+            SELECT 'contact', a.contact_id
+            FROM bill_match_flags f
+            JOIN asks a ON a.bill_ref_id = f.bill_ref_id
+            WHERE f.id = %(fid)s
+        ) t
+        WHERE entity_id IS NOT NULL
+        """,
+        {"fid": flag_id},
+    )
+    return {(r["entity_type"], r["entity_id"]) for r in cur.fetchall()}
+
+
 @app.route("/api/bill-matches/<flag_id>/status", methods=["POST"])
 def api_bill_match_status(flag_id: str):
     data = request.get_json(force=True, silent=True) or {}
@@ -2580,6 +2780,22 @@ def api_bill_match_status(flag_id: str):
                 )
             if cur.rowcount == 0:
                 return jsonify({"ok": False, "error": "Not found"}), 404
+            # Mirror the resolution onto each asker's (and the meeting org's) timeline.
+            # Only 'notified' leaves a record; 'new' (undo) and 'dismissed' clear it.
+            if status == "notified":
+                for etype, eid in _bill_match_notif_targets(cur, flag_id):
+                    cur.execute(
+                        """
+                        INSERT INTO bill_match_notifications (flag_id, entity_type, entity_id)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (flag_id, entity_type, entity_id) DO NOTHING
+                        """,
+                        (flag_id, etype, eid),
+                    )
+            else:
+                cur.execute(
+                    "DELETE FROM bill_match_notifications WHERE flag_id = %s", (flag_id,)
+                )
     return jsonify({"ok": True})
 
 
@@ -2622,6 +2838,11 @@ def api_organization_detail(org_id):
     if not profile:
         return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify(profile)
+
+
+@app.route("/api/organizations/<org_id>/timeline")
+def api_organization_timeline(org_id):
+    return jsonify({"events": db_get_org_timeline(org_id)})
 
 
 @app.route("/api/organizations/<org_id>/brief")
@@ -3005,6 +3226,11 @@ def api_person_detail(contact_id):
         "orgs": orgs, "meetings": meetings, "asks": asks,
         "commitments": commitments, "tasks": tasks, "entity_notes": entity_notes,
     })
+
+
+@app.route("/api/people/<contact_id>/timeline")
+def api_person_timeline(contact_id):
+    return jsonify({"events": db_get_person_timeline(contact_id)})
 
 
 @app.route("/api/people/<contact_id>/organizations", methods=["POST"])

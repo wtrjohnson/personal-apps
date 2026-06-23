@@ -1549,10 +1549,9 @@ input, select, textarea { font-family: inherit; }
 .rel-layout.depth-0 .rel-col-list {
   border-right-color: transparent;
 }
-.rel-layout.depth-1 .rel-col-list {
-  max-width: 230px;
-}
-/* Meeting selected → focus the detail: collapse the list column away entirely. */
+/* Org selected → full-width record page; meeting selected → full-width detail.
+   Either way the index column collapses away (a back arrow returns to it). */
+.rel-layout.depth-1 .rel-col-list,
 .rel-layout.depth-2 .rel-col-list {
   max-width: 0;
   border-right-color: transparent;
@@ -1647,15 +1646,87 @@ input, select, textarea { font-family: inherit; }
   color: var(--ink); white-space: nowrap;
 }
 
+/* Host for the full organization record page — fills the column and scrolls. */
 .rel-org-detail {
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--card-soft);
-  flex-shrink: 0;
-  max-height: 240px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  background: var(--card);
 }
 .rel-org-detail.hidden { display: none; }
+
+/* ── Organization record page ─────────────────────────────── */
+.org-record { padding: 16px clamp(16px, 3vw, 32px) 32px; max-width: 1100px; margin: 0 auto; }
+.org-record-topbar {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 12px;
+}
+.org-type-chip {
+  font-size: 12px; color: var(--muted);
+  background: var(--card-soft); border: 1px solid var(--border);
+  border-radius: var(--r-pill); padding: 2px 10px;
+}
+.org-edit-toggle {
+  margin-left: auto; background: none; border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill); color: var(--muted); cursor: pointer;
+  font-size: 12.5px; padding: 3px 12px;
+}
+.org-edit-toggle:hover { color: var(--text); border-color: var(--text); }
+.org-edit-panel { margin-bottom: 16px; }
+.org-edit-panel.hidden { display: none; }
+
+.org-record-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 28px;
+  align-items: start;
+}
+.org-record-rail { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.org-timeline-wrap { min-width: 0; }
+
+/* The timeline itself: a connector line with type-colored dots. */
+.org-timeline { position: relative; padding-left: 8px; margin-top: 8px; }
+.org-timeline .tl-line {
+  position: absolute; left: 15px; top: 6px; bottom: 6px;
+  width: 2px; background: var(--border);
+}
+.tl-month {
+  position: relative; margin: 18px 0 8px; padding-left: 34px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.5px; color: var(--muted);
+}
+.tl-month:first-child { margin-top: 0; }
+.tl-event { position: relative; display: flex; gap: 12px; padding: 7px 0; }
+.tl-dot {
+  position: relative; z-index: 1; flex: 0 0 auto;
+  width: 22px; height: 22px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; line-height: 1;
+  background: var(--card); border: 2px solid var(--border-strong);
+}
+.tl-dot--meeting    { border-color: var(--card-blue); }
+.tl-dot--ask        { border-color: #d97706; }
+.tl-dot--commitment { border-color: #7c3aed; }
+.tl-dot--trigger    { border-color: #0891b2; }
+.tl-dot--done       { border-color: #16a34a; color: #16a34a; }
+.tl-dot--note       { border-color: var(--border-strong); }
+.tl-dot--billnotif  { border-color: #16a34a; color: #16a34a; }
+.tl-event--click { cursor: pointer; }
+.tl-event--click .tl-body { border-radius: var(--r-sm); transition: background 0.12s; }
+.tl-event--click:hover .tl-body { background: var(--card-soft); }
+.tl-body { flex: 1; min-width: 0; padding: 2px 6px; }
+.tl-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tl-date { font-size: 12px; font-weight: 600; color: var(--text); }
+.tl-kind { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+.tl-prio  { font-size: 11px; color: #b42318; font-weight: 600; }
+.tl-extra { font-size: 11px; color: var(--muted); }
+.tl-label { font-size: 13.5px; line-height: 1.45; margin-top: 1px; word-break: break-word; }
+.tl-event--done .tl-label { color: var(--muted); text-decoration: line-through; }
+
+@media (max-width: 900px) {
+  .org-record-body { grid-template-columns: 1fr; gap: 18px; }
+  .org-record-rail { order: -1; }   /* open items first on narrow screens */
+}
 
 .rel-detail-header {
   flex-shrink: 0;
