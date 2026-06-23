@@ -1329,6 +1329,81 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
     }
 
 
+def db_get_org_timeline(org_id: str, limit: int = 200) -> list:
+    """A single chronological feed of everything that happened for this org: meetings,
+    asks, commitments, follow-up triggers, tasks (created + completed), notes, and bill
+    references — merged via UNION ALL and sorted newest-first. Each row shares the shape
+    {kind, id, ts, label, status, meeting_id, priority, extra, action_count, reminder_count}.
+    Tasks match by explicit organization_id OR by their group_name slug, mirroring
+    db_get_org_profile."""
+    _group_slug = "trim('-' FROM regexp_replace(lower(t.group_name), '[^a-z0-9]+', '-', 'g'))"
+    sql = f"""
+    WITH ev AS (
+        SELECT 'meeting' AS kind, m.id::text AS id,
+               COALESCE(m.dtstart::timestamp, m.file_date::timestamp) AS ts,
+               NULLIF(m.topic,'') AS label, m.status AS status,
+               m.id::text AS meeting_id, NULL::text AS priority, NULL::text AS extra,
+               (SELECT count(*) FROM tasks t WHERE t.meeting_id = m.id AND t.type='action'   AND NOT t.done)::int AS action_count,
+               (SELECT count(*) FROM tasks t WHERE t.meeting_id = m.id AND t.type='reminder' AND NOT t.done)::int AS reminder_count,
+               m.canonical_group AS fallback
+        FROM meetings m WHERE m.organization_id = %(org)s
+
+        UNION ALL
+        SELECT 'ask', a.id::text, a.created_at::timestamp, a.text, a.status,
+               a.meeting_id::text, a.priority, NULL, 0, 0, NULL
+        FROM asks a WHERE a.organization_id = %(org)s
+
+        UNION ALL
+        SELECT 'commitment', c.id::text, c.created_at::timestamp, c.text, c.status,
+               c.meeting_id::text, NULL, to_char(c.due_date,'YYYY-MM-DD'), 0, 0, NULL
+        FROM commitments c WHERE c.organization_id = %(org)s
+
+        UNION ALL
+        SELECT 'trigger', ft.id::text, ft.created_at::timestamp,
+               ft.condition_text || ' → ' || ft.action_text, ft.status,
+               ft.meeting_id::text, NULL, NULL, 0, 0, NULL
+        FROM followup_triggers ft WHERE ft.organization_id = %(org)s
+
+        UNION ALL
+        SELECT 'task_created', t.id::text, t.created_at::timestamp, t.text,
+               CASE WHEN t.done THEN 'done' ELSE 'open' END,
+               t.meeting_id::text, t.priority, NULLIF(t.deadline,''), 0, 0, NULL
+        FROM tasks t WHERE (t.organization_id = %(org)s OR {_group_slug} = %(org)s)
+
+        UNION ALL
+        SELECT 'task_completed', co.id::text, co.completed_at::timestamp, co.task_text, 'done',
+               t.meeting_id::text, NULL, NULL, 0, 0, NULL
+        FROM completions co JOIN tasks t ON t.id = co.task_id
+        WHERE (t.organization_id = %(org)s OR {_group_slug} = %(org)s)
+
+        UNION ALL
+        SELECT 'note', en.id::text, en.created_at::timestamp, en.body, NULL,
+               NULL, NULL, NULL, 0, 0, NULL
+        FROM entity_notes en
+        WHERE en.entity_type = 'organization' AND en.entity_id = %(org)s
+
+        UNION ALL
+        SELECT 'bill', br.id::text, br.created_at::timestamp,
+               br.bill_type || ' ' || br.bill_number, NULL,
+               br.meeting_id::text, NULL, NULL, 0, 0, NULL
+        FROM bill_references br JOIN meetings m ON br.meeting_id = m.id
+        WHERE m.organization_id = %(org)s
+    )
+    SELECT kind, id,
+           to_char(ts, 'YYYY-MM-DD"T"HH24:MI:SS') AS ts,
+           COALESCE(label, fallback) AS label,
+           status, meeting_id, priority, extra, action_count, reminder_count
+    FROM ev
+    ORDER BY ts DESC NULLS LAST
+    LIMIT %(limit)s
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, {"org": org_id, "limit": limit})
+            return [dict(r) for r in cur.fetchall()]
+
+
+
 def db_get_pre_meeting_brief(org_id: str) -> dict:
     profile = db_get_org_profile(org_id)
     if not profile:
@@ -2622,6 +2697,11 @@ def api_organization_detail(org_id):
     if not profile:
         return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify(profile)
+
+
+@app.route("/api/organizations/<org_id>/timeline")
+def api_organization_timeline(org_id):
+    return jsonify({"events": db_get_org_timeline(org_id)})
 
 
 @app.route("/api/organizations/<org_id>/brief")

@@ -1248,7 +1248,7 @@ function renderDetail(m) {
 
   $("#detail").innerHTML = `
     <header>
-      <button class="detail-back" title="Back to meetings">← Meetings</button>
+      <button class="detail-back" title="Back">← Back</button>
       <div class="detail-header-row">
         <h1>${escapeHtml(m.group)}${m.topic ? ` — <span style="color:var(--muted); font-weight:400">${escapeHtml(m.topic)}</span>` : ""}</h1>
         <div style="display: flex; gap: 8px;">
@@ -1568,6 +1568,8 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
       if (label) label.textContent = "All Meetings";
       if (badges) badges.innerHTML = "";
       if (orgDetail) orgDetail.classList.add("hidden");
+      const ml = $("#meetings");
+      if (ml) ml.style.display = "";
       renderDetail(null);
       refreshMeetingsNow();
     }, 300);
@@ -1624,16 +1626,6 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         }).join("")
       : "";
 
-    const completedTasksHtml = completedTasks.length
-      ? completedTasks.map((t) => {
-          return `<div class="org-entity-row org-entity-row--task org-entity-row--done" data-task-id="${escapeHtml(t.id)}" data-contact-id="${escapeHtml(t.contact_id || "")}">
-            <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
-            <span class="entity-text">${escapeHtml(t.text)}</span>
-            <span class="entity-status">✓ done</span>
-          </div>`;
-        }).join("")
-      : "";
-
     const billsHtml = (org.bills || []).map((b) =>
       `<span class="bill-pill">${escapeHtml(b.bill_type)} ${escapeHtml(b.bill_number)}</span>`
     ).join("");
@@ -1672,29 +1664,64 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         <button class="cta-pill ghost" id="org-edit-save">Save details</button>
       </div>`;
 
-    const sections = [
-      orgEditHtml,
-      asksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Asks</div>${asksHtml}</div>`,
-      commitsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Commitments</div>${commitsHtml}</div>`,
+    // Side rail = current state + associations (kept actionable). Completed tasks are
+    // dropped here — they live in the timeline as their own events.
+    const railSection = (lbl, html) =>
+      html ? `<div class="org-detail-section"><div class="drawer-section-label">${lbl}</div>${html}</div>` : "";
+    const railHtml = [
+      railSection("Open Asks", asksHtml),
+      railSection("Open Commitments", commitsHtml),
       personFilterHtml,
-      tasksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Open Tasks</div>${tasksHtml}</div>`,
-      completedTasksHtml && `<div class="org-detail-section"><div class="drawer-section-label">Completed Tasks</div>${completedTasksHtml}</div>`,
-      billsHtml && `<div class="org-detail-section"><div class="drawer-section-label">Bills</div><div class="bill-pills-row">${billsHtml}</div></div>`,
-      contactsHtml && `<div class="org-detail-section"><div class="drawer-section-label">People</div><div class="drawer-cards">${contactsHtml}</div></div>`,
+      railSection("Open Tasks", tasksHtml),
+      billsHtml && railSection("Bills", `<div class="bill-pills-row">${billsHtml}</div>`),
+      contactsHtml && railSection("People", `<div class="drawer-cards">${contactsHtml}</div>`),
       _entityNotesHtml(org.entity_notes),
     ].filter(Boolean).join("");
 
-    // Populate all of col-2's contents (header, badges, org-detail block) while still hidden.
+    // Record page: read-only header, edit hidden behind a button, timeline + rail body.
+    const recordHtml = `
+      <div class="org-record">
+        <div class="org-record-topbar">
+          ${org.type ? `<span class="org-type-chip">${escapeHtml(org.type)}</span>` : ""}
+          <button class="org-edit-toggle" id="org-edit-toggle" title="Edit organization details">Edit</button>
+        </div>
+        <div class="org-edit-panel hidden" id="org-edit-panel">${orgEditHtml}</div>
+        <div class="org-record-body">
+          <div class="org-timeline-wrap">
+            <div class="drawer-section-label">Activity</div>
+            <div class="org-timeline" id="org-timeline">
+              <div class="detail-empty-inline">Loading timeline…</div>
+            </div>
+          </div>
+          <aside class="org-record-rail">${railHtml || `<p class="detail-empty-inline">No open items.</p>`}</aside>
+        </div>
+      </div>`;
+
+    // Header label + read-only quick stats.
     if (label) label.textContent = org.name;
     if (badges) {
-      const parts = [];
-      if (openAsks.length)   parts.push(`${openAsks.length} ask${openAsks.length > 1 ? "s" : ""}`);
-      if (openCommits.length) parts.push(`${openCommits.length} commitment${openCommits.length > 1 ? "s" : ""}`);
-      if (openTasks.length)  parts.push(`${openTasks.length} task${openTasks.length > 1 ? "s" : ""}`);
+      const stat = (n, w) => n ? `${n} ${w}${n > 1 ? "s" : ""}` : "";
+      const parts = [
+        stat((org.meetings || []).length, "meeting"),
+        stat(openAsks.length, "ask"),
+        stat(openCommits.length, "commitment"),
+        stat(openTasks.length, "task"),
+      ].filter(Boolean);
       badges.innerHTML = parts.map((p) => `<span class="rel-org-badge">${escapeHtml(p)}</span>`).join("");
     }
-    if (content) content.innerHTML = sections;
-    if (orgDetail) orgDetail.classList.toggle("hidden", !sections);
+    if (content) content.innerHTML = recordHtml;
+    if (orgDetail) orgDetail.classList.remove("hidden");
+    // The old flat meeting list is superseded by the timeline.
+    const meetingsList = $("#meetings");
+    if (meetingsList) meetingsList.style.display = "none";
+
+    // Edit button reveals the (otherwise hidden) name/type/notes editor.
+    $("#org-edit-toggle")?.addEventListener("click", () => {
+      $("#org-edit-panel")?.classList.toggle("hidden");
+    });
+
+    // Build the activity timeline (async; the rail is already visible).
+    renderOrgTimeline(orgId, $("#org-timeline"));
 
     // Standalone org notes
     if (content) _wireEntityNotes(content, "organization", orgId, () => selectOrg(orgId, { skipToggle: true }));
@@ -1830,6 +1857,76 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     state.selectedOrgId = orgId;
     updateRelDepth();
   }
+}
+
+// Vertical activity timeline for an organization — a single chronological feed merged
+// server-side (/api/organizations/<id>/timeline). Meetings are clickable into the detail.
+const _TL_META = {
+  meeting:        { cls: "meeting",    icon: "📅", title: "Meeting" },
+  ask:            { cls: "ask",        icon: "🙋", title: "Ask raised" },
+  commitment:     { cls: "commitment", icon: "🤝", title: "Commitment" },
+  trigger:        { cls: "trigger",    icon: "👁", title: "Follow-up trigger" },
+  task_created:   { cls: "task",       icon: "◻", title: "Task" },
+  task_completed: { cls: "done",       icon: "✓", title: "Task completed" },
+  note:           { cls: "note",       icon: "📝", title: "Note" },
+  bill:           { cls: "bill",       icon: "📄", title: "Bill referenced" },
+};
+
+async function renderOrgTimeline(orgId, container) {
+  if (!container) return;
+  let events;
+  try {
+    const r = await api(`/api/organizations/${orgId}/timeline`);
+    events = r.events || [];
+  } catch {
+    container.innerHTML = `<div class="detail-empty-inline">Couldn't load the timeline.</div>`;
+    return;
+  }
+  if (state.selectedOrgId !== orgId) return;   // user navigated away mid-fetch
+  if (!events.length) {
+    container.innerHTML = `<div class="detail-empty-inline">No activity yet.</div>`;
+    return;
+  }
+  const fmtDay = (iso) => {
+    const d = new Date(iso);
+    return isNaN(d) ? "—" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  };
+  const monthKey = (iso) => {
+    const d = new Date(iso);
+    return isNaN(d) ? "" : d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  };
+  const quietStatus = new Set(["open", "logged", "watching", "complete", "done"]);
+  let html = `<div class="tl-line"></div>`;
+  let lastMonth = null;
+  for (const e of events) {
+    const meta = _TL_META[e.kind] || { cls: "note", icon: "•", title: e.kind };
+    const mk = monthKey(e.ts);
+    if (mk && mk !== lastMonth) { html += `<div class="tl-month">${escapeHtml(mk)}</div>`; lastMonth = mk; }
+    const badges = [];
+    if (e.action_count)   badges.push(`<span class="badge actions" title="Open action items">${e.action_count}A</span>`);
+    if (e.reminder_count) badges.push(`<span class="badge reminders" title="Open reminders">${e.reminder_count}R</span>`);
+    if (e.status && !quietStatus.has(e.status))
+      badges.push(`<span class="entity-status status-${escapeHtml(e.status)}">${escapeHtml(String(e.status).replace(/_/g, " "))}</span>`);
+    if (e.priority === "high") badges.push(`<span class="tl-prio">high</span>`);
+    if (e.extra)               badges.push(`<span class="tl-extra">due ${escapeHtml(e.extra)}</span>`);
+    const clickable = e.kind === "meeting" && e.meeting_id;
+    html += `
+      <div class="tl-event tl-event--${meta.cls}${clickable ? " tl-event--click" : ""}"${clickable ? ` data-mid="${escapeHtml(e.meeting_id)}"` : ""}>
+        <div class="tl-dot tl-dot--${meta.cls}" title="${escapeHtml(meta.title)}">${meta.icon}</div>
+        <div class="tl-body">
+          <div class="tl-row">
+            <span class="tl-date">${escapeHtml(fmtDay(e.ts))}</span>
+            <span class="tl-kind">${escapeHtml(meta.title)}</span>
+            ${badges.join("")}
+          </div>
+          <div class="tl-label">${escapeHtml(e.label || "")}</div>
+        </div>
+      </div>`;
+  }
+  container.innerHTML = html;
+  container.querySelectorAll(".tl-event--click[data-mid]").forEach((row) => {
+    row.addEventListener("click", () => selectMeeting(row.dataset.mid));
+  });
 }
 
 function renderPeopleTable(people) {

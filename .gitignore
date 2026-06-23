@@ -8,3 +8,4 @@ backburner.yaml
 groups.yaml
 *.log
 .DS_Store
+.venv/
