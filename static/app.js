@@ -1411,6 +1411,29 @@ async function _loadCanonicalGroups() {
   }
 }
 
+// Existing organizations, for autocomplete/typeahead when adding or linking people.
+// Cached after first load; pass force=true to refresh after a create/merge.
+let _orgNamesCache = null;
+async function _loadOrgNames(force = false) {
+  if (_orgNamesCache && !force) return _orgNamesCache;
+  try {
+    const res = await fetch("/api/organizations");
+    const data = await res.json();
+    _orgNamesCache = (data || []).map((o) => ({ id: o.id, name: o.name }))
+      .filter((o) => o.name);
+    return _orgNamesCache;
+  } catch {
+    return _orgNamesCache || [];
+  }
+}
+
+// Fill a <datalist> with existing organization names.
+function fillOrgDatalist(datalistId, orgs) {
+  const dl = $("#" + datalistId);
+  if (!dl) return;
+  dl.innerHTML = (orgs || []).map((o) => `<option value="${escapeHtml(o.name)}"></option>`).join("");
+}
+
 async function _openMeetingEditModal(mid) {
   const m = state.meetings.find((x) => x.id === mid);
   if (!m) return;
@@ -1654,14 +1677,23 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
       : "";
 
     const orgEditHtml = `
-      <div class="org-detail-header">
-        <input class="org-edit-name" id="org-edit-name" value="${escapeHtml(org.name || "")}" placeholder="Organization name">
-        <button class="detail-delete-btn" id="org-delete" title="Delete organization">Delete</button>
-      </div>
-      <div class="org-detail-section org-edit-fields">
-        <input id="org-edit-type" placeholder="Type (e.g. trade association)" value="${escapeHtml(org.type || "")}">
-        <textarea id="org-edit-notes" placeholder="Notes…">${escapeHtml(org.notes || "")}</textarea>
-        <button class="cta-pill ghost" id="org-edit-save">Save details</button>
+      <form id="org-edit-form">
+        <div class="org-detail-header">
+          <input class="org-edit-name" id="org-edit-name" value="${escapeHtml(org.name || "")}" placeholder="Organization name">
+          <button type="button" class="detail-delete-btn" id="org-delete" title="Delete organization">Delete</button>
+        </div>
+        <div class="org-detail-section org-edit-fields">
+          <input id="org-edit-type" placeholder="Type (e.g. trade association)" value="${escapeHtml(org.type || "")}">
+          <textarea id="org-edit-notes" placeholder="Notes…">${escapeHtml(org.notes || "")}</textarea>
+          <button type="submit" class="cta-pill ghost" id="org-edit-save">Save</button>
+        </div>
+      </form>
+      <div class="org-detail-section org-merge-fields">
+        <div class="drawer-section-label">Merge duplicate</div>
+        <p class="detail-empty-inline">Fold another organization into this one. Its meetings, people, and items move here; the duplicate is deleted.</p>
+        <input id="org-merge-input" type="text" list="org-merge-list" autocomplete="off" placeholder="Merge another org into this one…">
+        <datalist id="org-merge-list"></datalist>
+        <button type="button" class="cta-pill ghost" id="org-merge-btn">Merge into this org</button>
       </div>`;
 
     // Side rail = current state + associations (kept actionable). Completed tasks are
@@ -1826,18 +1858,52 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
       });
     });
 
-    // Edit / delete the organization itself
-    $("#org-edit-save")?.addEventListener("click", async () => {
+    // Edit / delete the organization itself. Bound to form submit so pressing Enter
+    // in the name field (or any field) saves — fixing the "no way to save the name" gap.
+    $("#org-edit-form")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
       const name = $("#org-edit-name").value.trim();
-      if (!name) { alert("Organization name is required."); return; }
+      if (!name) { alert("Organization name is required."); $("#org-edit-name").focus(); return; }
       try {
         await api(`/api/organizations/${orgId}`, {
           method: "PUT", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name, type: $("#org-edit-type").value, notes: $("#org-edit-notes").value }),
         });
+        if (label) label.textContent = name; // reflect the rename immediately
+        _orgNamesCache = null;
         loadGroups();
         selectOrg(orgId, { skipToggle: true });
       } catch { alert("Couldn't save organization."); }
+    });
+
+    // Merge another organization into this one (fixes existing duplicates).
+    const mergeInput = $("#org-merge-input");
+    if (mergeInput) {
+      let _mergeOrgsLoaded = false;
+      mergeInput.addEventListener("focus", async () => {
+        if (_mergeOrgsLoaded) return;
+        _mergeOrgsLoaded = true;
+        // Offer every org except this one as a merge source.
+        const others = (await _loadOrgNames(true)).filter((o) => o.id !== orgId);
+        fillOrgDatalist("org-merge-list", others);
+      });
+    }
+    $("#org-merge-btn")?.addEventListener("click", async () => {
+      const name = (mergeInput?.value || "").trim();
+      if (!name) { mergeInput?.focus(); return; }
+      const others = (await _loadOrgNames()).filter((o) => o.id !== orgId);
+      const src = others.find((o) => o.name.toLowerCase() === name.toLowerCase());
+      if (!src) { alert("Pick an existing organization from the list to merge in."); return; }
+      if (!confirm(`Merge "${src.name}" into "${org.name}"? This moves all its meetings, people, and items here and deletes "${src.name}". This can't be undone.`)) return;
+      try {
+        await api(`/api/organizations/${src.id}/merge`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target_id: orgId }),
+        });
+        _orgNamesCache = null;
+        loadGroups();
+        selectOrg(orgId, { skipToggle: true });
+      } catch { alert("Couldn't merge organizations."); }
     });
     $("#org-delete")?.addEventListener("click", async () => {
       if (!confirm(`Delete ${org.name}? This permanently removes the organization.`)) return;
@@ -1983,7 +2049,9 @@ function _personEditorFields(p = {}) {
     <div class="person-editor">
       ${f("pe-name", "Name", p.name)}
       ${f("pe-title", "Title", p.title)}
-      ${f("pe-company", "Company", p.company)}
+      <div class="modal-row"><label for="pe-company">Company / Organization</label>
+        <input id="pe-company" type="text" value="${escapeHtml(p.company || "")}" list="pe-org-list" autocomplete="off" placeholder="Pick existing or type new">
+        <datalist id="pe-org-list"></datalist></div>
       ${f("pe-email", "Email", p.email, "email")}
       ${f("pe-phone", "Phone", p.phone, "tel")}
       ${p.card_image ? `<img id="pe-card-img" class="drawer-card-thumb" src="${p.card_image}" alt="Business card" style="margin-top:6px">` : `<img id="pe-card-img" class="drawer-card-thumb hidden" alt="Business card" style="margin-top:6px">`}
@@ -1996,6 +2064,16 @@ function _personEditorFields(p = {}) {
 }
 
 function _wirePersonEditor() {
+  // Populate the Company / Organization autocomplete on first focus (lazy, cached).
+  const companyInput = $("#pe-company");
+  if (companyInput) {
+    let _peOrgsLoaded = false;
+    companyInput.addEventListener("focus", async () => {
+      if (_peOrgsLoaded) return;
+      _peOrgsLoaded = true;
+      fillOrgDatalist("pe-org-list", await _loadOrgNames());
+    });
+  }
   const scanBtn = $("#pe-scan");
   const photo = $("#pe-photo");
   scanBtn?.addEventListener("click", () => photo.click());
@@ -2048,6 +2126,16 @@ function _wirePersonEditor() {
           body: JSON.stringify(body),
         });
         savedId = res.id;
+      }
+      // Keep Company concrete: link the contact to the matching organization,
+      // reusing the existing org by name (the backend upserts by slug, so picking
+      // a suggested name never creates a duplicate). Removal stays explicit (chip ×).
+      if (savedId && body.company) {
+        await api(`/api/people/${savedId}/organizations`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: body.company }),
+        });
+        _orgNamesCache = null; // a new org may have been created
       }
       _pePendingCard = null;
       await loadGroups();
@@ -2149,7 +2237,11 @@ async function renderPersonInto(container, contactId, opts = {}) {
          <button class="attendee-chip attendee-chip--link" data-org-id="${escapeHtml(o.id)}">${escapeHtml(o.name)}</button>
          <button class="chip-remove" data-unlink-org="${escapeHtml(o.id)}" title="Remove from organization" aria-label="Remove from organization">×</button>
        </span>`
-    ).join("") + `<button class="attendee-chip" id="person-add-org" title="Add organization">+ org</button>`;
+    ).join("") + `<span class="org-add-inline">
+         <input id="person-add-org-input" type="text" list="person-add-org-list" autocomplete="off" placeholder="Add organization…">
+         <datalist id="person-add-org-list"></datalist>
+         <button class="attendee-chip" id="person-add-org" title="Add organization">+ org</button>
+       </span>`;
 
     const tasksHtml = (p.tasks || []).map((t) =>
       `<div class="org-entity-row org-entity-row--task${t.done ? " org-entity-row--done" : ""}" data-person-task-id="${escapeHtml(t.id)}">
@@ -2209,14 +2301,28 @@ async function renderPersonInto(container, contactId, opts = {}) {
         selectOrg(chip.dataset.orgId, { skipToggle: true });
       });
     });
-    // + org → prompt for org name, link, refresh
+    // + org → autocomplete existing org names, link, refresh. Reusing a suggested
+    // name reuses the existing org (backend upserts by slug), so no duplicates.
+    const addOrgInput = $("#person-add-org-input");
+    if (addOrgInput) {
+      let _addOrgLoaded = false;
+      addOrgInput.addEventListener("focus", async () => {
+        if (_addOrgLoaded) return;
+        _addOrgLoaded = true;
+        fillOrgDatalist("person-add-org-list", await _loadOrgNames());
+      });
+      addOrgInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); $("#person-add-org")?.click(); }
+      });
+    }
     $("#person-add-org")?.addEventListener("click", async () => {
-      const name = prompt("Add this person to which organization?");
-      if (!name || !name.trim()) return;
+      const name = (addOrgInput?.value || "").trim();
+      if (!name) { addOrgInput?.focus(); return; }
       await api(`/api/people/${contactId}/organizations`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim() }),
+        body: JSON.stringify({ name }),
       });
+      _orgNamesCache = null; // a new org may have been created
       refresh();
     });
     // Unlink an organization from this person

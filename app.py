@@ -2869,6 +2869,43 @@ def api_organization_update(org_id):
     return jsonify({"ok": True, "id": org_id})
 
 
+@app.route("/api/organizations/<org_id>/merge", methods=["POST"])
+def api_organization_merge(org_id):
+    """Fold the source organization (org_id) into a target, then delete the source.
+    Every reference is repointed to the target so duplicates (e.g. 'Utah Tech' vs
+    'Utah Tech University') can be consolidated without losing history."""
+    data = request.get_json(force=True, silent=True) or {}
+    target_id = (data.get("target_id") or "").strip()
+    if not target_id:
+        return jsonify({"ok": False, "error": "target_id required"}), 400
+    if target_id == org_id:
+        return jsonify({"ok": False, "error": "Cannot merge an organization into itself"}), 400
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM organizations WHERE id IN (%s, %s)", (org_id, target_id))
+            if len({r["id"] for r in cur.fetchall()}) != 2:
+                return jsonify({"ok": False, "error": "Not found"}), 404
+            # Simple FK repoints (one org per row).
+            for table in ("meetings", "asks", "commitments", "followup_triggers", "tasks", "contacts"):
+                cur.execute(
+                    f"UPDATE {table} SET organization_id=%s WHERE organization_id=%s",
+                    (target_id, org_id))
+            # Many-to-many join: move links, skipping ones the target already has.
+            cur.execute("""
+                INSERT INTO contact_organizations (contact_id, organization_id)
+                SELECT contact_id, %s FROM contact_organizations WHERE organization_id=%s
+                ON CONFLICT DO NOTHING
+            """, (target_id, org_id))
+            cur.execute("DELETE FROM contact_organizations WHERE organization_id=%s", (org_id,))
+            # Standalone notes attached to the org entity.
+            cur.execute("""
+                UPDATE entity_notes SET entity_id=%s
+                WHERE entity_type='organization' AND entity_id=%s
+            """, (target_id, org_id))
+            cur.execute("DELETE FROM organizations WHERE id=%s", (org_id,))
+    return jsonify({"ok": True, "id": target_id})
+
+
 @app.route("/api/organizations/<org_id>", methods=["DELETE"])
 def api_organization_delete(org_id):
     """Delete an organization. FK references null out automatically (ON DELETE SET NULL /

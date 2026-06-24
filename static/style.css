@@ -3837,6 +3837,23 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
 .org-edit-fields textarea { min-height: 54px; resize: vertical; }
 .org-edit-fields .cta-pill { align-self: flex-start; }
 
+/* Merge-duplicate control on the org editor */
+.org-merge-fields { display: flex; flex-direction: column; gap: 8px; }
+.org-merge-fields input {
+  width: 100%; font: 13px/1.4 var(--sans); color: var(--ink);
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+}
+.org-merge-fields .cta-pill { align-self: flex-start; }
+
+/* Inline "add organization" autocomplete on a person */
+.org-add-inline { display: inline-flex; align-items: center; gap: 4px; }
+.org-add-inline input {
+  font: 12px/1.4 var(--sans); color: var(--ink); width: 150px;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--r-pill); padding: 2px 8px;
+}
+.org-add-inline button.attendee-chip { cursor: pointer; }
+.org-add-inline button.attendee-chip:hover { border-color: var(--card-blue); color: var(--card-blue); }
+
 /* People tab: add-person header + person editor */
 .people-list-header { display: flex; justify-content: flex-end; margin-bottom: 8px; }
 .person-editor { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
