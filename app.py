@@ -2406,17 +2406,126 @@ def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
     return stored
 
 
-def _sync_house_floor(cur, congress: int, keys: set):
-    """Best-effort: parse the House weekly 'bills this week' XML for the current and next
-    week, recording tracked bills scheduled for the floor. Never raises. Returns
-    (stored_count, ok) where ok is False if neither week's feed could be fetched."""
+def _parse_floor_weeks_feed(raw: bytes):
+    """Parse the House 'Bills This Week' Atom feed (docs.house.gov/BillsThisWeek-RSS.xml)
+    into a de-duped, ascending list of (date, ymd) tuples for current/upcoming weeks.
+
+    Despite the '-RSS' filename it is Atom: each week is a <entry> that recurs as
+    'Update 1'..'Update N', so we collapse by week date. The week is taken from the
+    alternate link's '?date=YYYY-MM-DD' (which always matches the billsthisweek/YYYYMMDD
+    folder), with the in-content download URL / title as fallbacks. Raises on unparseable
+    XML; returns [] if no usable upcoming weeks are found."""
     import xml.etree.ElementTree as ET
-    today = date_cls.today()
-    monday = today - timedelta(days=today.weekday())
+    ns = "{http://www.w3.org/2005/Atom}"
+    root = ET.fromstring(raw)
+    monday = date_cls.today() - timedelta(days=date_cls.today().weekday())
+    by_date: dict = {}
+    for entry in root.iter(f"{ns}entry"):
+        wk = None
+        # Primary: alternate link href carries ?date=YYYY-MM-DD.
+        for link in entry.iter(f"{ns}link"):
+            m = re.search(r"[?&]date=(\d{4})-(\d{2})-(\d{2})", link.get("href") or "")
+            if m:
+                try:
+                    wk = date_cls(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    wk = None
+                break
+        if wk is None:
+            # Fallback: billsthisweek/YYYYMMDD in the content, else a "Week of Mon D, YYYY" title.
+            blob = " ".join(t for t in (entry.findtext(f"{ns}content"),
+                                        entry.findtext(f"{ns}title")) if t)
+            m = re.search(r"billsthisweek/(\d{4})(\d{2})(\d{2})", blob)
+            if m:
+                try:
+                    wk = date_cls(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    wk = None
+            if wk is None:
+                m = re.search(r"Week of ([A-Za-z]{3,9})\.?\s+(\d{1,2}),\s+(\d{4})",
+                              entry.findtext(f"{ns}title") or "")
+                if m:
+                    for fmt in ("%b %d %Y", "%B %d %Y"):
+                        try:
+                            wk = datetime.strptime(f"{m.group(1)} {m.group(2)} {m.group(3)}", fmt).date()
+                            break
+                        except ValueError:
+                            continue
+        if wk is None or wk < monday:
+            continue
+        by_date[wk] = wk.strftime("%Y%m%d")
+    return [(d, by_date[d]) for d in sorted(by_date)][:6]
+
+
+def _discover_house_floor_weeks():
+    """Fetch and parse the House 'Bills This Week' feed into a list of (date, ymd) weeks
+    the House currently has posted. Returns None on any failure so the caller can fall
+    back to date-guessing. Never raises."""
+    try:
+        weeks = _parse_floor_weeks_feed(
+            _http_get_bytes("https://docs.house.gov/BillsThisWeek-RSS.xml"))
+        return weeks or None
+    except Exception:
+        return None
+
+
+def _store_floor_bills(cur, congress: int, keys: set, texts, wk, ymd: str) -> int:
+    """Match candidate bill-id strings against tracked sponsored bills (`keys`) and upsert
+    a floor event for each. `texts` is any iterable of short strings (per-week XML element
+    text, or legisNum cells from the feed). Returns the number of rows stored."""
+    stored = 0
+    seen = set()
+    for text in texts:
+        text = (text or "").strip()
+        if not text or len(text) > 14:
+            continue
+        # Bill ids appear in their own self-describing nodes; strip separators
+        # ("H.R. 1234" / "H.J.Res. 7" / "S. 47") then match canonical types.
+        compact = re.sub(r"[^A-Za-z0-9]", "", text).upper()
+        m = re.match(r"^(HR|S|HRES|SRES|HJRES|SJRES|HCONRES|SCONRES)(\d{1,5})$", compact)
+        if not m:
+            continue
+        btype, bnum = m.group(1), m.group(2)
+        if btype not in _CHAMBER_SLUG or not bnum:
+            continue
+        if (congress, btype, bnum) in seen:
+            continue
+        seen.add((congress, btype, bnum))
+        if (congress, btype, bnum) not in keys:
+            continue
+        cur.execute(
+            """
+            INSERT INTO bill_schedule_events
+                (id, source, congress, bill_type, bill_number, chamber, event_type,
+                 status, event_date, title, committee_name, location, url, raw, last_seen)
+            VALUES (%s,'floor',%s,%s,%s,'House','Floor','Scheduled',%s,%s,NULL,NULL,%s,'{}'::jsonb,NOW())
+            ON CONFLICT (id) DO UPDATE SET
+                event_date = EXCLUDED.event_date, title = EXCLUDED.title, last_seen = NOW()
+            """,
+            (
+                f"floor-{ymd}-{btype}{bnum}", congress, btype, bnum, wk.isoformat(),
+                f"House floor — week of {wk.strftime('%b %-d')}",
+                f"https://docs.house.gov/billsthisweek/{ymd}/",
+            ),
+        )
+        stored += 1
+    return stored
+
+
+def _sync_house_floor(cur, congress: int, keys: set):
+    """Best-effort: record tracked bills scheduled for the House floor. The set of weeks is
+    discovered from the 'Bills This Week' feed (so non-Monday / 3+-weeks-out postings are
+    handled); each week's self-describing per-week XML is then scanned for bill ids. Falls
+    back to guessing this/next Monday's folder if the feed is unreachable. Never raises.
+    Returns (stored_count, ok) where ok is False if no per-week XML could be fetched."""
+    import xml.etree.ElementTree as ET
+    weeks = _discover_house_floor_weeks()
+    if not weeks:
+        monday = date_cls.today() - timedelta(days=date_cls.today().weekday())
+        weeks = [(wk, wk.strftime("%Y%m%d")) for wk in (monday, monday + timedelta(days=7))]
     stored = 0
     fetched_any = False
-    for wk in (monday, monday + timedelta(days=7)):
-        ymd = wk.strftime("%Y%m%d")
+    for wk, ymd in weeks:
         try:
             raw = _http_get_bytes(f"https://docs.house.gov/billsthisweek/{ymd}/{ymd}.xml")
             root = ET.fromstring(raw)
@@ -2425,41 +2534,8 @@ def _sync_house_floor(cur, congress: int, keys: set):
             continue
         # The feed is "self-describing"; scan all elements for bill identifiers like
         # "H.R. 1234" / "HR1234" regardless of the exact element name.
-        seen = set()
-        for el in root.iter():
-            text = (el.text or "").strip()
-            if not text or len(text) > 14:
-                continue
-            # Bill ids appear in their own self-describing nodes; strip separators
-            # ("H.R. 1234" / "H.J.Res. 7" / "S. 47") then match canonical types.
-            compact = re.sub(r"[^A-Za-z0-9]", "", text).upper()
-            m = re.match(r"^(HR|S|HRES|SRES|HJRES|SJRES|HCONRES|SCONRES)(\d{1,5})$", compact)
-            if not m:
-                continue
-            btype, bnum = m.group(1), m.group(2)
-            if btype not in _CHAMBER_SLUG or not bnum:
-                continue
-            if (congress, btype, bnum) in seen:
-                continue
-            seen.add((congress, btype, bnum))
-            if (congress, btype, bnum) not in keys:
-                continue
-            cur.execute(
-                """
-                INSERT INTO bill_schedule_events
-                    (id, source, congress, bill_type, bill_number, chamber, event_type,
-                     status, event_date, title, committee_name, location, url, raw, last_seen)
-                VALUES (%s,'floor',%s,%s,%s,'House','Floor','Scheduled',%s,%s,NULL,NULL,%s,'{}'::jsonb,NOW())
-                ON CONFLICT (id) DO UPDATE SET
-                    event_date = EXCLUDED.event_date, title = EXCLUDED.title, last_seen = NOW()
-                """,
-                (
-                    f"floor-{ymd}-{btype}{bnum}", congress, btype, bnum, wk.isoformat(),
-                    f"House floor — week of {wk.strftime('%b %-d')}",
-                    f"https://docs.house.gov/billsthisweek/{ymd}/",
-                ),
-            )
-            stored += 1
+        stored += _store_floor_bills(
+            cur, congress, keys, (el.text for el in root.iter()), wk, ymd)
     return stored, fetched_any
 
 
