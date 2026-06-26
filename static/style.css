@@ -154,11 +154,13 @@ input, select, textarea { font-family: inherit; }
 .dock-badge:empty { display: none; }
 .dock-divider { width: 28px; height: 1px; background: var(--border); margin: 4px 0; }
 .dock-avatar {
-  width: 34px; height: 34px; border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  width: 34px; height: 34px; border-radius: 9px;
+  background: #fff; overflow: hidden; padding: 2px;
+  border: 1px solid var(--border); box-sizing: border-box;
   color: var(--card); display: inline-flex; align-items: center; justify-content: center;
   font-weight: 700; font-size: 13px; margin-top: 2px;
 }
+.dock-avatar img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .dock-btn-wrap {
   position: relative;
   display: flex; align-items: center; justify-content: center;
