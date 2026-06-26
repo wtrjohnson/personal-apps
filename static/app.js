@@ -1282,9 +1282,11 @@ function renderDetail(m) {
         </span>`).join("")}
       </div>
     </div>` : ""}
-    ${(m.contacts || []).length ? `
     <div class="detail-contacts">
-      <h3>Contacts</h3>
+      <div class="detail-contacts-head">
+        <h3>Contacts</h3>
+        <button class="detail-contact-add-btn" type="button">+ Add contact</button>
+      </div>
       <div class="detail-contact-list">
         ${(m.contacts || []).map((c) => `
         <div class="detail-contact-card" data-cid="${escapeHtml(c.id)}" data-mid="${escapeHtml(m.id)}">
@@ -1297,7 +1299,12 @@ function renderDetail(m) {
           <button class="detail-contact-unlink" title="Unlink contact">✕</button>
         </div>`).join("")}
       </div>
-    </div>` : ""}
+      <div class="contact-picker hidden">
+        <input class="contact-picker-input" type="text"
+               placeholder="Search a contact, or type a new name…" autocomplete="off">
+        <div class="contact-picker-results"></div>
+      </div>
+    </div>
     <div class="body">${m.body_html}</div>
   `;
   const ci = $("#detail .canvas-note-image");
@@ -1319,6 +1326,8 @@ function renderDetail(m) {
       selectMeeting(mid);
     });
   });
+
+  _wireContactPicker(m);
 
   $("#detail").querySelectorAll(".callout-edit-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1394,6 +1403,110 @@ function renderDetail(m) {
         if (e.key === "Escape") selectMeeting(m.id);
       }));
     });
+  });
+}
+
+// Inline picker on the meeting detail to attach a contact after the fact.
+// Searches existing contacts (link) or creates a new one inline (create + link).
+function _wireContactPicker(m) {
+  const section = $("#detail .detail-contacts");
+  if (!section) return;
+  const addBtn = section.querySelector(".detail-contact-add-btn");
+  const picker = section.querySelector(".contact-picker");
+  const input = section.querySelector(".contact-picker-input");
+  const results = section.querySelector(".contact-picker-results");
+  if (!addBtn || !picker || !input || !results) return;
+
+  const linkedIds = new Set((m.contacts || []).map((c) => c.id));
+
+  const onDocClick = (e) => {
+    if (!section.contains(e.target)) close();
+  };
+
+  const close = () => {
+    picker.classList.add("hidden");
+    results.innerHTML = "";
+    input.value = "";
+    document.removeEventListener("click", onDocClick);
+  };
+
+  const linkContact = async (cid) => {
+    await fetch(`/api/meetings/${m.id}/contacts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contact_id: cid }),
+    });
+    selectMeeting(m.id);
+  };
+
+  const createAndLink = async (name) => {
+    const res = await fetch("/api/contacts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const data = await res.json();
+    if (!data.ok || !data.id) { alert(data.error || "Could not create contact"); return; }
+    await linkContact(data.id);
+  };
+
+  const render = (matches, q) => {
+    const rows = matches
+      .filter((c) => !linkedIds.has(c.id))
+      .map((c) => {
+        const sub = [c.title, c.company].filter(Boolean).join(" · ");
+        return `<div class="contact-picker-row" data-cid="${escapeHtml(c.id)}">
+          <span class="contact-picker-row-name">${escapeHtml(c.name)}</span>
+          ${sub ? `<span class="contact-picker-row-sub">${escapeHtml(sub)}</span>` : ""}
+        </div>`;
+      });
+    if (q) {
+      rows.push(`<div class="contact-picker-row contact-picker-create" data-create="1">
+        + Create &ldquo;${escapeHtml(q)}&rdquo;</div>`);
+    }
+    results.innerHTML = rows.join("");
+
+    results.querySelectorAll(".contact-picker-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        if (row.dataset.create) createAndLink(q);
+        else linkContact(row.dataset.cid);
+      });
+    });
+  };
+
+  let timer = null;
+  const search = async () => {
+    const q = input.value.trim();
+    if (!q) { results.innerHTML = ""; return; }
+    try {
+      const res = await fetch(`/api/contacts?q=${encodeURIComponent(q)}`);
+      const data = await res.json();
+      const list = Array.isArray(data) ? data : (data.contacts || []);
+      render(list, q);
+    } catch {
+      render([], q);
+    }
+  };
+
+  addBtn.addEventListener("click", (e) => {
+    const wasHidden = picker.classList.contains("hidden");
+    if (wasHidden) {
+      e.stopPropagation();
+      picker.classList.remove("hidden");
+      input.focus();
+      document.addEventListener("click", onDocClick);
+    } else {
+      close();
+    }
+  });
+
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(search, 200);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); close(); }
   });
 }
 
