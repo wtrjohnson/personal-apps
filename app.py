@@ -2018,6 +2018,17 @@ def api_meeting_link_contact(mid: str):
                 "INSERT INTO meeting_contacts (meeting_id, contact_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
                 (mid, cid)
             )
+            # Associate the meeting's organization with the person, mirroring how
+            # attendee-derived contacts get their org (see _upsert_attendee_contacts).
+            cur.execute("SELECT organization_id FROM meetings WHERE id=%s", (mid,))
+            row = cur.fetchone()
+            org_id = row["organization_id"] if row else None
+            if org_id:
+                _link_contact_org(cur, cid, org_id)
+                cur.execute(
+                    "UPDATE contacts SET organization_id=%s WHERE id=%s AND organization_id IS NULL",
+                    (org_id, cid)
+                )
     return jsonify({"ok": True})
 
 

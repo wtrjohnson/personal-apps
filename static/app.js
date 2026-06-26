@@ -1311,11 +1311,19 @@ function renderDetail(m) {
   if (ci) ci.addEventListener("click", () => _openCanvasFullscreen(ci.src));
 
   $("#detail").querySelectorAll(".attendee-chip--link").forEach((chip) => {
-    chip.addEventListener("click", () => toggleDetailPersonCard(chip));
+    chip.addEventListener("click", () => toggleDetailPersonCard(chip, chip.dataset.personId));
   });
 
   $("#detail .detail-back")?.addEventListener("click", () => {
     if (state.selectedMeetingId != null) selectMeeting(state.selectedMeetingId);
+  });
+
+  // Click a contact card (but not its ✕) to open the full editor inline.
+  $("#detail").querySelectorAll(".detail-contact-card").forEach((card) => {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(".detail-contact-unlink")) return;
+      toggleDetailPersonCard(card, card.dataset.cid);
+    });
   });
 
   $("#detail").querySelectorAll(".detail-contact-unlink").forEach((btn) => {
@@ -2385,24 +2393,28 @@ async function selectPerson(contactId) {
   tr.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
-// Meeting detail: click an attendee chip → expand their info inline inside the detail.
-function toggleDetailPersonCard(chip) {
+// Open the full person editor inline below the meeting header. `triggerEl` is the
+// element that was clicked (an attendee chip or a contact card); it gets an
+// `.active` state and is cleared when the editor closes. `pid` is the contact id.
+function toggleDetailPersonCard(triggerEl, pid = triggerEl.dataset.personId) {
   const detail = $("#detail");
   if (!detail) return;
-  const pid = chip.dataset.personId;
+  const clearActive = () => detail
+    .querySelectorAll(".attendee-chip--link.active, .detail-contact-card.active")
+    .forEach((c) => c.classList.remove("active"));
   const existing = detail.querySelector(".detail-person-card");
   const wasOpenForThis = existing && existing.dataset.personId === pid;
   if (existing) existing.remove();
-  detail.querySelectorAll(".attendee-chip--link.active").forEach((c) => c.classList.remove("active"));
+  clearActive();
   if (wasOpenForThis) return;   // re-click → just collapse
-  chip.classList.add("active");
+  triggerEl.classList.add("active");
   const card = document.createElement("div");
   card.className = "detail-person-card";
   card.dataset.personId = pid;
   const header = detail.querySelector("header");
   if (header) header.after(card); else detail.prepend(card);
   renderPersonInto(card, pid, {
-    onDelete: () => { card.remove(); chip.classList.remove("active"); loadGroups(); },
+    onDelete: () => { card.remove(); triggerEl.classList.remove("active"); loadGroups(); },
   });
   card.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
