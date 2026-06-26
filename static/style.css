@@ -3700,6 +3700,32 @@ table.bills-table tr:last-child td { border-bottom: none; }
 /* Linked contacts in meeting detail */
 .detail-contacts { margin: 16px 0; }
 .detail-contacts h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; margin: 0 0 8px; }
+.detail-contacts-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.detail-contacts-head h3 { margin: 0 0 8px; }
+.detail-contact-add-btn {
+  background: none; border: 1px solid var(--border-strong); border-radius: var(--r-pill);
+  color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 600; padding: 3px 10px;
+  flex-shrink: 0; margin-bottom: 8px;
+}
+.detail-contact-add-btn:hover { background: var(--card); color: var(--ink); border-color: var(--ink); }
+.contact-picker { margin-top: 8px; position: relative; }
+.contact-picker.hidden { display: none; }
+.contact-picker-input {
+  width: 100%; box-sizing: border-box; padding: 8px 12px;
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm);
+  background: var(--card); color: var(--ink); font-size: 14px;
+}
+.contact-picker-input:focus { outline: none; border-color: var(--ink); }
+.contact-picker-results { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.contact-picker-row {
+  display: flex; align-items: baseline; gap: 8px; cursor: pointer;
+  padding: 7px 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--card);
+}
+.contact-picker-row:hover { border-color: var(--ink); background: var(--bg); }
+.contact-picker-row-name { font-weight: 600; font-size: 14px; color: var(--ink); }
+.contact-picker-row-sub { font-size: 12px; color: var(--muted); }
+.contact-picker-create { font-weight: 600; color: var(--muted); border-style: dashed; }
+.contact-picker-create:hover { color: var(--ink); }
 .detail-contact-list { display: flex; flex-direction: column; gap: 6px; }
 .detail-contact-card {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
