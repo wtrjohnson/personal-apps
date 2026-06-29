@@ -546,6 +546,10 @@ def init_db() -> None:
             # "Will's Bills" — bills the user is personally working on. Kept out of the
             # sync upsert's SET list so the flag survives re-syncs.
             cur.execute("ALTER TABLE tracked_bills ADD COLUMN IF NOT EXISTS working_on BOOLEAN NOT NULL DEFAULT FALSE")
+            # On-demand detail enrichment (actions/cosponsors/committees/summary/text) cached
+            # so the drawer doesn't re-hit Congress.gov on every open.
+            cur.execute("ALTER TABLE tracked_bills ADD COLUMN IF NOT EXISTS detail JSONB")
+            cur.execute("ALTER TABLE tracked_bills ADD COLUMN IF NOT EXISTS detail_synced TIMESTAMP")
             # Upcoming committee hearings/markups + House-floor consideration for tracked bills.
             cur.execute("ALTER TABLE bill_sync_meta ADD COLUMN IF NOT EXISTS schedule_last_synced TIMESTAMP")
             # Failure visibility for manual + scheduled syncs.
@@ -2185,71 +2189,75 @@ def _http_get_bytes(url: str, timeout: int = 20) -> bytes:
         return resp.read()
 
 
-def _fetch_member_legislation(kind: str) -> List[dict]:
-    """kind = 'sponsored' | 'cosponsored'. Pages the Congress.gov member endpoint."""
-    key = "sponsoredLegislation" if kind == "sponsored" else "cosponsoredLegislation"
-    path = f"member/{CONGRESS_MEMBER_BIOGUIDE}/{kind}-legislation"
-    items: List[dict] = []
-    offset, limit = 0, 250
-    for _ in range(8):  # cap pages to bound serverless runtime (~2000 records)
-        data = _congress_api_get(path, {"limit": limit, "offset": offset})
-        batch = data.get(key) or []
-        if not batch:
-            break
-        items.extend(batch)
-        total = (data.get("pagination") or {}).get("count")
-        offset += limit
-        if total is not None and offset >= total:
-            break
-    return items
+_MEMBER_PAGE_LIMIT = 250        # Congress.gov max page size
+_MEMBER_MAX_OFFSET = 8 * _MEMBER_PAGE_LIMIT  # hard ceiling (~2000 records) to bound runtime
 
 
-def _sync_congress_bills() -> dict:
-    """Pull sponsored + cosponsored legislation, upsert, and recompute match flags."""
+def _upsert_member_item(cur, kind: str, it: dict) -> bool:
+    """Upsert a single sponsored/cosponsored legislation item into tracked_bills.
+    Returns True if the item was a usable bill (had type/number/congress), else False."""
     def _d(s):  # empty string -> NULL date
         return s or None
+    btype = _normalize_bill_type(it.get("type"))
+    bnum = _normalize_bill_number(it.get("number"))
+    cong = it.get("congress")
+    if not (btype and bnum and cong):
+        return False
+    latest = it.get("latestAction") or {}
+    cur.execute(
+        """
+        INSERT INTO tracked_bills
+            (id, congress, bill_type, bill_number, relationship, title,
+             introduced_date, latest_action, latest_action_date, url, raw, last_synced)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, NOW())
+        ON CONFLICT (id) DO UPDATE SET
+            relationship = EXCLUDED.relationship,
+            title = EXCLUDED.title,
+            introduced_date = EXCLUDED.introduced_date,
+            latest_action = EXCLUDED.latest_action,
+            latest_action_date = EXCLUDED.latest_action_date,
+            url = EXCLUDED.url,
+            raw = EXCLUDED.raw,
+            last_synced = NOW()
+        """,
+        (
+            f"{cong}-{btype.lower()}-{bnum}", cong, btype, bnum, kind,
+            it.get("title"), _d(it.get("introducedDate")),
+            latest.get("text"), _d(latest.get("actionDate")),
+            _bill_human_url(cong, btype, bnum), json.dumps(it),
+        ),
+    )
+    return True
 
-    fetched = {
-        "sponsored": _fetch_member_legislation("sponsored"),
-        "cosponsored": _fetch_member_legislation("cosponsored"),
-    }
-    counts = {"sponsored": 0, "cosponsored": 0}
+
+def _sync_member_page(kind: str, offset: int = 0, limit: int = _MEMBER_PAGE_LIMIT) -> dict:
+    """Fetch ONE page of sponsored|cosponsored legislation and upsert it. Returns
+    {stored, total, next_offset}; next_offset is None when there's nothing more to page
+    (empty batch, past the API count, or at the runtime ceiling). Small + bounded so a
+    serverless invocation stays well under the ~10s function limit."""
+    key = "sponsoredLegislation" if kind == "sponsored" else "cosponsoredLegislation"
+    path = f"member/{CONGRESS_MEMBER_BIOGUIDE}/{kind}-legislation"
+    data = _congress_api_get(path, {"limit": limit, "offset": offset})
+    batch = data.get(key) or []
+    total = (data.get("pagination") or {}).get("count")
+    stored = 0
     with get_db() as conn:
         with conn.cursor() as cur:
-            for kind, items in fetched.items():
-                for it in items:
-                    btype = _normalize_bill_type(it.get("type"))
-                    bnum = _normalize_bill_number(it.get("number"))
-                    cong = it.get("congress")
-                    if not (btype and bnum and cong):
-                        continue
-                    latest = it.get("latestAction") or {}
-                    cur.execute(
-                        """
-                        INSERT INTO tracked_bills
-                            (id, congress, bill_type, bill_number, relationship, title,
-                             introduced_date, latest_action, latest_action_date, url, raw, last_synced)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, NOW())
-                        ON CONFLICT (id) DO UPDATE SET
-                            relationship = EXCLUDED.relationship,
-                            title = EXCLUDED.title,
-                            introduced_date = EXCLUDED.introduced_date,
-                            latest_action = EXCLUDED.latest_action,
-                            latest_action_date = EXCLUDED.latest_action_date,
-                            url = EXCLUDED.url,
-                            raw = EXCLUDED.raw,
-                            last_synced = NOW()
-                        """,
-                        (
-                            f"{cong}-{btype.lower()}-{bnum}", cong, btype, bnum, kind,
-                            it.get("title"), _d(it.get("introducedDate")),
-                            latest.get("text"), _d(latest.get("actionDate")),
-                            _bill_human_url(cong, btype, bnum), json.dumps(it),
-                        ),
-                    )
-                    counts[kind] += 1
+            for it in batch:
+                if _upsert_member_item(cur, kind, it):
+                    stored += 1
+    next_offset = offset + limit
+    if not batch or next_offset >= _MEMBER_MAX_OFFSET or (total is not None and next_offset >= total):
+        next_offset = None
+    return {"stored": stored, "total": total, "next_offset": next_offset}
 
-            # Recompute matches: exact on (congress, normalized type, normalized number).
+
+def _recompute_bill_matches() -> dict:
+    """Recompute tracked-bill ↔ meeting-reference match flags and stamp the bills sync
+    metadata. Idempotent; safe to call on its own as the final step of a sync."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Matches: exact on (congress, normalized type, normalized number).
             cur.execute(r"""
                 SELECT tb.id AS tbid, br.id AS brid
                 FROM tracked_bills tb
@@ -2267,12 +2275,33 @@ def _sync_congress_bills() -> dict:
                 )
                 if cur.rowcount == 1:
                     new_matches += 1
+            cur.execute(
+                "INSERT INTO bill_sync_meta (id, last_synced, last_error) "
+                "VALUES (1, NOW(), NULL) "
+                "ON CONFLICT (id) DO UPDATE SET last_synced = NOW(), last_error = NULL",
+            )
+    return {"new_matches": new_matches}
 
-            result = {
-                "sponsored_count": counts["sponsored"],
-                "cosponsored_count": counts["cosponsored"],
-                "new_matches": new_matches,
-            }
+
+def _sync_congress_bills() -> dict:
+    """Full sync: page sponsored + cosponsored legislation, upsert, recompute match flags.
+    Used by the scheduled cron job; the interactive UI drives the same steps page-by-page
+    via api_tracked_bills_sync(?step=...)."""
+    counts = {"sponsored": 0, "cosponsored": 0}
+    for kind in ("sponsored", "cosponsored"):
+        offset = 0
+        while offset is not None:
+            page = _sync_member_page(kind, offset)
+            counts[kind] += page["stored"]
+            offset = page["next_offset"]
+    matches = _recompute_bill_matches()
+    result = {
+        "sponsored_count": counts["sponsored"],
+        "cosponsored_count": counts["cosponsored"],
+        "new_matches": matches["new_matches"],
+    }
+    with get_db() as conn:
+        with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO bill_sync_meta (id, last_synced, last_result, last_error) "
                 "VALUES (1, NOW(), %s::jsonb, NULL) "
@@ -2328,10 +2357,12 @@ def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
     fetched = 0
     offset, limit = 0, 250
     stop = False
+    more = False  # True if we stopped early (cap/time budget) with work left for next run
     today = date_cls.today()
     deadline = time.monotonic() + _COMMITTEE_TIME_BUDGET
     while not stop and fetched < _COMMITTEE_DETAIL_CAP:
         if time.monotonic() > deadline:
+            more = True
             break
         data = _congress_api_get(
             f"committee-meeting/{congress}/house",
@@ -2352,6 +2383,7 @@ def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
                 continue
             if fetched >= _COMMITTEE_DETAIL_CAP or time.monotonic() > deadline:
                 stop = True
+                more = True
                 break
             fetched += 1
             try:
@@ -2414,7 +2446,7 @@ def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
                 )
                 stored += 1
         offset += limit
-    return stored
+    return {"events": stored, "scanned": fetched, "more": more}
 
 
 def _parse_floor_weeks_feed(raw: bytes):
@@ -2559,7 +2591,7 @@ def _sync_bill_schedule() -> dict:
             cur.execute("SELECT schedule_last_synced FROM bill_sync_meta WHERE id = 1")
             row = cur.fetchone()
             since = (row or {}).get("schedule_last_synced")
-            committee_events = _sync_committee_meetings(cur, congress, keys, since)
+            committee = _sync_committee_meetings(cur, congress, keys, since)
             floor_events, floor_ok = _sync_house_floor(cur, congress, keys)
             # Drop any events whose bill is no longer a sponsored tracked bill.
             cur.execute(
@@ -2573,7 +2605,13 @@ def _sync_bill_schedule() -> dict:
                 """
             )
             cur.execute("DELETE FROM bill_schedule_events WHERE event_date < CURRENT_DATE - INTERVAL '3 days'")
-            result = {"committee_events": committee_events, "floor_events": floor_events, "floor_ok": floor_ok}
+            result = {
+                "committee_events": committee["events"],
+                "committee_scanned": committee["scanned"],
+                "committee_more": committee["more"],
+                "floor_events": floor_events,
+                "floor_ok": floor_ok,
+            }
             cur.execute(
                 "INSERT INTO bill_sync_meta (id, schedule_last_synced, schedule_last_result, schedule_last_error) "
                 "VALUES (1, NOW(), %s::jsonb, NULL) "
@@ -2661,14 +2699,32 @@ def api_tracked_bills():
 
 @app.route("/api/tracked-bills/sync", methods=["POST"])
 def api_tracked_bills_sync():
+    """Sync sponsored/cosponsored legislation from Congress.gov.
+
+    Interactive clients drive the sync one short call at a time so progress is visible
+    and each request stays under the serverless time limit:
+      ?step=sponsored&offset=N  -> one page; {stored, total, next_offset}
+      ?step=cosponsored&offset=N-> one page; {stored, total, next_offset}
+      ?step=match               -> recompute match flags; {new_matches}
+    With no step, runs the whole thing in one call (used by the cron job)."""
     if not CONGRESS_API_KEY:
         return jsonify({"ok": False, "error": "Bill tracker not configured"}), 503
+    step = (request.args.get("step") or "").strip()
     try:
+        if step in ("sponsored", "cosponsored"):
+            try:
+                offset = max(0, int(request.args.get("offset", 0)))
+            except (TypeError, ValueError):
+                offset = 0
+            page = _sync_member_page(step, offset)
+            return jsonify({"ok": True, "step": step, "offset": offset, **page})
+        if step == "match":
+            return jsonify({"ok": True, "step": "match", **_recompute_bill_matches()})
         result = _sync_congress_bills()
         return jsonify({"ok": True, **result})
     except Exception as e:
-        _record_sync_error("last_error", str(e))
-        return jsonify({"ok": False, "error": str(e)}), 500
+        _record_sync_error("last_error", f"{step or 'sync'}: {e}" if step else str(e))
+        return jsonify({"ok": False, "step": step or None, "error": str(e)}), 500
 
 
 @app.route("/api/tracked-bills/<bill_id>/working", methods=["POST"])
@@ -2681,6 +2737,174 @@ def api_tracked_bill_working(bill_id: str):
             if cur.rowcount == 0:
                 return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify({"ok": True})
+
+
+def _fetch_bill_detail(congress: int, btype: str, bnum: str) -> dict:
+    """Pull the richer sub-resources for one bill from Congress.gov: policy area, full
+    action timeline, cosponsors, committees, latest summary, and text versions. Each
+    sub-resource is fetched independently so one failure degrades gracefully (that section
+    just comes back empty). ~6 small GETs — comfortably under the serverless time limit."""
+    base = f"bill/{congress}/{btype.lower()}/{bnum}"
+
+    def _get(path, params=None):
+        try:
+            return _congress_api_get(path, params)
+        except Exception:
+            return {}
+
+    bill = _get(base).get("bill") or {}
+    actions = _get(base + "/actions", {"limit": 250}).get("actions") or []
+    cod = _get(base + "/cosponsors", {"limit": 250})
+    cosponsors = cod.get("cosponsors") or []
+    committees = _get(base + "/committees", {"limit": 250}).get("committees") or []
+    summaries = _get(base + "/summaries").get("summaries") or []
+    text_versions = _get(base + "/text").get("textVersions") or []
+
+    def _text_url(tv):
+        fmts = tv.get("formats") or []
+        for f in fmts:  # prefer a PDF
+            if (f.get("type") or "").lower() == "pdf" and f.get("url"):
+                return f.get("url")
+        return (fmts[0].get("url") if fmts else None)
+
+    return {
+        "policy_area": (bill.get("policyArea") or {}).get("name"),
+        "origin_chamber": bill.get("originChamber"),
+        "actions": [
+            {"date": a.get("actionDate"), "text": a.get("text"), "type": a.get("type")}
+            for a in actions
+        ],
+        "cosponsors_count": (cod.get("pagination") or {}).get("count", len(cosponsors)),
+        "cosponsors": [
+            {"name": c.get("fullName"), "party": c.get("party"),
+             "state": c.get("state"), "date": c.get("sponsorshipDate")}
+            for c in cosponsors[:100]
+        ],
+        "committees": [
+            {"name": c.get("name"), "chamber": c.get("chamber")} for c in committees
+        ],
+        "summary": (summaries[-1].get("text") if summaries else None),
+        "text_versions": [
+            {"type": tv.get("type"), "date": tv.get("date"), "url": _text_url(tv)}
+            for tv in text_versions
+        ],
+    }
+
+
+def _build_bill_detail_response(bill_id: str, force: bool = False) -> Optional[dict]:
+    """Return a tracked bill's core columns + enriched detail. Detail is cached in the
+    tracked_bills.detail JSONB; we only call Congress.gov when it's missing or forced."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, congress, bill_type, bill_number, relationship, title,
+                       to_char(introduced_date, 'YYYY-MM-DD') AS introduced_date,
+                       latest_action,
+                       to_char(latest_action_date, 'YYYY-MM-DD') AS latest_action_date,
+                       url, working_on, detail, detail_synced, last_synced
+                FROM tracked_bills WHERE id = %s
+                """,
+                (bill_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    detail = row["detail"]
+    detail_synced = row["detail_synced"]
+    if detail is None or force:
+        detail = _fetch_bill_detail(row["congress"], row["bill_type"], row["bill_number"])
+        detail_synced = datetime.now()
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tracked_bills SET detail = %s::jsonb, detail_synced = NOW() WHERE id = %s",
+                    (json.dumps(detail), bill_id),
+                )
+    return {
+        "bill": {
+            "id": row["id"],
+            "congress": row["congress"],
+            "bill_type": row["bill_type"],
+            "bill_number": row["bill_number"],
+            "relationship": row["relationship"],
+            "title": row["title"],
+            "introduced_date": row["introduced_date"],
+            "latest_action": row["latest_action"],
+            "latest_action_date": row["latest_action_date"],
+            "url": row["url"],
+            "working_on": row["working_on"],
+            "last_synced": row["last_synced"].isoformat() if row["last_synced"] else None,
+        },
+        "detail": detail,
+        "detail_synced": detail_synced.isoformat() if detail_synced else None,
+    }
+
+
+@app.route("/api/tracked-bills/<bill_id>/detail")
+def api_tracked_bill_detail(bill_id: str):
+    if not CONGRESS_API_KEY:
+        return jsonify({"ok": False, "error": "Bill tracker not configured"}), 503
+    force = request.args.get("force") == "1"
+    try:
+        data = _build_bill_detail_response(bill_id, force=force)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if data is None:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    return jsonify({"ok": True, **data})
+
+
+def _refresh_bill_core(bill_id: str) -> bool:
+    """Re-fetch one bill's headline fields (title, latest action, introduced date) from
+    Congress.gov and update its tracked_bills row. Returns False if the bill is unknown."""
+    def _d(s):
+        return s or None
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT congress, bill_type, bill_number FROM tracked_bills WHERE id = %s",
+                (bill_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return False
+    bill = (_congress_api_get(
+        f"bill/{row['congress']}/{row['bill_type'].lower()}/{row['bill_number']}"
+    ).get("bill") or {})
+    latest = bill.get("latestAction") or {}
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE tracked_bills SET
+                    title = COALESCE(%s, title),
+                    introduced_date = COALESCE(%s, introduced_date),
+                    latest_action = %s,
+                    latest_action_date = %s,
+                    last_synced = NOW()
+                WHERE id = %s
+                """,
+                (bill.get("title"), _d(bill.get("introducedDate")),
+                 latest.get("text"), _d(latest.get("actionDate")), bill_id),
+            )
+    return True
+
+
+@app.route("/api/tracked-bills/<bill_id>/refresh", methods=["POST"])
+def api_tracked_bill_refresh(bill_id: str):
+    """On-demand refresh of a single bill: its headline fields + the cached detail."""
+    if not CONGRESS_API_KEY:
+        return jsonify({"ok": False, "error": "Bill tracker not configured"}), 503
+    try:
+        if not _refresh_bill_core(bill_id):
+            return jsonify({"ok": False, "error": "Not found"}), 404
+        data = _build_bill_detail_response(bill_id, force=True)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if data is None:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    return jsonify({"ok": True, **data})
 
 
 @app.route("/api/bill-schedule")
