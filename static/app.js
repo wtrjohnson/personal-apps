@@ -3662,7 +3662,13 @@ function _scheduleStatusLine(data) {
     const when = new Date(data.last_synced).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
     const c = res.committee_events, f = res.floor_events;
     const counts = (c == null && f == null) ? "" : ` · ${c ?? 0} committee · ${f ?? 0} floor`;
-    return { text: `Updated ${when}${counts}`, error: false };
+    // The committee scan is time-boxed; tell the user when there's more to cover.
+    let coverage = "";
+    if (res.committee_scanned != null) {
+      coverage = ` · scanned ${res.committee_scanned} meeting${res.committee_scanned === 1 ? "" : "s"}`;
+      if (res.committee_more) coverage += " (more next run)";
+    }
+    return { text: `Updated ${when}${counts}${coverage}`, error: false };
   }
   return { text: "Not yet checked", error: false };
 }
@@ -3804,15 +3810,17 @@ async function refreshTrackedBills() {
     if (!bills.length) {
       body.innerHTML = `<tr><td colspan="5" class="empty">${data.configured ? "No bills yet — try Sync now." : "Set CONGRESS_API_KEY to enable the tracker."}</td></tr>`;
     } else {
-      body.innerHTML = bills.map((b) => `
+      body.innerHTML = bills.map((b) => {
+        const recent = _isRecent(b.latest_action_date, 7);
+        return `
         <tr data-bill-id="${escapeHtml(b.id)}">
           <td>${b.working_on ? `<span class="bill-star" title="Will's Bills">★</span>` : ""}<a href="${escapeHtml(b.url || "#")}" target="_blank" rel="noopener">${_billLabel(b)}</a></td>
           <td class="bill-title-cell">${escapeHtml(b.title || "")}</td>
           <td><span class="bill-role bill-role-${escapeHtml(b.relationship)}">${b.relationship === "sponsored" ? "Sponsor" : "Cosponsor"}</span></td>
           <td>${escapeHtml(b.introduced_date || "—")}</td>
-          <td class="bill-action-cell">${escapeHtml(b.latest_action || "")}</td>
-        </tr>
-      `).join("");
+          <td class="bill-action-cell">${recent ? `<span class="bill-recent-dot" title="Action in the last 7 days"></span>` : ""}${escapeHtml(b.latest_action || "")}</td>
+        </tr>`;
+      }).join("");
     }
   }
 
@@ -3888,24 +3896,63 @@ async function refreshBillMatches() {
   });
 }
 
+// POST one sync step and return its JSON, throwing a readable error on failure.
+async function _syncStep(qs) {
+  const r = await fetch("/api/tracked-bills/sync?" + qs, { method: "POST" });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || data.ok === false) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+
+// Page through one relationship (sponsored|cosponsored), reporting running totals.
+async function _syncRelationship(step, onProgress) {
+  let offset = 0, stored = 0;
+  // Cap iterations defensively so a misbehaving next_offset can't loop forever.
+  for (let i = 0; i < 12; i++) {
+    const data = await _syncStep(`step=${step}&offset=${offset}`);
+    stored += data.stored || 0;
+    onProgress(stored);
+    if (data.next_offset == null) break;
+    offset = data.next_offset;
+  }
+  return stored;
+}
+
 async function syncBills(silent) {
   const btn = $("#bills-sync-btn");
   const label = $("#bills-sync-label");
+  const setStatus = (text, isError) => {
+    if (!label) return;
+    label.textContent = text;
+    label.classList.toggle("is-error", !!isError);
+  };
   if (btn) { btn.disabled = true; btn.textContent = "Syncing…"; btn.classList.add("is-syncing"); }
   try {
-    const r = await fetch("/api/tracked-bills/sync", { method: "POST" });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok || data.ok === false) {
-      throw new Error(data.error || `HTTP ${r.status}`);
-    }
-    await Promise.all([refreshTrackedBills(), refreshBillMatches()]);
+    const parts = [];
+    const render = (extra) => setStatus([...parts, extra].filter(Boolean).join(" · "), false);
+
+    render("Fetching sponsored…");
+    const sp = await _syncRelationship("sponsored", (n) => render(`Sponsored ${n}…`));
+    parts.push(`Sponsored ${sp}`);
+
+    render("Fetching cosponsored…");
+    const co = await _syncRelationship("cosponsored", (n) => render(`Cosponsored ${n}…`));
+    parts.push(`Cosponsored ${co}`);
+
+    render("Matching meeting notes…");
+    const m = await _syncStep("step=match");
+    if (m.new_matches) parts.push(`${m.new_matches} new match${m.new_matches === 1 ? "" : "es"}`);
+
     // Refresh the upcoming schedule too — best-effort, never fails the bill sync.
+    render("Updating schedule…");
     try {
       await fetch("/api/bill-schedule/sync", { method: "POST" });
     } catch (e2) { console.error("schedule sync failed", e2); }
     await refreshBillSchedule();
+    // refreshTrackedBills() runs last so the label settles on "Synced <time>".
+    await Promise.all([refreshTrackedBills(), refreshBillMatches()]);
   } catch (e) {
-    if (label) label.textContent = "Sync failed: " + e.message;
+    setStatus("Sync failed: " + e.message, true);
     console.error("bill sync failed", e);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = "Sync now"; btn.classList.remove("is-syncing"); }
@@ -3918,10 +3965,12 @@ function openBillContextMenu(e, bill) {
   const menu = $("#bill-ctx-menu");
   if (!menu) return;
   menu.dataset.billId = bill.id;
-  menu.innerHTML = bill.working_on
+  menu.innerHTML = (bill.working_on
     ? `<div class="ctx-item" data-bill-action="unset">☆ Remove from Will's Bills</div>`
-    : `<div class="ctx-item" data-bill-action="set">★ Add to Will's Bills</div>`;
-  const menuW = 220, menuH = 48;
+    : `<div class="ctx-item" data-bill-action="set">★ Add to Will's Bills</div>`)
+    + `<div class="ctx-item" data-bill-action="details">↗ View details</div>`
+    + `<div class="ctx-item" data-bill-action="refresh">⟳ Refresh from Congress.gov</div>`;
+  const menuW = 220, menuH = 120;
   let x = e.clientX, y = e.clientY;
   if (x + menuW > window.innerWidth)  x = window.innerWidth - menuW - 8;
   if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - 8;
@@ -3942,6 +3991,142 @@ function closeBillContextMenu() {
 function _ordinalNum(n) {
   const s = ["th", "st", "nd", "rd"], v = n % 100;
   return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+
+// True if an ISO date (YYYY-MM-DD) is within the last `days` days.
+function _isRecent(dateStr, days) {
+  if (!dateStr) return false;
+  const d = new Date(dateStr + "T00:00:00");
+  if (isNaN(d)) return false;
+  return (Date.now() - d.getTime()) <= days * 86400000;
+}
+
+// ---------- Bill detail drawer ----------
+function _relTime(iso) {
+  if (!iso) return "";
+  const then = new Date(iso), now = new Date();
+  const mins = Math.round((now - then) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return then.toLocaleDateString();
+}
+
+function closeBillDrawer() {
+  const bd = $("#bill-drawer-backdrop");
+  if (!bd) return;
+  bd.classList.remove("visible");
+  bd.classList.add("hidden");
+}
+
+async function openBillDrawer(billId, opts) {
+  const bd = $("#bill-drawer-backdrop");
+  const el = $("#bill-drawer-content");
+  if (!bd || !el) return;
+  bd.classList.remove("hidden");
+  requestAnimationFrame(() => bd.classList.add("visible"));
+  const force = !!(opts && opts.force);
+  el.innerHTML = `<div class="detail-empty">${force ? "Refreshing from Congress.gov…" : "Loading bill…"}</div>`;
+  let data;
+  try {
+    const id = encodeURIComponent(billId);
+    // A forced open re-fetches headline fields + detail via the refresh endpoint;
+    // a normal open serves the cached detail (fetching only if it's never been built).
+    data = force
+      ? await api(`/api/tracked-bills/${id}/refresh`, { method: "POST" })
+      : await api(`/api/tracked-bills/${id}/detail`);
+  } catch (e) {
+    el.innerHTML = `<div class="detail-empty">Couldn't load this bill — ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  if (force) refreshTrackedBills();
+  renderBillDrawer(el, data);
+}
+
+function renderBillDrawer(el, data) {
+  const b = data.bill || {};
+  const d = data.detail || {};
+  const fmtDate = (s) => s ? new Date(s + "T00:00:00").toLocaleDateString(undefined,
+    { year: "numeric", month: "short", day: "numeric" }) : "";
+  const role = b.relationship === "sponsored" ? "Sponsor" : "Cosponsor";
+
+  const actions = (d.actions || []);
+  const timeline = actions.length
+    ? `<ol class="bill-timeline">${actions.map((a) => `
+        <li>
+          <span class="bill-timeline-date">${escapeHtml(fmtDate(a.date) || a.date || "")}</span>
+          <span class="bill-timeline-text">${escapeHtml(a.text || "")}</span>
+        </li>`).join("")}</ol>`
+    : `<div class="bill-section-empty">No recorded actions.</div>`;
+
+  const cos = (d.cosponsors || []);
+  const cosList = cos.length
+    ? `<ul class="bill-cosponsors">${cos.map((c) => `
+        <li>${escapeHtml(c.name || "")}${c.party || c.state
+          ? ` <span class="muted">(${escapeHtml([c.party, c.state].filter(Boolean).join("-"))})</span>` : ""}</li>`).join("")}</ul>`
+    : `<div class="bill-section-empty">No cosponsors.</div>`;
+
+  const committees = (d.committees || []);
+  const comList = committees.length
+    ? `<ul class="bill-committees">${committees.map((c) => `
+        <li>${escapeHtml(c.name || "")}${c.chamber ? ` <span class="muted">(${escapeHtml(c.chamber)})</span>` : ""}</li>`).join("")}</ul>`
+    : `<div class="bill-section-empty">No committee referrals.</div>`;
+
+  const texts = (d.text_versions || []).filter((t) => t.url);
+  const sources = [];
+  if (b.url) sources.push(`<a href="${escapeHtml(b.url)}" target="_blank" rel="noopener">Congress.gov bill page ↗</a>`);
+  texts.forEach((t) => sources.push(
+    `<a href="${escapeHtml(t.url)}" target="_blank" rel="noopener">${escapeHtml(t.type || "Bill text")}${t.date ? " (" + escapeHtml(fmtDate(t.date) || t.date) + ")" : ""} ↗</a>`));
+
+  el.innerHTML = `
+    <header class="bill-drawer-head">
+      <h1>${escapeHtml(b.bill_type || "")} ${escapeHtml(b.bill_number || "")}
+        <span class="bill-role bill-role-${escapeHtml(b.relationship || "")}">${role}</span>
+        ${b.working_on ? `<span class="bill-star" title="Will's Bills">★</span>` : ""}
+      </h1>
+      ${b.title ? `<div class="bill-drawer-title">${escapeHtml(b.title)}</div>` : ""}
+      <div class="bill-drawer-meta">
+        ${d.policy_area ? `<span>${escapeHtml(d.policy_area)}</span>` : ""}
+        ${b.introduced_date ? `<span>Introduced ${escapeHtml(fmtDate(b.introduced_date))}</span>` : ""}
+        ${typeof d.cosponsors_count === "number" ? `<span>${d.cosponsors_count} cosponsor${d.cosponsors_count === 1 ? "" : "s"}</span>` : ""}
+      </div>
+      <div class="bill-drawer-actions">
+        <button class="secondary-btn-sm" id="bill-drawer-refresh" data-bill-id="${escapeHtml(b.id || "")}">Refresh</button>
+        <span class="bill-drawer-fresh">${[
+          data.detail_synced ? "Detail " + _relTime(data.detail_synced) : "",
+          b.last_synced ? "record " + _relTime(b.last_synced) : "",
+        ].filter(Boolean).map(escapeHtml).join(" · ")}</span>
+      </div>
+    </header>
+    ${b.latest_action ? `<section class="bill-section">
+      <h2>Latest action</h2>
+      <div class="bill-latest-action">${escapeHtml(b.latest_action)}${b.latest_action_date ? ` <span class="muted">— ${escapeHtml(fmtDate(b.latest_action_date))}</span>` : ""}</div>
+    </section>` : ""}
+    ${d.summary ? `<section class="bill-section"><h2>Summary</h2><div class="bill-summary">${escapeHtml(d.summary).replace(/&lt;[^&]*&gt;/g, "")}</div></section>` : ""}
+    <section class="bill-section"><h2>Action timeline</h2>${timeline}</section>
+    <section class="bill-section"><h2>Cosponsors</h2>${cosList}</section>
+    <section class="bill-section"><h2>Committees</h2>${comList}</section>
+    <section class="bill-section"><h2>Sources</h2>
+      <div class="bill-sources">${sources.length ? sources.join("") : `<span class="bill-section-empty">No source links.</span>`}</div>
+    </section>
+  `;
+  $("#bill-drawer-refresh")?.addEventListener("click", async (e) => {
+    const id = e.currentTarget.dataset.billId;
+    if (!id) return;
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.textContent = "Refreshing…";
+    try {
+      const data = await api(`/api/tracked-bills/${encodeURIComponent(id)}/refresh`, { method: "POST" });
+      renderBillDrawer($("#bill-drawer-content"), data);
+      refreshTrackedBills();  // headline action may have changed
+    } catch (err) {
+      btn.disabled = false; btn.textContent = "Refresh";
+      console.error("bill refresh failed", err);
+    }
+  });
 }
 
 // ---------- Snooze popup ----------
@@ -4673,11 +4858,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#bills-sync-btn")?.addEventListener("click", () => syncBills(false));
   $("#view-bills")?.addEventListener("click", (e) => {
     const tab = e.target.closest(".groups-subtab[data-bills-rel]");
-    if (!tab) return;
-    document.querySelectorAll(".groups-subtab[data-bills-rel]").forEach((b) => b.classList.remove("active"));
-    tab.classList.add("active");
-    state.billsFilter.relationship = tab.dataset.billsRel;
-    refreshTrackedBills();
+    if (tab) {
+      document.querySelectorAll(".groups-subtab[data-bills-rel]").forEach((b) => b.classList.remove("active"));
+      tab.classList.add("active");
+      state.billsFilter.relationship = tab.dataset.billsRel;
+      refreshTrackedBills();
+      return;
+    }
+    // Click a bill row (but not the congress.gov link) to open the detail drawer.
+    const tr = e.target.closest("#bills-tracker-body tr[data-bill-id]");
+    if (tr && !e.target.closest("a")) {
+      openBillDrawer(tr.dataset.billId);
+    }
   });
   $("#bills-search")?.addEventListener("input", debounce(() => {
     state.billsFilter.q = $("#bills-search").value.trim();
@@ -4700,13 +4892,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     const menu = $("#bill-ctx-menu");
     const id = menu?.dataset.billId;
     if (!item || !id) return;
-    const working = item.dataset.billAction === "set";
+    const action = item.dataset.billAction;
     closeBillContextMenu();
+    if (action === "details") { openBillDrawer(id); return; }
+    if (action === "refresh") { openBillDrawer(id, { force: true }); return; }
     try {
       await api(`/api/tracked-bills/${id}/working`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ working }),
+        body: JSON.stringify({ working: action === "set" }),
       });
       refreshTrackedBills();
     } catch (err) { console.error("toggle Will's Bills failed", err); }
@@ -4717,6 +4911,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeBillContextMenu();
   }, true);
+
+  // Bill detail drawer close
+  $("#bill-drawer-close")?.addEventListener("click", closeBillDrawer);
+  $("#bill-drawer-backdrop")?.addEventListener("click", (e) => {
+    if (e.target.id === "bill-drawer-backdrop") closeBillDrawer();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeBillDrawer();
+  });
 
   // Snoozed filter
   $("#t-snoozed")?.addEventListener("change", () => { refreshTasks(); updateTaskFilterToggleState(); });

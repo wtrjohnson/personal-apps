@@ -2354,6 +2354,31 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .bill-role-sponsored { background: var(--accent-softer); color: var(--accent-ink); }
 .bill-role-cosponsored { background: var(--card-soft); color: var(--muted); }
 
+/* Bill detail drawer */
+#bills-tracker-body tr[data-bill-id] { cursor: pointer; }
+.bill-drawer-head { padding: 22px 26px 16px; border-bottom: 1px solid var(--border); }
+.bill-drawer-head h1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bill-drawer-title { font-size: 14px; color: var(--ink); margin-top: 6px; line-height: 1.4; }
+.bill-drawer-meta { color: var(--muted); font-size: 12px; margin-top: 8px; }
+.bill-drawer-meta span + span::before { content: "·"; margin: 0 6px; color: var(--border-strong); }
+.bill-drawer-actions { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.bill-drawer-fresh { font-size: 11.5px; color: var(--muted-2); }
+.bill-section { padding: 16px 26px; border-bottom: 1px solid var(--border); }
+.bill-section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin: 0 0 10px; font-weight: 700; }
+.bill-section-empty { color: var(--muted-2); font-size: 12.5px; }
+.bill-latest-action, .bill-summary { font-size: 13px; line-height: 1.6; }
+.bill-timeline { list-style: none; margin: 0; padding: 0; }
+.bill-timeline li { display: flex; gap: 12px; padding: 6px 0; font-size: 12.5px; line-height: 1.5; border-bottom: 1px dashed var(--border); }
+.bill-timeline li:last-child { border-bottom: none; }
+.bill-timeline-date { flex: 0 0 92px; color: var(--muted); white-space: nowrap; }
+.bill-timeline-text { flex: 1; }
+.bill-cosponsors, .bill-committees { list-style: none; margin: 0; padding: 0; font-size: 12.5px; line-height: 1.7; columns: 2; }
+.bill-committees { columns: 1; }
+#bill-drawer-content .muted { color: var(--muted); }
+.bill-sources { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.bill-sources a { color: var(--accent-ink); }
+.bill-recent-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent, #2563eb); margin-right: 7px; vertical-align: middle; }
+
 /* Count badges on the sub-tabs */
 .bills-count {
   display: inline-block;
