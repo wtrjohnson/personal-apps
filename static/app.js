@@ -2487,6 +2487,25 @@ async function submitImport() {
 let _intakeMeetingType = null;
 let _intakeScanResult = null; // {text, items: [{type, text, accepted}]}
 let _intakeLinkedContacts = []; // [{id, name, company, title, email, phone}]
+let _attendeesDirty = false; // true once the user manually edits the Names chip
+
+const _ATTENDEE_MENTION_RE = /@([A-Z][A-Za-z'-]*(?:\s[A-Z][A-Za-z'-]*)?)/g;
+
+function _intakeSyncAttendeesFromNotes() {
+  if (_attendeesDirty) return;
+  const text = $("#intake-notes-text").value || "";
+  const names = [];
+  const seen = new Set();
+  let m;
+  _ATTENDEE_MENTION_RE.lastIndex = 0;
+  while ((m = _ATTENDEE_MENTION_RE.exec(text)) !== null) {
+    const name = m[1].trim();
+    const key = name.toLowerCase();
+    if (!seen.has(key)) { seen.add(key); names.push(name); }
+  }
+  $("#intake-attendees").value = names.join(", ");
+  _intakeBuildChips();
+}
 
 const _BILL_RE = /\b(H\.R\.|S\.|H\.Res\.|S\.Res\.|H\.Con\.Res\.|S\.Con\.Res\.|H\.J\.Res\.|S\.J\.Res\.)\s*(\d+)\b/gi;
 
@@ -2541,13 +2560,6 @@ function _extractCallouts(text) {
     }
   }
   return items;
-}
-
-function _intakeScan() {
-  const text = ($("#intake-notes-text").value || "").trim();
-  const items = _extractCallouts(text).map((item) => ({ ...item, accepted: true }));
-  _intakeScanResult = { text, items };
-  _renderScanResults();
 }
 
 const _SCAN_ICONS = {
@@ -2991,8 +3003,8 @@ function openIntakeModal() {
   _intakeMeetingType = null;
   modal.dataset.phase = "0";
   $("#intake-modal-title").textContent = "New Meeting";
-  $("#intake-purpose-row").classList.remove("intake-show");
-  $("#intake-purpose").value = "";
+  $("#intake-attendees").value = "";
+  _attendeesDirty = false;
   // Populate group datalist
   const dl = $("#intake-group-list");
   dl.innerHTML = "";
@@ -3019,12 +3031,12 @@ function closeIntakeModal() {
 }
 
 const _intakeTypePresets = {
-  "1on1":       { group: "Rebekah",   topic: "1:1",                attendees: "", skipPremeeting: true,  constituent: false },
-  "staff":      { group: "Staff",     topic: "Staff Meeting",      attendees: "", skipPremeeting: true,  constituent: false },
-  "legteam":    { group: "Leg. Team", topic: "Leg. Team Meeting",  attendees: "", skipPremeeting: true,  constituent: false },
-  "constituent":{ group: "",          topic: "",                                  skipPremeeting: false, constituent: true  },
-  "briefing":   { group: "",          topic: "",                                  skipPremeeting: false, constituent: false },
-  "other":      { group: "",          topic: "",                                  skipPremeeting: false, constituent: false },
+  "1on1":       { group: "Rebekah",   topic: "1:1",               skipPremeeting: true  },
+  "staff":      { group: "Staff",     topic: "Staff Meeting",     skipPremeeting: true  },
+  "legteam":    { group: "Leg. Team", topic: "Leg. Team Meeting", skipPremeeting: true  },
+  "constituent":{ group: "",          topic: "",                  skipPremeeting: false },
+  "briefing":   { group: "",          topic: "",                  skipPremeeting: false },
+  "other":      { group: "",          topic: "",                  skipPremeeting: false },
 };
 
 function _intakeSelectType(type) {
@@ -3035,16 +3047,8 @@ function _intakeSelectType(type) {
   // Pre-fill fields
   if (preset.group !== undefined) $("#intake-group").value = preset.group;
   if (preset.topic !== undefined) $("#intake-topic").value = preset.topic;
-  if (preset.attendees !== undefined) $("#intake-attendees").value = preset.attendees;
-
-  // Show/hide constituent-only purpose row
-  const purposeRow = $("#intake-purpose-row");
-  if (preset.constituent) {
-    purposeRow.classList.add("intake-show");
-  } else {
-    purposeRow.classList.remove("intake-show");
-    $("#intake-purpose").value = "";
-  }
+  $("#intake-attendees").value = "";
+  _attendeesDirty = false;
 
   // For fixed-info meeting types, skip straight to in-meeting notes
   if (preset.skipPremeeting) {
@@ -3061,10 +3065,8 @@ function _intakeSelectType(type) {
   // Focus the most useful field
   if (!preset.group) {
     setTimeout(() => $("#intake-group").focus(), 50);
-  } else if (!preset.topic) {
-    setTimeout(() => $("#intake-topic").focus(), 50);
   } else {
-    setTimeout(() => $("#intake-attendees").focus(), 50);
+    setTimeout(() => $("#intake-topic").focus(), 50);
   }
 }
 
@@ -3073,11 +3075,10 @@ function _intakeBuildChips() {
   container.innerHTML = "";
 
   const fields = [
-    { id: "intake-group",     label: "Group",     type: "text"   },
-    { id: "intake-topic",     label: "Topic",     type: "text"   },
-    { id: "intake-date",      label: "Date",      type: "date"   },
-    { id: "intake-attendees", label: "Attendees", type: "text"   },
-    { id: "intake-purpose",   label: "Purpose",   type: "select" },
+    { id: "intake-group",     label: "Group",  type: "text" },
+    { id: "intake-topic",     label: "Topic",  type: "text" },
+    { id: "intake-attendees", label: "Names",  type: "text" },
+    { id: "intake-date",      label: "Date",   type: "date" },
   ];
 
   for (const f of fields) {
@@ -3088,10 +3089,7 @@ function _intakeBuildChips() {
     const chip = document.createElement("div");
     chip.className = "intake-meta-chip";
     chip.dataset.field = f.id;
-
-    const labelEl = document.createElement("span");
-    labelEl.className = "intake-meta-chip-label";
-    labelEl.textContent = f.label;
+    chip.title = f.label;
 
     const valueEl = document.createElement("span");
     valueEl.className = "intake-meta-chip-value";
@@ -3101,8 +3099,8 @@ function _intakeBuildChips() {
     inputEl.className = "intake-meta-chip-input";
     inputEl.type = f.type === "date" ? "date" : "text";
     inputEl.value = val;
+    if (f.type !== "date") inputEl.size = Math.max(val.length, 6) + 1;
 
-    chip.appendChild(labelEl);
     chip.appendChild(valueEl);
     chip.appendChild(inputEl);
     container.appendChild(chip);
@@ -3116,10 +3114,17 @@ function _intakeBuildChips() {
       e.stopPropagation();
     });
 
+    if (f.type !== "date") {
+      inputEl.addEventListener("input", () => {
+        inputEl.size = Math.max(inputEl.value.length, 6) + 1;
+      });
+    }
+
     inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === "Escape") {
         _intakeCollapseChip(chip);
         e.preventDefault();
+        e.stopPropagation();
       }
     });
 
@@ -3142,6 +3147,7 @@ function _intakeCollapseChip(chip) {
       ? new Date(newVal + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })
       : newVal;
   }
+  if (fieldId === "intake-attendees") _attendeesDirty = true;
   chip.classList.remove("intake-meta-chip--expanded");
 }
 
@@ -3187,7 +3193,7 @@ async function _intakeSaveNotes() {
         action_items: "",
         reminders: "",
         meeting_type: _intakeMeetingType || null,
-        purpose_val: $("#intake-purpose").value.trim() || null,
+        purpose_val: null,
         prepared_meeting_id: preparedMeetingId || null,
         confirmed_items: _intakeScanResult
           ? _intakeScanResult.items.map((i) => {
@@ -5071,8 +5077,24 @@ document.addEventListener("DOMContentLoaded", async () => {
     _intakeBriefTimeout = setTimeout(_fetchIntakeBrief, 400);
   });
 
-  // Re-scan button
-  $("#intake-rescan-btn").addEventListener("click", _intakeScan);
+  // Live attendee detection from @mentions in the notes textarea
+  const _syncAttendeesDebounced = debounce(_intakeSyncAttendeesFromNotes, 200);
+  $("#intake-notes-text").addEventListener("input", _syncAttendeesDebounced);
+
+  // Legend buttons: insert marker text at the cursor
+  $("#intake-legend-strip").addEventListener("click", (e) => {
+    const btn = e.target.closest(".intake-legend-btn");
+    if (!btn) return;
+    const textarea = $("#intake-notes-text");
+    const insert = btn.dataset.insert;
+    const start = textarea.selectionStart ?? textarea.value.length;
+    const end = textarea.selectionEnd ?? textarea.value.length;
+    const atLineStart = start === 0 || textarea.value[start - 1] === "\n";
+    const prefix = atLineStart ? "" : "\n";
+    const toInsert = prefix + insert;
+    textarea.setRangeText(toInsert, start, end, "end");
+    textarea.focus();
+  });
 
   // Scan result clear
   $("#review-queue-clear").addEventListener("click", () => {
