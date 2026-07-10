@@ -773,6 +773,7 @@ async function submitEditModal() {
   const personRaw = $("#edit-m-person")?.value.trim() ?? "";
   const personField = personRaw === "" ? "" : await ensurePersonId(personRaw);
   const payload = {
+    id: _editTask.id,
     source_filename: _editTask.source_filename,
     section: _editTask.section,
     old_text: _editTask.text,
@@ -793,6 +794,7 @@ async function submitEditModal() {
   closeEditModal();
   await refreshTasks();
   if (state.meetings.length) refreshMeetings();
+  if (state.selectedOrgId) selectOrg(state.selectedOrgId, { skipToggle: true });
 }
 
 // ---------- Source-note drawer ----------
@@ -1743,8 +1745,24 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
           return `<div class="org-entity-row org-entity-row--task" data-task-id="${escapeHtml(t.id)}" data-contact-id="${escapeHtml(t.contact_id || "")}">
             <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
             <span class="entity-text">${escapeHtml(t.text)}</span>${deadline}${priority}
+            <button class="entity-status-btn" data-task-toggle="${escapeHtml(t.id)}" title="Mark complete">✓</button>
+            <button class="entity-edit-btn" data-task-edit="${escapeHtml(t.id)}" title="Edit">✎</button>
+            <button class="entity-del-btn" data-task-del="${escapeHtml(t.id)}" title="Delete">🗑</button>
           </div>`;
         }).join("")
+      : "";
+
+    const completedTasksHtml = completedTasks.length
+      ? `<details class="org-completed-tasks">
+           <summary>Completed tasks (${completedTasks.length})</summary>
+           ${completedTasks.map((t) => `
+             <div class="org-entity-row org-entity-row--task org-entity-row--done" data-task-id="${escapeHtml(t.id)}" data-contact-id="${escapeHtml(t.contact_id || "")}">
+               <span class="callout-badge callout-badge--task">${_SCAN_ICONS.task}Task</span>
+               <span class="entity-text">${escapeHtml(t.text)}</span>
+               <button class="entity-status-btn" data-task-toggle="${escapeHtml(t.id)}" title="Mark not done">↺</button>
+               <button class="entity-del-btn" data-task-del="${escapeHtml(t.id)}" title="Delete">🗑</button>
+             </div>`).join("")}
+         </details>`
       : "";
 
     const billsHtml = (org.bills || []).map((b) =>
@@ -1794,6 +1812,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
       railSection("Open Commitments", commitsHtml),
       personFilterHtml,
       railSection("Open Tasks", tasksHtml),
+      completedTasksHtml,
       billsHtml && railSection("Bills", `<div class="bill-pills-row">${billsHtml}</div>`),
       contactsHtml && railSection("People", `<div class="drawer-cards">${contactsHtml}</div>`),
       _entityNotesHtml(org.entity_notes),
@@ -1842,7 +1861,8 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     });
 
     // Build the activity timeline (async; the rail is already visible).
-    renderOrgTimeline(orgId, $("#org-timeline"));
+    const orgTaskLookup = new Map([...openTasks, ...completedTasks].map((t) => [t.id, t]));
+    renderOrgTimeline(orgId, $("#org-timeline"), orgTaskLookup, () => selectOrg(orgId, { skipToggle: true }));
 
     // Standalone org notes
     if (content) _wireEntityNotes(content, "organization", orgId, () => selectOrg(orgId, { skipToggle: true }));
@@ -1867,7 +1887,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     });
 
     // Wire interactive buttons
-    content?.querySelectorAll(".entity-status-btn").forEach((btn) => {
+    content?.querySelectorAll(".entity-status-btn[data-ask-id]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         await api(`/api/asks/${btn.dataset.askId}/status`, {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: btn.dataset.status }),
@@ -1888,6 +1908,34 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
       row.addEventListener("click", () => {
         const task = [...openTasks, ...completedTasks].find((t) => t.id === row.dataset.taskId);
         if (task) openDrawer(task);
+      });
+    });
+
+    // Complete / uncomplete, edit, delete tasks directly from the org rail.
+    content?.querySelectorAll("[data-task-toggle]").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const task = [...openTasks, ...completedTasks].find((t) => t.id === btn.dataset.taskToggle);
+        if (!task) return;
+        await toggleTaskDone(task);
+        selectOrg(orgId, { skipToggle: true });
+      });
+    });
+    content?.querySelectorAll("[data-task-edit]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const task = [...openTasks, ...completedTasks].find((t) => t.id === btn.dataset.taskEdit);
+        if (task) openEditModal(task);
+      });
+    });
+    content?.querySelectorAll("[data-task-del]").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm("Delete this task?")) return;
+        const task = [...openTasks, ...completedTasks].find((t) => t.id === btn.dataset.taskDel);
+        if (!task) return;
+        await deleteTask(task);
+        selectOrg(orgId, { skipToggle: true });
       });
     });
 
@@ -1995,8 +2043,11 @@ const _TL_META = {
 };
 
 // Renders a list of timeline events (shared by the org and person timelines) into a
-// container. Meeting events are clickable into the meeting detail.
-function _renderTimelineEvents(events, container) {
+// container. Meeting events are clickable into the meeting detail. Task events (created /
+// completed) get inline complete/delete controls when a full Task object for them is
+// available in taskLookup (id -> Task), so the timeline supports the same actions as the
+// tasks page without a dedicated single-task fetch endpoint.
+function _renderTimelineEvents(events, container, taskLookup, onTaskChanged) {
   if (!container) return;
   if (!events.length) {
     container.innerHTML = `<div class="detail-empty-inline">No activity yet.</div>`;
@@ -2024,6 +2075,14 @@ function _renderTimelineEvents(events, container) {
       badges.push(`<span class="entity-status status-${escapeHtml(e.status)}">${escapeHtml(String(e.status).replace(/_/g, " "))}</span>`);
     if (e.priority === "high") badges.push(`<span class="tl-prio">high</span>`);
     if (e.extra)               badges.push(`<span class="tl-extra">due ${escapeHtml(e.extra)}</span>`);
+    const isTaskEvent = (e.kind === "task_created" || e.kind === "task_completed");
+    const task = isTaskEvent && taskLookup ? taskLookup.get(e.task_id) : null;
+    if (task) {
+      badges.push(`<span class="tl-event-actions">
+        <button class="entity-status-btn" data-tl-task-toggle="${escapeHtml(task.id)}" title="${task.done ? "Mark not done" : "Mark complete"}">${task.done ? "↺" : "✓"}</button>
+        <button class="entity-del-btn" data-tl-task-del="${escapeHtml(task.id)}" title="Delete">🗑</button>
+      </span>`);
+    }
     const clickable = e.kind === "meeting" && e.meeting_id;
     html += `
       <div class="tl-event tl-event--${meta.cls}${clickable ? " tl-event--click" : ""}"${clickable ? ` data-mid="${escapeHtml(e.meeting_id)}"` : ""}>
@@ -2042,9 +2101,28 @@ function _renderTimelineEvents(events, container) {
   container.querySelectorAll(".tl-event--click[data-mid]").forEach((row) => {
     row.addEventListener("click", () => selectMeeting(row.dataset.mid));
   });
+  container.querySelectorAll("[data-tl-task-toggle]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const task = taskLookup.get(btn.dataset.tlTaskToggle);
+      if (!task) return;
+      await toggleTaskDone(task);
+      if (onTaskChanged) onTaskChanged();
+    });
+  });
+  container.querySelectorAll("[data-tl-task-del]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm("Delete this task?")) return;
+      const task = taskLookup.get(btn.dataset.tlTaskDel);
+      if (!task) return;
+      await deleteTask(task);
+      if (onTaskChanged) onTaskChanged();
+    });
+  });
 }
 
-async function renderOrgTimeline(orgId, container) {
+async function renderOrgTimeline(orgId, container, taskLookup, onTaskChanged) {
   if (!container) return;
   let events;
   try {
@@ -2055,10 +2133,10 @@ async function renderOrgTimeline(orgId, container) {
     return;
   }
   if (state.selectedOrgId !== orgId) return;   // user navigated away mid-fetch
-  _renderTimelineEvents(events, container);
+  _renderTimelineEvents(events, container, taskLookup, onTaskChanged);
 }
 
-async function renderPersonTimeline(contactId, container) {
+async function renderPersonTimeline(contactId, container, taskLookup, onTaskChanged) {
   if (!container) return;
   let events;
   try {
@@ -2069,7 +2147,7 @@ async function renderPersonTimeline(contactId, container) {
     return;
   }
   if (_currentPersonId !== contactId) return;   // user navigated away mid-fetch
-  _renderTimelineEvents(events, container);
+  _renderTimelineEvents(events, container, taskLookup, onTaskChanged);
 }
 
 function renderPeopleTable(people) {
@@ -2315,7 +2393,8 @@ async function renderPersonInto(container, contactId, opts = {}) {
     `;
     _wirePersonEditor();
     _wireEntityNotes(content, "contact", contactId, refresh);
-    renderPersonTimeline(contactId, content.querySelector("#person-timeline"));
+    const personTaskLookup = new Map((p.tasks || []).map((t) => [t.id, t]));
+    renderPersonTimeline(contactId, content.querySelector("#person-timeline"), personTaskLookup, refresh);
     content.querySelectorAll(".org-meeting-row[data-mid]").forEach((row) => {
       if (!row.dataset.mid) return;
       row.addEventListener("click", () => selectMeeting(row.dataset.mid));

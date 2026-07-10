@@ -1359,47 +1359,47 @@ def db_get_org_timeline(org_id: str, limit: int = 200) -> list:
                m.id::text AS meeting_id, NULL::text AS priority, NULL::text AS extra,
                (SELECT count(*) FROM tasks t WHERE t.meeting_id = m.id AND t.type='action'   AND NOT t.done)::int AS action_count,
                (SELECT count(*) FROM tasks t WHERE t.meeting_id = m.id AND t.type='reminder' AND NOT t.done)::int AS reminder_count,
-               m.canonical_group AS fallback
+               m.canonical_group AS fallback, NULL::text AS task_id
         FROM meetings m WHERE m.organization_id = %(org)s
 
         UNION ALL
         SELECT 'ask', a.id::text, a.created_at::timestamp, a.text, a.status,
-               a.meeting_id::text, a.priority, NULL, 0, 0, NULL
+               a.meeting_id::text, a.priority, NULL, 0, 0, NULL, NULL
         FROM asks a WHERE a.organization_id = %(org)s
 
         UNION ALL
         SELECT 'commitment', c.id::text, c.created_at::timestamp, c.text, c.status,
-               c.meeting_id::text, NULL, to_char(c.due_date,'YYYY-MM-DD'), 0, 0, NULL
+               c.meeting_id::text, NULL, to_char(c.due_date,'YYYY-MM-DD'), 0, 0, NULL, NULL
         FROM commitments c WHERE c.organization_id = %(org)s
 
         UNION ALL
         SELECT 'trigger', ft.id::text, ft.created_at::timestamp,
                ft.condition_text || ' → ' || ft.action_text, ft.status,
-               ft.meeting_id::text, NULL, NULL, 0, 0, NULL
+               ft.meeting_id::text, NULL, NULL, 0, 0, NULL, NULL
         FROM followup_triggers ft WHERE ft.organization_id = %(org)s
 
         UNION ALL
         SELECT 'task_created', t.id::text, t.created_at::timestamp, t.text,
                CASE WHEN t.done THEN 'done' ELSE 'open' END,
-               t.meeting_id::text, t.priority, NULLIF(t.deadline,''), 0, 0, NULL
+               t.meeting_id::text, t.priority, NULLIF(t.deadline,''), 0, 0, NULL, t.id::text
         FROM tasks t WHERE (t.organization_id = %(org)s OR {_group_slug} = %(org)s)
 
         UNION ALL
         SELECT 'task_completed', co.id::text, co.completed_at::timestamp, co.task_text, 'done',
-               t.meeting_id::text, NULL, NULL, 0, 0, NULL
+               t.meeting_id::text, NULL, NULL, 0, 0, NULL, t.id::text
         FROM completions co JOIN tasks t ON t.id = co.task_id
         WHERE (t.organization_id = %(org)s OR {_group_slug} = %(org)s)
 
         UNION ALL
         SELECT 'note', en.id::text, en.created_at::timestamp, en.body, NULL,
-               NULL, NULL, NULL, 0, 0, NULL
+               NULL, NULL, NULL, 0, 0, NULL, NULL
         FROM entity_notes en
         WHERE en.entity_type = 'organization' AND en.entity_id = %(org)s
 
         UNION ALL
         SELECT 'bill', br.id::text, br.created_at::timestamp,
                br.bill_type || ' ' || br.bill_number, NULL,
-               br.meeting_id::text, NULL, NULL, 0, 0, NULL
+               br.meeting_id::text, NULL, NULL, 0, 0, NULL, NULL
         FROM bill_references br JOIN meetings m ON br.meeting_id = m.id
         WHERE m.organization_id = %(org)s
 
@@ -1407,7 +1407,7 @@ def db_get_org_timeline(org_id: str, limit: int = 200) -> list:
         SELECT 'bill_notified', bn.id::text, bn.created_at::timestamp,
                tb.bill_type || ' ' || tb.bill_number || ' — notified (Blake ' ||
                  CASE WHEN tb.relationship = 'sponsored' THEN 'introduced' ELSE 'cosponsored' END || ')',
-               NULL, NULL, NULL, NULL, 0, 0, NULL
+               NULL, NULL, NULL, NULL, 0, 0, NULL, NULL
         FROM bill_match_notifications bn
         JOIN bill_match_flags f ON f.id = bn.flag_id
         JOIN tracked_bills tb   ON tb.id = f.tracked_bill_id
@@ -1416,7 +1416,7 @@ def db_get_org_timeline(org_id: str, limit: int = 200) -> list:
     SELECT kind, id,
            to_char(ts, 'YYYY-MM-DD"T"HH24:MI:SS') AS ts,
            COALESCE(label, fallback) AS label,
-           status, meeting_id, priority, extra, action_count, reminder_count
+           status, meeting_id, priority, extra, action_count, reminder_count, task_id
     FROM ev
     ORDER BY ts DESC NULLS LAST
     LIMIT %(limit)s
@@ -1440,42 +1440,42 @@ def db_get_person_timeline(contact_id: str, limit: int = 200) -> list:
                m.id::text AS meeting_id, NULL::text AS priority, NULL::text AS extra,
                (SELECT count(*) FROM tasks t WHERE t.meeting_id = m.id AND t.type='action'   AND NOT t.done)::int AS action_count,
                (SELECT count(*) FROM tasks t WHERE t.meeting_id = m.id AND t.type='reminder' AND NOT t.done)::int AS reminder_count,
-               m.canonical_group AS fallback
+               m.canonical_group AS fallback, NULL::text AS task_id
         FROM meetings m
         JOIN meeting_contacts mc ON mc.meeting_id = m.id
         WHERE mc.contact_id = %(cid)s
 
         UNION ALL
         SELECT 'ask', a.id::text, a.created_at::timestamp, a.text, a.status,
-               a.meeting_id::text, a.priority, NULL, 0, 0, NULL
+               a.meeting_id::text, a.priority, NULL, 0, 0, NULL, NULL
         FROM asks a WHERE a.contact_id = %(cid)s
 
         UNION ALL
         SELECT 'commitment', c.id::text, c.created_at::timestamp, c.text, c.status,
-               c.meeting_id::text, NULL, to_char(c.due_date,'YYYY-MM-DD'), 0, 0, NULL
+               c.meeting_id::text, NULL, to_char(c.due_date,'YYYY-MM-DD'), 0, 0, NULL, NULL
         FROM commitments c WHERE c.contact_id = %(cid)s
 
         UNION ALL
         SELECT 'trigger', ft.id::text, ft.created_at::timestamp,
                ft.condition_text || ' → ' || ft.action_text, ft.status,
-               ft.meeting_id::text, NULL, NULL, 0, 0, NULL
+               ft.meeting_id::text, NULL, NULL, 0, 0, NULL, NULL
         FROM followup_triggers ft WHERE ft.contact_id = %(cid)s
 
         UNION ALL
         SELECT 'task_created', t.id::text, t.created_at::timestamp, t.text,
                CASE WHEN t.done THEN 'done' ELSE 'open' END,
-               t.meeting_id::text, t.priority, NULLIF(t.deadline,''), 0, 0, NULL
+               t.meeting_id::text, t.priority, NULLIF(t.deadline,''), 0, 0, NULL, t.id::text
         FROM tasks t WHERE t.contact_id = %(cid)s
 
         UNION ALL
         SELECT 'task_completed', co.id::text, co.completed_at::timestamp, co.task_text, 'done',
-               t.meeting_id::text, NULL, NULL, 0, 0, NULL
+               t.meeting_id::text, NULL, NULL, 0, 0, NULL, t.id::text
         FROM completions co JOIN tasks t ON t.id = co.task_id
         WHERE t.contact_id = %(cid)s
 
         UNION ALL
         SELECT 'note', en.id::text, en.created_at::timestamp, en.body, NULL,
-               NULL, NULL, NULL, 0, 0, NULL
+               NULL, NULL, NULL, 0, 0, NULL, NULL
         FROM entity_notes en
         WHERE en.entity_type = 'contact' AND en.entity_id = %(cid)s
 
@@ -1483,7 +1483,7 @@ def db_get_person_timeline(contact_id: str, limit: int = 200) -> list:
         SELECT 'bill_notified', bn.id::text, bn.created_at::timestamp,
                tb.bill_type || ' ' || tb.bill_number || ' — notified (Blake ' ||
                  CASE WHEN tb.relationship = 'sponsored' THEN 'introduced' ELSE 'cosponsored' END || ')',
-               NULL, NULL, NULL, NULL, 0, 0, NULL
+               NULL, NULL, NULL, NULL, 0, 0, NULL, NULL
         FROM bill_match_notifications bn
         JOIN bill_match_flags f ON f.id = bn.flag_id
         JOIN tracked_bills tb   ON tb.id = f.tracked_bill_id
@@ -1492,7 +1492,7 @@ def db_get_person_timeline(contact_id: str, limit: int = 200) -> list:
     SELECT kind, id,
            to_char(ts, 'YYYY-MM-DD"T"HH24:MI:SS') AS ts,
            COALESCE(label, fallback) AS label,
-           status, meeting_id, priority, extra, action_count, reminder_count
+           status, meeting_id, priority, extra, action_count, reminder_count, task_id
     FROM ev
     ORDER BY ts DESC NULLS LAST
     LIMIT %(limit)s
