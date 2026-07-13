@@ -1089,6 +1089,62 @@ def _upsert_attendee_contacts(cur, mid: str, attendees_str: Optional[str],
         _link_contact_org(cur, cid, org_id)
 
 
+def _ensure_contact_by_name(cur, name: Optional[str], org_id: Optional[str],
+                            mid: Optional[str] = None) -> Optional[str]:
+    """Resolve a person name to a contact id (match by name, else create), optionally
+    linking to a meeting. Same identity rules as attendee upsert (audit H1/H2)."""
+    name = (name or "").strip()
+    if not name or re.match(r"^Large meeting \(\d+ attendees\)$", name):
+        return None
+    cur.execute("SELECT id FROM contacts WHERE lower(name) = lower(%s) LIMIT 1", (name,))
+    row = cur.fetchone()
+    if row:
+        cid = row["id"]
+    else:
+        cid = _contact_name_key(name)
+        cur.execute("""
+            INSERT INTO contacts (id, name, organization_id, updated_at)
+            VALUES (%s, %s, %s, NOW()) ON CONFLICT (id) DO NOTHING
+        """, (cid, name, org_id))
+    if mid:
+        cur.execute(
+            "INSERT INTO meeting_contacts (meeting_id, contact_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+            (mid, cid))
+    _link_contact_org(cur, cid, org_id)
+    return cid
+
+
+def _single_at_name(text: Optional[str]) -> Optional[str]:
+    """Return the sole @name mentioned in a line, else None (ambiguous or absent)."""
+    names = re.findall(r"@([A-Za-z][A-Za-z0-9_'-]*)", text or "")
+    return names[0] if len(names) == 1 else None
+
+
+def _single_attendee_name(attendees_str: Optional[str]) -> Optional[str]:
+    """Return the sole real attendee name, else None (for defaulting a 1:1's person)."""
+    parts = [a.strip() for a in re.split(r"[;,]", attendees_str or "")
+             if a.strip() and not re.match(r"^Large meeting \(\d+ attendees\)$", a.strip())]
+    return parts[0] if len(parts) == 1 else None
+
+
+def _intake_person_for(cur, item: dict, note_attendees: Optional[str],
+                       org_id: Optional[str], mid: str) -> Optional[str]:
+    """Resolve the person a captured item belongs to (audit H1). Priority: an explicit
+    person_id/person from the review queue, then a lone @name in the text, then the lone
+    meeting attendee, else unset. Ensures the contact exists and links it to the meeting."""
+    pid = (item.get("person_id") or "").strip()
+    if pid:
+        cur.execute(
+            "INSERT INTO meeting_contacts (meeting_id, contact_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+            (mid, pid))
+        _link_contact_org(cur, pid, org_id)
+        return pid
+    pname = ((item.get("person") or "").strip()
+             or _single_at_name(item.get("text"))
+             or _single_attendee_name(note_attendees))
+    return _ensure_contact_by_name(cur, pname, org_id, mid)
+
+
 def _year_from_date(s: Optional[str]) -> Optional[int]:
     if not s:
         return None
@@ -4796,6 +4852,8 @@ def api_notes_intake():
 
     # If canvas items provided, merge them into the body sections.
     # Routing: task + followup -> Action Items (type=action), important -> Reminders.
+    person_refs: List[str] = []
+    deadline_refs: List[str] = []
     if confirmed_items:
         task_texts     = [i["text"] for i in confirmed_items if i.get("type") == "task"     and i.get("text")]
         followup_texts = [i["text"] for i in confirmed_items if i.get("type") == "followup" and i.get("text")]
@@ -4890,6 +4948,20 @@ def api_notes_intake():
                     # Turn attendees into linked People contacts
                     _upsert_attendee_contacts(cur, mid_out, note_attendees, org_id_out)
 
+                    # Person callouts (@name) become linked contacts, not just a body line (H2).
+                    for _pname in person_refs:
+                        _ensure_contact_by_name(cur, _pname, org_id_out, mid_out)
+
+                    # Deadline callouts: adopt the first parseable date as the meeting deadline
+                    # when none is set (H2), so a "due 8/1" note lands somewhere structured.
+                    for _dtext in deadline_refs:
+                        _norm, _ = extract_deadline(_dtext, context_year=_year_from_date(note_date))
+                        if _norm:
+                            cur.execute(
+                                "UPDATE meetings SET deadline = %s WHERE id = %s AND COALESCE(deadline,'') = ''",
+                                (_norm, mid_out))
+                            break
+
                     # Bill references — normalized on write so 'H.R.'/'HR' collapse and
                     # the congress+type+number key joins cleanly with tracked bills.
                     if bill_items:
@@ -4914,12 +4986,13 @@ def api_notes_intake():
                         if not text:
                             continue
                         aid = _task_id(mid_out, "ask", text)
+                        pid = _intake_person_for(cur, item, note_attendees, org_id_out, mid_out)
                         cur.execute("""
                             INSERT INTO asks
-                                (id, meeting_id, text, organization_id, status, priority, source_excerpt)
-                            VALUES (%s, %s, %s, %s, 'logged', 'normal', %s)
+                                (id, meeting_id, text, organization_id, contact_id, status, priority, source_excerpt)
+                            VALUES (%s, %s, %s, %s, %s, 'logged', 'normal', %s)
                             ON CONFLICT (id) DO NOTHING
-                        """, (aid, mid_out, text, org_id_out, text))
+                        """, (aid, mid_out, text, org_id_out, pid, text))
                         cur.execute("""
                             INSERT INTO meeting_scan_items
                                 (meeting_id, callout_type, text, task_id, accepted)
@@ -4933,12 +5006,13 @@ def api_notes_intake():
                             continue
                         cid = _task_id(mid_out, "commitment", text)
                         c_due = due_map.get(text)
+                        pid = _intake_person_for(cur, item, note_attendees, org_id_out, mid_out)
                         cur.execute("""
                             INSERT INTO commitments
-                                (id, meeting_id, text, organization_id, status, source_excerpt, due_date)
-                            VALUES (%s, %s, %s, %s, 'open', %s, %s)
+                                (id, meeting_id, text, organization_id, contact_id, status, source_excerpt, due_date)
+                            VALUES (%s, %s, %s, %s, %s, 'open', %s, %s)
                             ON CONFLICT (id) DO NOTHING
-                        """, (cid, mid_out, text, org_id_out, text, c_due))
+                        """, (cid, mid_out, text, org_id_out, pid, text, c_due))
                         # Create a task for the commitment
                         task_tid = _task_id(mid_out, "commitment-task", text)
                         org_ctx = f" (for {note_group})" if note_group and note_group != "intake" else ""
@@ -4946,14 +5020,14 @@ def api_notes_intake():
                             INSERT INTO tasks
                                 (id, text, type, done, backburner, meeting_id, source_filename,
                                  section, group_name, source_date, deadline, priority, commitment_id,
-                                 organization_id, callout_source, created_at)
+                                 organization_id, contact_id, callout_source, created_at)
                             VALUES (%s,%s,'action',FALSE,FALSE,%s,%s,'action_items',%s,%s,%s,
-                                    'normal',%s,%s,'commitment',NOW())
+                                    'normal',%s,%s,%s,'commitment',NOW())
                             ON CONFLICT (id) DO NOTHING
                         """, (
                             task_tid, text + org_ctx, mid_out, filename,
                             note_group or "", note_date, c_due,
-                            cid, org_id_out,
+                            cid, org_id_out, pid,
                         ))
                         cur.execute("""
                             UPDATE commitments SET status='task_created', task_id=%s WHERE id=%s
@@ -4972,13 +5046,14 @@ def api_notes_intake():
                         # Split on → or -> for condition/action
                         cond, action = _parse_trigger_text(full_text)
                         trig_id = _task_id(mid_out, "trigger", full_text)
+                        pid = _intake_person_for(cur, item, note_attendees, org_id_out, mid_out)
                         cur.execute("""
                             INSERT INTO followup_triggers
                                 (id, meeting_id, condition_text, action_text,
-                                 organization_id, status)
-                            VALUES (%s, %s, %s, %s, %s, 'watching')
+                                 organization_id, contact_id, status)
+                            VALUES (%s, %s, %s, %s, %s, %s, 'watching')
                             ON CONFLICT (id) DO NOTHING
-                        """, (trig_id, mid_out, cond or full_text, action, org_id_out))
+                        """, (trig_id, mid_out, cond or full_text, action, org_id_out, pid))
                         cur.execute("""
                             INSERT INTO meeting_scan_items
                                 (meeting_id, callout_type, text, task_id, accepted)
