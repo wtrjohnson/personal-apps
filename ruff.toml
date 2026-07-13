@@ -1,0 +1,12 @@
+# Ruff config for CI. We lint for real bugs (pyflakes) and serious pycodestyle
+# errors, but tolerate the pervasive single-line-statement style already present
+# in app.py (E701/E702) and the ambiguous single-letter loop vars (E741). New
+# code should still avoid these; they are excluded only so CI reflects behavior,
+# not a legacy style sweep.
+line-length = 120
+target-version = "py311"
+
+[lint]
+select = ["F", "E9", "E4", "E7"]
+ignore = ["E701", "E702", "E741"]
+exclude = ["tests/fixtures"]

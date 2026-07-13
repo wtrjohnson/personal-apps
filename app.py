@@ -580,7 +580,7 @@ def init_db() -> None:
             """)
 
 
-if DATABASE_URL:
+if DATABASE_URL and os.environ.get("JOS_SKIP_DB_INIT") != "1":
     try:
         init_db()
     except Exception as _e:
@@ -894,6 +894,23 @@ def extract_deadline(
             if normalized:
                 return normalized, m.group(0)
     return None, None
+
+
+def _parse_trigger_text(full_text: str) -> Tuple[str, str]:
+    """Split a 'FU IF <condition> → <action>' trigger line into (condition, action).
+
+    The condition has its leading 'FU IF ' marker removed. Action is whatever follows
+    the first → / -> separator (empty when absent)."""
+    full_text = (full_text or "").strip()
+    if "→" in full_text:
+        parts = full_text.split("→", 1)
+    elif "->" in full_text:
+        parts = full_text.split("->", 1)
+    else:
+        parts = [full_text, ""]
+    cond = parts[0].strip().lstrip("FU IF").lstrip("FU if").strip()
+    action = parts[1].strip() if len(parts) > 1 else ""
+    return cond, action
 
 
 # --------------------------------------------------
@@ -4275,12 +4292,6 @@ def api_stats():
     )[:8]
 
     # Weekly completion %: tasks completed this week / (completed this week + currently open)
-    week_start = monday.isoformat()
-    week_completions_this_week = sum(
-        1 for t in all_tasks
-        if t.done and not t.backburner
-        and (t.source_date or "") >= week_start  # proxy for "worked on this week"
-    )
     per_day = completions_per_day(days=7)
     week_done_count = sum(x["count"] for x in per_day)
     week_total = week_done_count + len(open_tasks)
@@ -4742,14 +4753,7 @@ def api_notes_intake():
                         if not full_text:
                             continue
                         # Split on → or -> for condition/action
-                        if "→" in full_text:
-                            parts = full_text.split("→", 1)
-                        elif "->" in full_text:
-                            parts = full_text.split("->", 1)
-                        else:
-                            parts = [full_text, ""]
-                        cond = parts[0].strip().lstrip("FU IF").lstrip("FU if").strip()
-                        action = parts[1].strip() if len(parts) > 1 else ""
+                        cond, action = _parse_trigger_text(full_text)
                         trig_id = _task_id(mid_out, "trigger", full_text)
                         cur.execute("""
                             INSERT INTO followup_triggers
