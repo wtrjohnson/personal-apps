@@ -4331,3 +4331,18 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
 .form-modal-save { background: var(--card-dark); color: var(--card); border-color: transparent; }
 
 .org-detail-header-actions { display: flex; align-items: center; gap: 10px; }
+
+/* ---- StatusControl + rail add buttons (Phase 8) ---- */
+.status-control {
+  font: inherit; font-size: 12px; font-weight: 600; padding: 2px 6px;
+  border-radius: var(--r-pill); border: 1px solid var(--border-strong);
+  background: var(--card); color: inherit; cursor: pointer;
+}
+.rail-add-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.rail-add-btn {
+  font: inherit; font-size: 12px; font-weight: 600; padding: 5px 12px;
+  border-radius: var(--r-pill); border: 1px dashed var(--border-strong);
+  background: transparent; color: var(--muted); cursor: pointer;
+}
+.rail-add-btn:hover { color: inherit; border-style: solid; background: var(--card-soft); }
+.callout-badge--trigger { background: #ede9fe; color: #5b21b6; }

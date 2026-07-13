@@ -1682,9 +1682,11 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     // Fetch org data first — panels stay hidden until everything is ready.
     const org = await api(`/api/organizations/${orgId}`);
     const openAsks = (org.asks || []).filter((a) =>
-      !["completed","declined","no_action"].includes(a.status));
+      !["declined", "done", "no_action"].includes(a.status));
     const openCommits = (org.commitments || []).filter((c) =>
-      ["open","needs_review","task_created"].includes(c.status));
+      ["open", "in_progress"].includes(c.status));
+    const watchingTriggers = (org.triggers || []).filter((t) =>
+      ["watching", "fired"].includes(t.status));
     const openTasks = org.open_tasks || [];
     const completedTasks = org.completed_tasks || [];
 
@@ -1698,8 +1700,8 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
           <div class="org-entity-row">
             <span class="callout-badge callout-badge--ask">${_SCAN_ICONS.ask}Ask</span>
             <span class="entity-text">${escapeHtml(a.text)}</span>
-            <span class="entity-status status-${a.status}">${escapeHtml(a.status.replace("_"," "))}</span>
-            <button class="entity-status-btn" data-ask-id="${a.id}" data-status="completed">✓</button>
+            ${statusControl("ask", a.id, a.status)}
+            ${!a.task_id ? `<button class="create-task-btn" data-ask-id="${a.id}">+ Task</button>` : ""}
             <button class="entity-edit-btn" data-ask-edit="${a.id}" title="Edit">✎</button>
             <button class="entity-del-btn" data-ask-del="${a.id}" title="Delete">🗑</button>
           </div>`).join("")
@@ -1710,10 +1712,20 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
           <div class="org-entity-row">
             <span class="callout-badge callout-badge--commitment">${_SCAN_ICONS.commitment}Commitment</span>
             <span class="entity-text">${escapeHtml(c.text)}</span>
-            <span class="entity-status status-${c.status}">${escapeHtml(c.status.replace("_"," "))}</span>
+            ${statusControl("commitment", c.id, c.status)}
             ${!c.task_id ? `<button class="create-task-btn" data-commit-id="${c.id}">+ Task</button>` : ""}
             <button class="entity-edit-btn" data-commit-edit="${c.id}" title="Edit">✎</button>
             <button class="entity-del-btn" data-commit-del="${c.id}" title="Delete">🗑</button>
+          </div>`).join("")
+      : "";
+
+    const watchingHtml = watchingTriggers.length
+      ? watchingTriggers.map((t) => `
+          <div class="org-entity-row">
+            <span class="callout-badge callout-badge--trigger">👁 Watching</span>
+            <span class="entity-text">${escapeHtml(t.condition_text)}${t.action_text ? " → " + escapeHtml(t.action_text) : ""}</span>
+            ${statusControl("trigger", t.id, t.status)}
+            <button class="entity-del-btn" data-trigger-del="${t.id}" title="Delete">🗑</button>
           </div>`).join("")
       : "";
 
@@ -1770,9 +1782,16 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     // dropped here — they live in the timeline as their own events.
     const railSection = (lbl, html) =>
       html ? `<div class="org-detail-section"><div class="drawer-section-label">${lbl}</div>${html}</div>` : "";
+    const addBtns = `<div class="rail-add-row">
+      <button class="rail-add-btn" data-add-ask="${escapeHtml(orgId)}">+ Ask</button>
+      <button class="rail-add-btn" data-add-commit="${escapeHtml(orgId)}">+ Commitment</button>
+      <button class="rail-add-btn" data-add-trigger="${escapeHtml(orgId)}">+ Trigger</button>
+    </div>`;
     const railHtml = [
+      addBtns,
       railSection("Open Asks", asksHtml),
       railSection("Open Commitments", commitsHtml),
+      railSection("Watching", watchingHtml),
       personFilterHtml,
       railSection("Open Tasks", tasksHtml),
       billsHtml && railSection("Bills", `<div class="bill-pills-row">${billsHtml}</div>`),
@@ -1847,24 +1866,40 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
       });
     });
 
-    // Wire interactive buttons
-    content?.querySelectorAll(".entity-status-btn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        await api(`/api/asks/${btn.dataset.askId}/status`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: btn.dataset.status }),
-        });
-        selectOrg(orgId, { skipToggle: true });
+    // Status controls (ask / commitment / trigger) → POST + refresh.
+    content?.querySelectorAll(".status-control").forEach((sel) => {
+      sel.addEventListener("change", async () => {
+        try {
+          await setEntityStatus(sel.dataset.statusKind, sel.dataset.statusId, sel.value);
+          selectOrg(orgId, { skipToggle: true });
+        } catch (e) { toastError(e.message || "Couldn't update status"); }
       });
     });
+    // + Task from an ask or a commitment.
     content?.querySelectorAll(".create-task-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        await api(`/api/commitments/${btn.dataset.commitId}/create-task`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
-        });
-        selectOrg(orgId, { skipToggle: true });
-        await refreshTasks();
+        const url = btn.dataset.askId
+          ? `/api/asks/${btn.dataset.askId}/create-task`
+          : `/api/commitments/${btn.dataset.commitId}/create-task`;
+        try {
+          await api(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+          toastSuccess("Task created.");
+          selectOrg(orgId, { skipToggle: true });
+          await refreshTasks();
+        } catch (e) { toastError(e.message || "Couldn't create task"); }
       });
     });
+    content?.querySelectorAll("[data-trigger-del]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Delete this trigger?")) return;
+        await api(`/api/followup-triggers/${btn.dataset.triggerDel}`, { method: "DELETE" });
+        selectOrg(orgId, { skipToggle: true });
+      });
+    });
+    // + Ask / + Commitment / + Trigger (standalone create for this org).
+    content?.querySelector("[data-add-ask]")?.addEventListener("click", () => addObligation("ask", orgId));
+    content?.querySelector("[data-add-commit]")?.addEventListener("click", () => addObligation("commitment", orgId));
+    content?.querySelector("[data-add-trigger]")?.addEventListener("click", () => addObligation("trigger", orgId));
     content?.querySelectorAll(".org-entity-row--task").forEach((row) => {
       row.addEventListener("click", () => {
         const task = [...openTasks, ...completedTasks].find((t) => t.id === row.dataset.taskId);
@@ -3323,6 +3358,40 @@ const refreshMeetingsDebounced = debounce(async () => {
 }, 120);
 
 async function refreshMeetings() { return refreshMeetingsDebounced(); }
+
+// Post a status change for an ask / commitment / trigger (StatusControl, audit H3/C2b).
+async function setEntityStatus(kind, id, status) {
+  const url = kind === "ask" ? `/api/asks/${id}/status`
+    : kind === "commitment" ? `/api/commitments/${id}/status`
+    : `/api/followup-triggers/${id}`;
+  await api(url, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+}
+
+// Create an ask / commitment / trigger against an org (or person) — audit §6.4.
+async function addObligation(kind, orgId, extra = {}) {
+  let body;
+  if (kind === "trigger") {
+    const vals = await formModal({ title: "New trigger (watch for…)", submitLabel: "Add", fields: [
+      { key: "condition_text", label: "When (condition)", type: "text", value: "" },
+      { key: "action_text", label: "Then (action)", type: "text", value: "" },
+    ] });
+    if (!vals || !vals.condition_text) return;
+    body = { condition_text: vals.condition_text, action_text: vals.action_text, organization_id: orgId, ...extra };
+    await api("/api/followup-triggers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  } else {
+    const fields = [{ key: "text", label: kind === "ask" ? "Ask" : "Commitment", type: "text", value: "" }];
+    if (kind === "commitment") fields.push({ key: "due_date", label: "Due date", type: "date", value: "" });
+    const vals = await formModal({ title: kind === "ask" ? "New ask" : "New commitment", submitLabel: "Add", fields });
+    if (!vals || !vals.text) return;
+    body = { text: vals.text, organization_id: orgId, due_date: vals.due_date, ...extra };
+    await api(kind === "ask" ? "/api/asks" : "/api/commitments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  }
+  toastSuccess("Added.");
+  if (orgId && state.selectedOrgId === orgId) selectOrg(orgId, { skipToggle: true });
+}
 
 async function refreshMeetingsNow() {
   const qs = meetingsFilters();

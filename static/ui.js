@@ -280,6 +280,22 @@ function formModal({ title = "Edit", fields = [], submitLabel = "Save" } = {}) {
   });
 }
 
+/* ---- StatusControl (audit H3, C2b) ---------------------------------------
+ * A pill <select> of the canonical statuses for an obligation type. A single
+ * delegated change handler in app.js POSTs the new value to the right endpoint. */
+const STATUS_SETS = {
+  ask: ["open", "in_review", "accepted", "declined", "done", "no_action"],
+  commitment: ["open", "in_progress", "done", "dropped"],
+  trigger: ["watching", "fired", "resolved", "dismissed"],
+};
+function statusControl(kind, id, current) {
+  const opts = (STATUS_SETS[kind] || []).map((s) =>
+    `<option value="${s}"${s === current ? " selected" : ""}>${_uiEscape(s.replace(/_/g, " "))}</option>`
+  ).join("");
+  return `<select class="status-control entity-status status-${_uiEscape(current)}" ` +
+    `data-status-kind="${_uiEscape(kind)}" data-status-id="${_uiEscape(id)}">${opts}</select>`;
+}
+
 /* pickEntityModal: choose a person/org via entityPicker in a modal. Resolves {id,name} or null. */
 function pickEntityModal({ title = "Choose", type = "person", allowCreate = false, orgList = null, submitLabel = "Select" } = {}) {
   return new Promise((resolve) => {
