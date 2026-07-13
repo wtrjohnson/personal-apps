@@ -150,6 +150,8 @@ def init_db() -> None:
                     snoozed_until DATE DEFAULT NULL,
                     estimate_minutes INT DEFAULT NULL,
                     recurrence_rule JSONB DEFAULT NULL,
+                    import_key TEXT,
+                    import_locked BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT NOW()
                 );
                 CREATE TABLE IF NOT EXISTS groups_map (
@@ -166,22 +168,36 @@ def init_db() -> None:
                     completed_date DATE DEFAULT CURRENT_DATE,
                     completed_at TIMESTAMP DEFAULT NOW()
                 );
-                CREATE TABLE IF NOT EXISTS task_time_log (
-                    id SERIAL PRIMARY KEY,
-                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                    minutes_spent INT NOT NULL,
-                    logged_at TIMESTAMP DEFAULT NOW()
-                );
                 CREATE TABLE IF NOT EXISTS task_dependencies (
                     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                     depends_on_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                     PRIMARY KEY (task_id, depends_on_id)
                 );
+                -- Tombstones for meeting-sourced tasks the user deleted, so re-importing
+                -- the same .md file never resurrects them (audit M15).
+                CREATE TABLE IF NOT EXISTS import_tombstones (
+                    import_key TEXT PRIMARY KEY,
+                    deleted_at TIMESTAMP DEFAULT NOW()
+                );
                 CREATE INDEX IF NOT EXISTS tasks_parent_id     ON tasks (parent_id);
                 CREATE INDEX IF NOT EXISTS tasks_snoozed_until ON tasks (snoozed_until);
-                CREATE INDEX IF NOT EXISTS task_time_log_task  ON task_time_log (task_id);
                 CREATE INDEX IF NOT EXISTS task_deps_task      ON task_dependencies (task_id);
                 CREATE INDEX IF NOT EXISTS task_deps_depends   ON task_dependencies (depends_on_id);
+            """)
+            # ---- Stable task identity (audit C3/M15) ----
+            # import_key holds the content hash used only by the .md import upsert, so the
+            # primary key (tasks.id) can stay immutable across edits. Backfill = current id
+            # for meeting-sourced rows (whose id already IS that content hash).
+            cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS import_key TEXT")
+            cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS import_locked BOOLEAN DEFAULT FALSE")
+            cur.execute("""
+                UPDATE tasks SET import_key = id
+                WHERE import_key IS NULL
+                  AND source_filename NOT IN ('', 'tasks.md')
+            """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS tasks_import_key_uniq
+                    ON tasks (import_key) WHERE import_key IS NOT NULL
             """)
             cur.execute("""
                 DO $$ BEGIN
@@ -602,10 +618,15 @@ def init_db() -> None:
 
 
 if DATABASE_URL and os.environ.get("JOS_SKIP_DB_INIT") != "1":
+    # Cold start does NOT run DDL (audit A1): schema migrations run deliberately via
+    # POST /api/admin/migrate after each deploy. Here we only verify connectivity so a
+    # broken DATABASE_URL still surfaces early in logs.
     try:
-        init_db()
+        with get_db() as _conn:
+            with _conn.cursor() as _cur:
+                _cur.execute("SELECT 1")
     except Exception as _e:
-        print(f"[db] init warning: {_e}")
+        print(f"[db] connectivity check failed: {_e}")
 
 
 # --------------------------------------------------
@@ -616,7 +637,7 @@ if DATABASE_URL and os.environ.get("JOS_SKIP_DB_INIT") != "1":
 def require_login() -> Optional[Any]:
     if request.path.startswith("/static/"):
         return None
-    if request.endpoint in ("login", "logout", "shortcut_add_task", "cron_sync"):
+    if request.endpoint in ("login", "logout", "shortcut_add_task", "cron_sync", "admin_migrate"):
         return None
     if not session.get("logged_in"):
         return redirect(url_for("login"))
@@ -1658,26 +1679,57 @@ def import_meeting_from_content(
                     "UPDATE meetings SET canvas_image = %s WHERE id = %s",
                     (canvas_image, mid),
                 )
+            # Tasks are matched by import_key (their content hash), NOT by primary key,
+            # so a user edit that changed tasks.text never blocks a re-import match and
+            # the immutable id keeps FK references intact (audit C3).
+            cur.execute("SELECT import_key FROM import_tombstones")
+            tombstoned = {r["import_key"] for r in cur.fetchall()}
             for t in tasks:
-                cur.execute("""
-                    INSERT INTO tasks
-                        (id, text, type, done, meeting_id, source_filename,
-                         section, group_name, source_date, deadline, deadline_raw, callout_source)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (id) DO UPDATE SET
-                        text=EXCLUDED.text, type=EXCLUDED.type,
-                        meeting_id=EXCLUDED.meeting_id,
-                        source_filename=EXCLUDED.source_filename,
-                        section=EXCLUDED.section, group_name=EXCLUDED.group_name,
-                        source_date=EXCLUDED.source_date,
-                        deadline=EXCLUDED.deadline, deadline_raw=EXCLUDED.deadline_raw,
-                        callout_source=COALESCE(EXCLUDED.callout_source, tasks.callout_source)
-                """, (
-                    t["id"], t["text"], t["type"], t["done"], t["meeting_id"],
-                    t["source_filename"], t["section"], t["group_name"],
-                    t["source_date"], t["deadline"], t["deadline_raw"],
-                    t.get("callout_source"),
-                ))
+                ik = t["id"]  # content hash == import key for meeting-sourced tasks
+                if ik in tombstoned:
+                    continue  # user deleted this task; don't resurrect it (M15)
+                cur.execute("SELECT id, import_locked FROM tasks WHERE import_key = %s", (ik,))
+                existing = cur.fetchone()
+                if existing is None:
+                    cur.execute("""
+                        INSERT INTO tasks
+                            (id, text, type, done, meeting_id, source_filename,
+                             section, group_name, source_date, deadline, deadline_raw,
+                             callout_source, import_key)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (id) DO NOTHING
+                    """, (
+                        t["id"], t["text"], t["type"], t["done"], t["meeting_id"],
+                        t["source_filename"], t["section"], t["group_name"],
+                        t["source_date"], t["deadline"], t["deadline_raw"],
+                        t.get("callout_source"), ik,
+                    ))
+                elif existing["import_locked"]:
+                    # User edited this task's text: refresh only file-owned narrative
+                    # fields, never overwrite the edited text/deadline (M15).
+                    cur.execute("""
+                        UPDATE tasks SET type=%s, meeting_id=%s, source_filename=%s,
+                            section=%s, group_name=%s, source_date=%s,
+                            callout_source=COALESCE(%s, callout_source)
+                        WHERE id=%s
+                    """, (
+                        t["type"], t["meeting_id"], t["source_filename"], t["section"],
+                        t["group_name"], t["source_date"], t.get("callout_source"),
+                        existing["id"],
+                    ))
+                else:
+                    cur.execute("""
+                        UPDATE tasks SET text=%s, type=%s, meeting_id=%s,
+                            source_filename=%s, section=%s, group_name=%s,
+                            source_date=%s, deadline=%s, deadline_raw=%s,
+                            callout_source=COALESCE(%s, callout_source)
+                        WHERE id=%s
+                    """, (
+                        t["text"], t["type"], t["meeting_id"], t["source_filename"],
+                        t["section"], t["group_name"], t["source_date"],
+                        t["deadline"], t["deadline_raw"], t.get("callout_source"),
+                        existing["id"],
+                    ))
 
     return {"id": mid, "filename": filename, "tasks": len(tasks)}
 
@@ -3030,6 +3082,24 @@ def cron_sync():
         return jsonify({"ok": False, "job": job, "error": str(e)}), 500
 
 
+@app.route("/api/admin/migrate", methods=["POST"])
+def admin_migrate():
+    """Run schema migrations (init_db) deliberately, out of the request/cold-start path
+    (audit A1). Exempt from session login; authenticated by CRON_SECRET. Call once right
+    after each deploy that changes the schema."""
+    if not CRON_SECRET:
+        return jsonify({"ok": False, "error": "CRON_SECRET not configured"}), 503
+    provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() \
+        or request.headers.get("X-API-Key", "").strip()
+    if provided != CRON_SECRET:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        init_db()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/bill-matches")
 def api_bill_matches():
     status = (request.args.get("status") or "").strip()
@@ -4097,9 +4167,19 @@ def api_delete_task():
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM tasks WHERE id = %s RETURNING id", (task_id,))
-                if cur.fetchone() is None:
+                cur.execute(
+                    "DELETE FROM tasks WHERE id = %s RETURNING id, import_key", (task_id,)
+                )
+                row = cur.fetchone()
+                if row is None:
                     return jsonify({"ok": False, "error": "task not found"}), 404
+                # Tombstone meeting-sourced tasks so re-import can't resurrect them (M15).
+                if row["import_key"]:
+                    cur.execute(
+                        "INSERT INTO import_tombstones (import_key) VALUES (%s)"
+                        " ON CONFLICT (import_key) DO NOTHING",
+                        (row["import_key"],),
+                    )
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -4137,15 +4217,14 @@ def api_edit_task():
     else:
         new_deadline, new_deadline_raw = extract_deadline(new_text)
 
-    # Only recompute deterministic ID for meeting-sourced tasks; free tasks keep UUID
-    is_free = (filename == "tasks.md" or not filename)
-    new_id = task_id if is_free else (_task_id(filename, section, new_text) if filename and section else task_id)
-
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                sets = ["id = %s", "text = %s", "deadline = %s", "deadline_raw = %s"]
-                vals = [new_id, new_text, new_deadline, new_deadline_raw]
+                # tasks.id is immutable — never rewrite the primary key on edit (audit C3),
+                # so FK references (subtasks, scan items, asks, commitments) stay intact.
+                # import_locked stops a later .md re-import from reverting the edit (M15).
+                sets = ["text = %s", "deadline = %s", "deadline_raw = %s", "import_locked = TRUE"]
+                vals = [new_text, new_deadline, new_deadline_raw]
                 if new_priority:
                     sets.append("priority = %s"); vals.append(new_priority)
                 org_id = None

@@ -1,6 +1,8 @@
 -- Notes Dashboard — PostgreSQL schema
--- Run this once against your Vercel Postgres database, or let the app
--- create the tables automatically on first cold start (init_db()).
+-- Run this once against your Vercel Postgres database. The app no longer runs DDL on
+-- cold start (audit A1); after each deploy that changes the schema, apply migrations by
+-- POSTing to /api/admin/migrate with the CRON_SECRET bearer token (this file mirrors what
+-- init_db() applies).
 
 CREATE TABLE IF NOT EXISTS meetings (
     id               TEXT PRIMARY KEY,
@@ -53,6 +55,23 @@ ALTER TABLE tasks
   ADD COLUMN IF NOT EXISTS estimate_minutes INT DEFAULT NULL;
 ALTER TABLE tasks
   ADD COLUMN IF NOT EXISTS recurrence_rule JSONB DEFAULT NULL;
+-- Stable task identity (audit C3/M15): import_key holds the content hash used only by the
+-- .md import upsert so tasks.id can stay immutable; import_locked pins user-edited text
+-- against re-import reversion.
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS import_key TEXT;
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS import_locked BOOLEAN DEFAULT FALSE;
+UPDATE tasks SET import_key = id
+  WHERE import_key IS NULL AND source_filename NOT IN ('', 'tasks.md');
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_import_key_uniq
+  ON tasks (import_key) WHERE import_key IS NOT NULL;
+
+-- Tombstones for user-deleted meeting-sourced tasks (so re-import can't resurrect them).
+CREATE TABLE IF NOT EXISTS import_tombstones (
+    import_key       TEXT PRIMARY KEY,
+    deleted_at       TIMESTAMP DEFAULT NOW()
+);
 
 ALTER TABLE meetings
   ADD COLUMN IF NOT EXISTS canvas_image TEXT;
@@ -76,14 +95,6 @@ CREATE TABLE IF NOT EXISTS completions (
     completed_at     TIMESTAMP DEFAULT NOW()
 );
 
--- Timestamped log of actual time spent on tasks (for learning estimates)
-CREATE TABLE IF NOT EXISTS task_time_log (
-    id              SERIAL PRIMARY KEY,
-    task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    minutes_spent   INT NOT NULL,
-    logged_at       TIMESTAMP DEFAULT NOW()
-);
-
 -- Task dependency graph: task_id is blocked until depends_on_id is done
 CREATE TABLE IF NOT EXISTS task_dependencies (
     task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -98,7 +109,6 @@ CREATE INDEX IF NOT EXISTS tasks_parent_id     ON tasks (parent_id);
 CREATE INDEX IF NOT EXISTS tasks_snoozed_until ON tasks (snoozed_until);
 CREATE INDEX IF NOT EXISTS meetings_file_date  ON meetings (file_date DESC NULLS LAST);
 CREATE INDEX IF NOT EXISTS completions_date    ON completions (completed_date);
-CREATE INDEX IF NOT EXISTS task_time_log_task  ON task_time_log (task_id);
 CREATE INDEX IF NOT EXISTS task_deps_task      ON task_dependencies (task_id);
 CREATE INDEX IF NOT EXISTS task_deps_depends   ON task_dependencies (depends_on_id);
 
