@@ -64,6 +64,22 @@ def app_today() -> date_cls:
     return app_now().date()
 
 
+# Canonical status vocabularies (audit H3, C2b). One working set per obligation type.
+ASK_STATUSES = ("open", "in_review", "accepted", "declined", "done", "no_action")
+COMMITMENT_STATUSES = ("open", "in_progress", "done", "dropped")
+TRIGGER_STATUSES = ("watching", "fired", "resolved", "dismissed")
+
+# Legacy -> canonical remaps applied once in the migrate hook.
+_ASK_STATUS_REMAP = {
+    "logged": "open", "needs_review": "in_review", "under_review": "in_review",
+    "task_created": "accepted", "completed": "done", "notify_if_changes": "open",
+}
+_COMMITMENT_STATUS_REMAP = {
+    "task_created": "in_progress", "waiting": "in_progress", "completed": "done",
+    "closed_no_action": "dropped", "needs_review": "open",
+}
+
+
 # --------------------------------------------------
 # DATABASE
 # --------------------------------------------------
@@ -375,7 +391,7 @@ def init_db() -> None:
                     organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
                     contact_id      TEXT REFERENCES contacts(id) ON DELETE SET NULL,
                     bill_ref_id     INTEGER REFERENCES bill_references(id) ON DELETE SET NULL,
-                    status          TEXT NOT NULL DEFAULT 'logged',
+                    status          TEXT NOT NULL DEFAULT 'open',
                     priority        TEXT NOT NULL DEFAULT 'normal',
                     task_id         TEXT REFERENCES tasks(id) ON DELETE SET NULL,
                     source_excerpt  TEXT,
@@ -641,6 +657,40 @@ def init_db() -> None:
             except Exception as _e:
                 cur.execute("ROLLBACK TO SAVEPOINT email_uniq")
                 print(f"[migrate] contacts_email_unique skipped (merge duplicate emails first): {_e}")
+
+            # Canonical status vocabularies (audit H3/C2b): one-way remap of legacy values,
+            # then CHECK constraints. Run after the mapping so the constraint validates.
+            cur.execute("ALTER TABLE asks ALTER COLUMN status SET DEFAULT 'open'")
+            cur.execute("""
+                UPDATE asks SET status = CASE status
+                    WHEN 'logged' THEN 'open' WHEN 'needs_review' THEN 'in_review'
+                    WHEN 'under_review' THEN 'in_review' WHEN 'task_created' THEN 'accepted'
+                    WHEN 'completed' THEN 'done' WHEN 'notify_if_changes' THEN 'open'
+                    ELSE status END
+                WHERE status NOT IN ('open','in_review','accepted','declined','done','no_action')
+            """)
+            cur.execute("""
+                UPDATE commitments SET status = CASE status
+                    WHEN 'task_created' THEN 'in_progress' WHEN 'waiting' THEN 'in_progress'
+                    WHEN 'completed' THEN 'done' WHEN 'closed_no_action' THEN 'dropped'
+                    WHEN 'needs_review' THEN 'open'
+                    ELSE status END
+                WHERE status NOT IN ('open','in_progress','done','dropped')
+            """)
+            for _tbl, _statuses, _con in (
+                ("asks", ASK_STATUSES, "asks_status_check"),
+                ("commitments", COMMITMENT_STATUSES, "commitments_status_check"),
+                ("followup_triggers", TRIGGER_STATUSES, "followup_triggers_status_check"),
+            ):
+                _vals = ",".join(f"'{s}'" for s in _statuses)
+                cur.execute("SAVEPOINT status_ck")
+                try:
+                    cur.execute(f"ALTER TABLE {_tbl} DROP CONSTRAINT IF EXISTS {_con}")
+                    cur.execute(f"ALTER TABLE {_tbl} ADD CONSTRAINT {_con} CHECK (status IN ({_vals}))")
+                    cur.execute("RELEASE SAVEPOINT status_ck")
+                except Exception as _e:
+                    cur.execute("ROLLBACK TO SAVEPOINT status_ck")
+                    print(f"[migrate] {_con} skipped: {_e}")
 
 
 if DATABASE_URL and os.environ.get("JOS_SKIP_DB_INIT") != "1":
@@ -3919,10 +3969,8 @@ def api_asks():
 def api_ask_status(ask_id):
     data = request.get_json(force=True, silent=True) or {}
     status = (data.get("status") or "").strip()
-    valid = {"logged","needs_review","under_review","task_created","accepted",
-             "declined","completed","no_action","notify_if_changes"}
-    if status not in valid:
-        return jsonify({"ok": False, "error": "Invalid status"}), 400
+    if status not in ASK_STATUSES:
+        return fail(f"Invalid status (expected one of {', '.join(ASK_STATUSES)})", 400)
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE asks SET status = %s WHERE id = %s", (status, ask_id))
@@ -3999,9 +4047,8 @@ def api_commitments():
 def api_commitment_status(commitment_id):
     data = request.get_json(force=True, silent=True) or {}
     status = (data.get("status") or "").strip()
-    valid = {"open","task_created","waiting","completed","closed_no_action","needs_review"}
-    if status not in valid:
-        return jsonify({"ok": False, "error": "Invalid status"}), 400
+    if status not in COMMITMENT_STATUSES:
+        return fail(f"Invalid status (expected one of {', '.join(COMMITMENT_STATUSES)})", 400)
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE commitments SET status = %s WHERE id = %s",
@@ -4070,34 +4117,179 @@ def api_commitment_create_task(commitment_id):
                 commitment_id,
                 row["organization_id"],
             ))
-            cur.execute("UPDATE commitments SET status='task_created', task_id=%s WHERE id=%s",
+            cur.execute("UPDATE commitments SET status='in_progress', task_id=%s WHERE id=%s",
                         (tid, commitment_id))
     return jsonify({"ok": True, "task_id": tid})
 
 
 @app.route("/api/followup-triggers")
 def api_followup_triggers():
-    status = request.args.get("status", "watching")
+    status = request.args.get("status")  # omit for all statuses
+    org_id = request.args.get("org_id")
+    contact_id = request.args.get("contact_id")
+    conds, params = [], []
+    if status:
+        conds.append("ft.status = %s"); params.append(status)
+    if org_id:
+        conds.append("ft.organization_id = %s"); params.append(org_id)
+    if contact_id:
+        conds.append("ft.contact_id = %s"); params.append(contact_id)
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT ft.*, o.name AS org_name,
                        to_char(ft.created_at,'YYYY-MM-DD') AS created_at_str,
                        to_char(m.file_date,'YYYY-MM-DD') AS meeting_date
                 FROM followup_triggers ft
                 LEFT JOIN organizations o ON ft.organization_id = o.id
                 LEFT JOIN meetings m ON ft.meeting_id = m.id
-                WHERE ft.status = %s
+                {where}
                 ORDER BY ft.created_at DESC
-            """, (status,))
+            """, params)
             rows = cur.fetchall()
     return jsonify([{
         "id": r["id"], "condition_text": r["condition_text"],
         "action_text": r["action_text"], "status": r["status"],
         "meeting_id": r["meeting_id"], "organization_id": r["organization_id"],
         "org_name": r["org_name"], "bill_ref_id": r["bill_ref_id"],
+        "contact_id": r["contact_id"],
         "created_at": r["created_at_str"], "meeting_date": r["meeting_date"],
     } for r in rows])
+
+
+@app.route("/api/followup-triggers", methods=["POST"])
+def api_trigger_create():
+    """Standalone trigger create (no meeting required) — audit §6.4."""
+    data = request.get_json(force=True, silent=True) or {}
+    cond = (data.get("condition_text") or data.get("text") or "").strip()
+    if not cond:
+        return fail("condition_text required", 400)
+    action = (data.get("action_text") or "").strip()
+    org_id = (data.get("organization_id") or "").strip() or None
+    contact_id = (data.get("contact_id") or "").strip() or None
+    tid = uuid.uuid4().hex[:16]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO followup_triggers
+                    (id, meeting_id, condition_text, action_text, organization_id, contact_id, status)
+                VALUES (%s, NULL, %s, %s, %s, %s, 'watching')
+            """, (tid, cond, action, org_id, contact_id))
+    return jsonify({"ok": True, "id": tid})
+
+
+@app.route("/api/followup-triggers/<trigger_id>", methods=["POST", "PUT"])
+def api_trigger_update(trigger_id):
+    """Update a trigger's status and/or text (audit C2b — triggers were write-only)."""
+    data = request.get_json(force=True, silent=True) or {}
+    sets, params = [], []
+    if "status" in data:
+        status = (data.get("status") or "").strip()
+        if status not in TRIGGER_STATUSES:
+            return fail(f"Invalid status (expected one of {', '.join(TRIGGER_STATUSES)})", 400)
+        sets.append("status = %s"); params.append(status)
+    if "condition_text" in data:
+        sets.append("condition_text = %s"); params.append((data.get("condition_text") or "").strip())
+    if "action_text" in data:
+        sets.append("action_text = %s"); params.append((data.get("action_text") or "").strip())
+    if not sets:
+        return fail("nothing to update", 400)
+    params.append(trigger_id)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE followup_triggers SET {', '.join(sets)} WHERE id = %s RETURNING id", params)
+            if cur.fetchone() is None:
+                return fail("Not found", 404)
+    return jsonify({"ok": True, "id": trigger_id})
+
+
+@app.route("/api/followup-triggers/<trigger_id>", methods=["DELETE"])
+def api_trigger_delete(trigger_id):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM followup_triggers WHERE id = %s", (trigger_id,))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/asks", methods=["POST"])
+def api_ask_create():
+    """Standalone ask create (org/person/meeting optional) — audit §6.4."""
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return fail("text required", 400)
+    org_id = (data.get("organization_id") or "").strip() or None
+    contact_id = (data.get("contact_id") or "").strip() or None
+    meeting_id = (data.get("meeting_id") or "").strip() or None
+    priority = (data.get("priority") or "normal").strip()
+    if priority not in ("high", "normal", "low"):
+        priority = "normal"
+    aid = uuid.uuid4().hex[:16]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO asks
+                    (id, meeting_id, text, organization_id, contact_id, status, priority, source_excerpt)
+                VALUES (%s, %s, %s, %s, %s, 'open', %s, %s)
+            """, (aid, meeting_id, text, org_id, contact_id, priority, text))
+    return jsonify({"ok": True, "id": aid})
+
+
+@app.route("/api/asks/<ask_id>/create-task", methods=["POST"])
+def api_ask_create_task(ask_id):
+    """Spawn a task from an ask, mirroring the commitment flow (audit H3)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT a.*, o.name AS org_name, to_char(m.file_date,'YYYY-MM-DD') AS meeting_date
+                FROM asks a
+                LEFT JOIN organizations o ON a.organization_id = o.id
+                LEFT JOIN meetings m ON a.meeting_id = m.id
+                WHERE a.id = %s
+            """, (ask_id,))
+            row = cur.fetchone()
+            if not row:
+                return fail("Ask not found", 404)
+            if row["task_id"]:
+                return jsonify({"ok": True, "task_id": row["task_id"], "already_exists": True})
+            tid = str(uuid.uuid4())
+            org_ctx = f" (for {row['org_name']})" if row["org_name"] else ""
+            cur.execute("""
+                INSERT INTO tasks
+                    (id, text, type, done, backburner, meeting_id, source_filename,
+                     section, group_name, source_date, priority, ask_id, organization_id,
+                     contact_id, callout_source, created_at)
+                VALUES (%s,%s,'action',FALSE,FALSE,%s,%s,'action_items',%s,%s,%s,%s,%s,%s,'task',NOW())
+            """, (
+                tid, row["text"] + org_ctx, row["meeting_id"],
+                f"ask-{ask_id[:8]}", row["org_name"] or "", row["meeting_date"],
+                row["priority"] or "normal", ask_id, row["organization_id"], row["contact_id"],
+            ))
+            cur.execute("UPDATE asks SET status='accepted', task_id=%s WHERE id=%s", (tid, ask_id))
+    return jsonify({"ok": True, "task_id": tid})
+
+
+@app.route("/api/commitments", methods=["POST"])
+def api_commitment_create():
+    """Standalone commitment create (org/person/meeting optional) — audit §6.4."""
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return fail("text required", 400)
+    org_id = (data.get("organization_id") or "").strip() or None
+    contact_id = (data.get("contact_id") or "").strip() or None
+    meeting_id = (data.get("meeting_id") or "").strip() or None
+    due_date = (data.get("due_date") or "").strip() or None
+    cid = uuid.uuid4().hex[:16]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO commitments
+                    (id, meeting_id, text, organization_id, contact_id, status, source_excerpt, due_date)
+                VALUES (%s, %s, %s, %s, %s, 'open', %s, %s)
+            """, (cid, meeting_id, text, org_id, contact_id, text, due_date))
+    return jsonify({"ok": True, "id": cid})
 
 
 @app.route("/api/facets")
@@ -4990,7 +5182,7 @@ def api_notes_intake():
                         cur.execute("""
                             INSERT INTO asks
                                 (id, meeting_id, text, organization_id, contact_id, status, priority, source_excerpt)
-                            VALUES (%s, %s, %s, %s, %s, 'logged', 'normal', %s)
+                            VALUES (%s, %s, %s, %s, %s, 'open', 'normal', %s)
                             ON CONFLICT (id) DO NOTHING
                         """, (aid, mid_out, text, org_id_out, pid, text))
                         cur.execute("""
@@ -5030,7 +5222,7 @@ def api_notes_intake():
                             cid, org_id_out, pid,
                         ))
                         cur.execute("""
-                            UPDATE commitments SET status='task_created', task_id=%s WHERE id=%s
+                            UPDATE commitments SET status='in_progress', task_id=%s WHERE id=%s
                         """, (task_tid, cid))
                         cur.execute("""
                             INSERT INTO meeting_scan_items
