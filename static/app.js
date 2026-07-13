@@ -754,7 +754,6 @@ function openEditModal(task) {
     const cur = state.people.find((p) => p.id === task.contact_id);
     _editPersonPicker = entityPicker(personHost, { type: "person", value: cur ? cur.name : "", valueId: cur ? cur.id : "" });
   }
-  if ($("#edit-m-contact")) $("#edit-m-contact").value = task.contact || "";
   if ($("#edit-m-estimate")) $("#edit-m-estimate").value = task.estimate_minutes || "";
   if ($("#edit-m-recur")) {
     _updateRecurDetail("edit-m", task.recurrence_rule || null);
@@ -786,7 +785,6 @@ async function submitEditModal() {
   const newPriority = $("#edit-m-priority")?.value || "normal";
   const newGroup = (_editOrgPicker ? _editOrgPicker.getName() : "") || null;
   const newDeadline = getDeadlineValue("edit-m") || null;
-  const newContact = $("#edit-m-contact")?.value.trim() ?? null;
   const estimateVal = parseInt($("#edit-m-estimate")?.value);
   // Person: empty input clears; a picked/created id assigns; a typed-but-unpicked name
   // leaves the assignment unchanged (never a silent create — audit M4).
@@ -801,7 +799,6 @@ async function submitEditModal() {
     priority: newPriority,
     group: newGroup,
     deadline_direct: newDeadline,
-    contact: newContact,
     estimate_minutes: isNaN(estimateVal) ? null : estimateVal,
     recurrence_rule: getRecurrenceRule("edit-m"),
   };
@@ -1047,8 +1044,6 @@ function parseNLTask(text) {
 }
 
 function _populateNLStep2(parsed) {
-  const contactVal = [parsed.email, parsed.phone, parsed.contact].filter(Boolean).join(", ");
-
   const blocks = [
     { uncertain: false, html: `<label>Priority</label>
       <select id="nl-f-priority">${[["normal","Normal"],["high","High"],["low","Low"]].map(([v, l]) => `<option value="${v}"${v === parsed.priority ? " selected" : ""}>${l}</option>`).join("")}</select>` },
@@ -1057,8 +1052,6 @@ function _populateNLStep2(parsed) {
     { uncertain: false, html: `<label>Person</label>
       <div id="nl-f-person-picker"></div>` },
     { uncertain: false, html: `<label>Deadline</label>${dateField("nl-f", parsed.deadline || "")}` },
-    { uncertain: false, html: `<label>Phone / email</label>
-      <input id="nl-f-contact" value="${escapeHtml(contactVal)}" placeholder="Phone number or email" autocomplete="off">` },
     { uncertain: false, html: `<label>Estimate (min)</label>
       <input id="nl-f-estimate" type="number" min="1" max="480" value="${parsed.estimate_minutes || ""}" placeholder="e.g. 30" autocomplete="off">` },
   ];
@@ -1146,7 +1139,6 @@ async function submitNLModal() {
   const priority = $("#nl-f-priority")?.value || "normal";
   const deadline = getDeadlineValue("nl-f") || "";
   const group = (_nlOrgPicker ? _nlOrgPicker.getName() : "") || "";
-  const contact = $("#nl-f-contact")?.value.trim() || null;
   const contact_id = _nlPersonPicker ? _nlPersonPicker.getId() : "";
   const estimateRaw = parseInt($("#nl-f-estimate")?.value);
   const estimate_minutes = isNaN(estimateRaw) ? null : estimateRaw;
@@ -1154,7 +1146,7 @@ async function submitNLModal() {
   await api("/api/tasks/add", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, group, deadline, priority, contact, contact_id, estimate_minutes }),
+    body: JSON.stringify({ text, group, deadline, priority, contact_id, estimate_minutes }),
   });
   closeNLModal();
   if (state.tab === "tasks") await refreshTasks();

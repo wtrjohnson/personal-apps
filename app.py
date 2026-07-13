@@ -615,6 +615,19 @@ def init_db() -> None:
                 CREATE INDEX IF NOT EXISTS bill_sched_typenum ON bill_schedule_events (congress, bill_type, bill_number);
                 CREATE INDEX IF NOT EXISTS bill_sched_date ON bill_schedule_events (event_date);
             """)
+            # Fold legacy tasks.contact free-text into the linked contact's phone field
+            # when empty (audit M2), so the redundant per-task field can retire from the UI
+            # without losing data. The column itself is left in place as a harmless vestige.
+            cur.execute("""
+                UPDATE contacts c SET phone = sub.contact, updated_at = NOW()
+                FROM (
+                    SELECT DISTINCT ON (contact_id) contact_id, contact
+                    FROM tasks
+                    WHERE contact_id IS NOT NULL AND COALESCE(contact, '') <> ''
+                    ORDER BY contact_id, created_at DESC
+                ) sub
+                WHERE c.id = sub.contact_id AND COALESCE(c.phone, '') = ''
+            """)
             # Unique email index (audit H5). Best-effort: if duplicate emails still exist,
             # it can't be created yet — merge the dupes (POST /api/contacts/<id>/merge),
             # then re-run migrate. A savepoint keeps the rest of the migration intact.
