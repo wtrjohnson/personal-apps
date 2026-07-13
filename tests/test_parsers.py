@@ -4,8 +4,6 @@ import re
 from datetime import date, timedelta
 from pathlib import Path
 
-import pytest
-
 import app
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -47,12 +45,17 @@ def test_trigger_arrow_unicode():
     assert action == "prep memo"
 
 
-@pytest.mark.xfail(reason="C2: lstrip('FU IF') strips leading F/U/I chars; fixed in Phase 1",
-                   strict=True)
 def test_trigger_does_not_eat_leading_letters():
-    # The condition begins with 'I' (and contains F/U): the char-set lstrip mangles it.
+    # C2 regression: the condition begins with 'I' (and contains F/U). A char-set
+    # lstrip('FU IF') would mangle it to 'ncrease staff pay'; the anchored regex must not.
     cond, _ = app._parse_trigger_text("Increase staff pay → ping me")
     assert cond == "Increase staff pay"
+
+
+def test_trigger_strips_marker_when_present():
+    cond, action = app._parse_trigger_text("FU IF Increase staff pay → ping me")
+    assert cond == "Increase staff pay"
+    assert action == "ping me"
 
 
 # ---- floor weeks feed ------------------------------------------------------
@@ -71,7 +74,8 @@ def _build_floor_feed(dates):
 
 
 def test_floor_weeks_dedupes_and_drops_stale():
-    this_monday = date.today() - timedelta(days=date.today().weekday())
+    today = app.app_today()
+    this_monday = today - timedelta(days=today.weekday())
     next_monday = this_monday + timedelta(days=7)
     stale = date(2015, 1, 5)
     # this_monday appears twice (Update 1/2) -> collapses to one.

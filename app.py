@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import date as date_cls, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import frontmatter
 import markdown as md_lib
@@ -38,9 +39,29 @@ CONGRESS_API_KEY = os.environ.get("CONGRESS_API_KEY", "")
 CONGRESS_MEMBER_BIOGUIDE = os.environ.get("CONGRESS_MEMBER_BIOGUIDE", "M001213")
 # Shared secret for the scheduled-sync endpoint (GitHub Actions sends it as a bearer token).
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
+# Timezone for all user-facing "today" logic. Vercel runs in UTC, so without this the
+# app rolls over to the next day mid-evening Mountain time. Override via env if needed.
+APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "America/Denver")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = SECRET_KEY
+
+
+def _app_tz() -> ZoneInfo:
+    try:
+        return ZoneInfo(APP_TIMEZONE)
+    except Exception:
+        return ZoneInfo("America/Denver")
+
+
+def app_now() -> datetime:
+    """Current timezone-aware datetime in APP_TIMEZONE."""
+    return datetime.now(_app_tz())
+
+
+def app_today() -> date_cls:
+    """Today's date in APP_TIMEZONE — the canonical 'today' for all day logic."""
+    return app_now().date()
 
 
 # --------------------------------------------------
@@ -72,7 +93,7 @@ def _current_congress(d: Optional[date_cls] = None) -> int:
             return int(override)
         except ValueError:
             pass
-    d = d or date_cls.today()
+    d = d or app_today()
     if d.year % 2 == 0:
         start = d.year - 1
     else:
@@ -875,7 +896,7 @@ def _normalize_date(raw: str, context_year: Optional[int] = None) -> Optional[st
             return None
         mo, d, y_raw = m.group(1), m.group(2), m.group(3)
         mo, d = int(mo), int(d)
-        y = int(y_raw) if y_raw else (context_year or datetime.now().year)
+        y = int(y_raw) if y_raw else (context_year or app_today().year)
         if y < 100:
             y += 2000
     try:
@@ -908,7 +929,7 @@ def _parse_trigger_text(full_text: str) -> Tuple[str, str]:
         parts = full_text.split("->", 1)
     else:
         parts = [full_text, ""]
-    cond = parts[0].strip().lstrip("FU IF").lstrip("FU if").strip()
+    cond = re.sub(r'^\s*FU\s+IF\s+', '', parts[0].strip(), flags=re.I).strip()
     action = parts[1].strip() if len(parts) > 1 else ""
     return cond, action
 
@@ -967,6 +988,10 @@ def _upsert_attendee_contacts(cur, mid: str, attendees_str: Optional[str],
         name = raw.strip()
         if not name:
             continue
+        # Skip the collapsed-attendee placeholder from large calendar meetings
+        # (e.g. "Large meeting (12 attendees)") so it never becomes a junk contact.
+        if re.match(r"^Large meeting \(\d+ attendees\)$", name):
+            continue
         cid = _contact_name_key(name)
         cur.execute("""
             INSERT INTO contacts (id, name, organization_id, updated_at)
@@ -1001,7 +1026,7 @@ _URGENCY_KW: list = [
 
 
 def _urgency_score(task: dict) -> int:
-    today = date_cls.today()
+    today = app_today()
     # Snoozed tasks are deprioritized to the bottom
     snoozed = task.get("snoozed_until")
     if snoozed:
@@ -1250,7 +1275,7 @@ _TASKS_SELECT = """
 
 
 def db_get_all_tasks(include_done: bool = False) -> List[Task]:
-    today = date_cls.today().isoformat()
+    today = app_today().isoformat()
     with get_db() as conn:
         with conn.cursor() as cur:
             if include_done:
@@ -1331,7 +1356,7 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
                   t.deadline ASC,
                   t.created_at DESC
             """, (org_id, org_id))
-            today_iso = date_cls.today().isoformat()
+            today_iso = app_today().isoformat()
             open_tasks = [_task_row_to_task(dict(r), today_iso).as_dict()
                           for r in cur.fetchall()]
             cur.execute(_TASKS_SELECT + f"""
@@ -1743,13 +1768,13 @@ def log_completion(
                     INSERT INTO completions
                         (task_id, task_text, section, source_filename, done, completed_date)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, (task_id, text[:200], section, filename, done, date_cls.today()))
+                """, (task_id, text[:200], section, filename, done, app_today()))
     except Exception as e:
         print(f"[completions] log error: {e}")
 
 
 def completions_per_day(days: int = 30) -> List[Dict[str, Any]]:
-    today = date_cls.today()
+    today = app_today()
     window = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
     buckets: Dict[str, int] = {d.isoformat(): 0 for d in window}
     try:
@@ -2064,51 +2089,40 @@ def api_meeting_unlink_contact(mid: str, cid: str):
     return jsonify({"ok": True})
 
 
-@app.route("/api/groups")
-def api_groups():
-    by_group: Dict[str, List[Meeting]] = {}
-    for m in db_get_all_meetings():
-        by_group.setdefault(m.canonical_group, []).append(m)
-    out = []
-    for group, grp_meetings in by_group.items():
-        dates = [m.date for m in grp_meetings if m.date]
-        out.append({
-            "group": group,
-            "meeting_count": len(grp_meetings),
-            "last_contact": max(dates) if dates else None,
-            "open_action_items": sum(len(m.action_items_open) for m in grp_meetings),
-            "open_reminders": sum(len(m.reminders_open) for m in grp_meetings),
-            "raw_variants": sorted(
-                {m.raw_group for m in grp_meetings if m.raw_group != group},
-                key=str.casefold,
-            ),
-        })
-    out.sort(key=lambda x: (x["last_contact"] or ""), reverse=True)
-    return jsonify(out)
-
-
 @app.route("/api/bills")
 def api_bills():
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Normalize type/number in SQL too, so legacy 'H.R.' rows collapse with 'HR',
+            # and key on congress so the same number in different Congresses stays distinct.
             cur.execute("""
-                SELECT br.bill_type, br.bill_number,
+                SELECT br.congress AS congress,
+                       UPPER(REGEXP_REPLACE(br.bill_type, '[^A-Za-z]', '', 'g')) AS bill_type,
+                       REGEXP_REPLACE(br.bill_number, '[^0-9]', '', 'g') AS bill_number,
                        json_agg(json_build_object(
                            'meeting_id', m.id,
                            'topic', COALESCE(NULLIF(m.topic, ''), m.filename),
                            'date', to_char(m.file_date, 'YYYY-MM-DD')
                        ) ORDER BY br.created_at DESC) AS meetings,
+                       array_agg(DISTINCT COALESCE(o.name, NULLIF(m.canonical_group, '')))
+                           FILTER (WHERE COALESCE(o.name, NULLIF(m.canonical_group, '')) IS NOT NULL)
+                           AS organizations,
                        max(br.created_at)::date AS last_seen
                 FROM bill_references br
                 JOIN meetings m ON br.meeting_id = m.id
-                GROUP BY br.bill_type, br.bill_number
+                LEFT JOIN organizations o ON m.organization_id = o.id
+                GROUP BY br.congress,
+                         UPPER(REGEXP_REPLACE(br.bill_type, '[^A-Za-z]', '', 'g')),
+                         REGEXP_REPLACE(br.bill_number, '[^0-9]', '', 'g')
                 ORDER BY max(br.created_at) DESC
             """)
             rows = cur.fetchall()
     return jsonify([{
+        "congress": r["congress"],
         "bill_type": r["bill_type"],
         "bill_number": r["bill_number"],
         "meetings": r["meetings"],
+        "organizations": r["organizations"] or [],
         "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
     } for r in rows])
 
@@ -2375,7 +2389,7 @@ def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
     offset, limit = 0, 250
     stop = False
     more = False  # True if we stopped early (cap/time budget) with work left for next run
-    today = date_cls.today()
+    today = app_today()
     deadline = time.monotonic() + _COMMITTEE_TIME_BUDGET
     while not stop and fetched < _COMMITTEE_DETAIL_CAP:
         if time.monotonic() > deadline:
@@ -2478,7 +2492,7 @@ def _parse_floor_weeks_feed(raw: bytes):
     import xml.etree.ElementTree as ET
     ns = "{http://www.w3.org/2005/Atom}"
     root = ET.fromstring(raw)
-    monday = date_cls.today() - timedelta(days=date_cls.today().weekday())
+    monday = app_today() - timedelta(days=app_today().weekday())
     by_date: dict = {}
     for entry in root.iter(f"{ns}entry"):
         wk = None
@@ -2581,7 +2595,7 @@ def _sync_house_floor(cur, congress: int, keys: set):
     import xml.etree.ElementTree as ET
     weeks = _discover_house_floor_weeks()
     if not weeks:
-        monday = date_cls.today() - timedelta(days=date_cls.today().weekday())
+        monday = app_today() - timedelta(days=app_today().weekday())
         weeks = [(wk, wk.strftime("%Y%m%d")) for wk in (monday, monday + timedelta(days=7))]
     stored = 0
     fetched_any = False
@@ -3315,9 +3329,9 @@ def api_scan_items_for_day():
     grouped by meeting. Each item carries linked-task status if applicable."""
     date_str = (request.args.get("date") or "").strip()
     try:
-        target = date_cls.fromisoformat(date_str) if date_str else date_cls.today()
+        target = date_cls.fromisoformat(date_str) if date_str else app_today()
     except ValueError:
-        target = date_cls.today()
+        target = app_today()
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -3537,7 +3551,7 @@ def api_person_detail(contact_id):
                 ORDER BY c.created_at DESC
             """, (contact_id,))
             commitments = [dict(r) for r in cur.fetchall()]
-            today_iso = date_cls.today().isoformat()
+            today_iso = app_today().isoformat()
             cur.execute(_TASKS_SELECT + """
                 WHERE t.contact_id = %s
                 ORDER BY t.done ASC,
@@ -3823,16 +3837,9 @@ def api_facets():
     groups: set = set()
     purposes: set = set()
     attendees: set = set()
-    raw_groups_seen: Dict[str, str] = {}
-
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT raw_name FROM groups_map")
-            aliased_raws = {r["raw_name"] for r in cur.fetchall()}
 
     for m in meetings:
         groups.add(m.canonical_group)
-        raw_groups_seen.setdefault(m.raw_group, m.canonical_group)
         for p in m.purpose:
             purposes.add(p)
         if m.attendees:
@@ -3841,25 +3848,11 @@ def api_facets():
                 if a:
                     attendees.add(a)
 
-    unaliased = [
-        raw for raw, canon in raw_groups_seen.items()
-        if raw.strip().lower() not in aliased_raws and raw == canon
-    ]
     return jsonify({
         "groups": sorted(groups, key=str.casefold),
         "purposes": sorted(purposes, key=str.casefold),
         "attendees": sorted(attendees, key=str.casefold),
-        "unaliased_raw_groups": sorted(unaliased, key=str.casefold),
     })
-
-
-@app.route("/api/reload", methods=["POST"])
-def api_reload():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS c FROM meetings")
-            count = cur.fetchone()["c"]
-    return jsonify({"ok": True, "count": count})
 
 
 # ---- Tasks ----
@@ -3877,11 +3870,12 @@ def api_tasks():
     show_subtasks = a.get("show_subtasks", "0").lower() not in ("0", "false", "no")
     parent_id_filter = a.get("parent_id", "")
     smart_view = a.get("smart_view", "")
+    deadline_filter = a.get("deadline", "")  # exact-match ISO deadline (YYYY-MM-DD)
 
-    today_iso = date_cls.today().isoformat()
-    tomorrow_iso = (date_cls.today() + timedelta(days=1)).isoformat()
-    week_out_iso = (date_cls.today() + timedelta(days=7)).isoformat()
-    neglect_cutoff = (date_cls.today() - timedelta(days=14)).isoformat()
+    today_iso = app_today().isoformat()
+    tomorrow_iso = (app_today() + timedelta(days=1)).isoformat()
+    week_out_iso = (app_today() + timedelta(days=7)).isoformat()
+    neglect_cutoff = (app_today() - timedelta(days=14)).isoformat()
 
     tasks = db_get_all_tasks(include_done=(status == "done" or smart_view != ""))
 
@@ -3889,7 +3883,7 @@ def api_tasks():
         if not t.snoozed_until:
             return False
         try:
-            return date_cls.fromisoformat(t.snoozed_until) > date_cls.today()
+            return date_cls.fromisoformat(t.snoozed_until) > app_today()
         except (ValueError, TypeError):
             return False
 
@@ -3918,6 +3912,7 @@ def api_tasks():
         if overdue_only and not t.overdue: continue
         if q and q not in t.text.lower() and q not in (t.group or "").lower(): continue
         if priority_filter and t.priority != priority_filter: continue
+        if deadline_filter and (t.deadline or "") != deadline_filter: continue
         pre_group.append(t)
 
     groups_in_scope = sorted({t.group for t in pre_group if t.group}, key=str.casefold)
@@ -4063,7 +4058,7 @@ def api_toggle_task():
                 # Spawn next recurrence instance when marking done
                 if done and row["recurrence_rule"]:
                     rule = row["recurrence_rule"]
-                    next_date = _compute_next_recurrence(rule, date_cls.today())
+                    next_date = _compute_next_recurrence(rule, app_today())
                     if next_date:
                         new_id = str(uuid.uuid4())
                         next_iso = next_date.isoformat()
@@ -4207,7 +4202,7 @@ def api_add_task():
     # Organization + deadline are now structured fields, so keep the task text clean
     # (no more "@group:" / "due" tags appended into the text).
     full_text = text
-    deadline, deadline_raw = extract_deadline(text, context_year=datetime.now().year)
+    deadline, deadline_raw = extract_deadline(text, context_year=app_today().year)
     # If deadline was passed directly (already parsed client-side), prefer it
     if deadline_in and not deadline:
         deadline = deadline_in
@@ -4227,7 +4222,7 @@ def api_add_task():
                     VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
-                    tid, full_text, group, date_cls.today(), deadline, deadline_raw,
+                    tid, full_text, group, app_today(), deadline, deadline_raw,
                     add_priority, add_contact,
                     int(add_estimate) if add_estimate else None,
                     json.dumps(add_recurrence) if add_recurrence else None,
@@ -4242,7 +4237,7 @@ def api_add_task():
 
 @app.route("/api/stats")
 def api_stats():
-    today = date_cls.today()
+    today = app_today()
     today_iso = today.isoformat()
 
     all_tasks = db_get_all_tasks(include_done=True)
@@ -4252,11 +4247,10 @@ def api_stats():
     overdue_open = [t for t in open_tasks if t.overdue]
     due_today = [t for t in open_tasks if t.deadline == today_iso]
 
-    # Deadlines strip: Mon–Fri of the current work week
-    monday = today - timedelta(days=today.weekday())
-    work_week = [monday + timedelta(days=i) for i in range(5)]  # Mon=0 … Fri=4
+    # Deadlines strip: a true rolling 7 days from today, weekends included.
+    rolling_week = [today + timedelta(days=i) for i in range(7)]
     deadlines_by_day = []
-    for d in work_week:
+    for d in rolling_week:
         iso = d.isoformat()
         deadlines_by_day.append({
             "date": iso,
@@ -4535,7 +4529,7 @@ def api_notes_intake():
 
     note_group = (data.get("group") or "").strip() or "intake"
     note_topic = (data.get("topic") or "").strip()
-    note_date = (data.get("date") or "").strip() or date_cls.today().isoformat()
+    note_date = (data.get("date") or "").strip() or app_today().isoformat()
     note_attendees = (data.get("attendees") or "").strip()
     canvas_image = data.get("canvas_image") or None
     meeting_type = (data.get("meeting_type") or "").strip()
@@ -4641,7 +4635,7 @@ def api_notes_intake():
         fm_parts.append("purpose: [" + ", ".join(f'"{p}"' for p in note_purpose) + "]")
 
     content = "---\n" + "\n".join(fm_parts) + "\n---\n\n" + body
-    now = datetime.now()
+    now = app_now()
     time_suffix = now.strftime("%H%M%S")
     filename = f"{note_date} - {safe_group} [{time_suffix}].md"
 
@@ -4674,11 +4668,12 @@ def api_notes_intake():
                     # Turn attendees into linked People contacts
                     _upsert_attendee_contacts(cur, mid_out, note_attendees, org_id_out)
 
-                    # Bill references
+                    # Bill references — normalized on write so 'H.R.'/'HR' collapse and
+                    # the congress+type+number key joins cleanly with tracked bills.
                     if bill_items:
                         for bill in bill_items:
-                            bt = (bill.get("billType") or "").strip()
-                            bn = (bill.get("billNumber") or "").strip()
+                            bt = _normalize_bill_type(bill.get("billType"))
+                            bn = _normalize_bill_number(bill.get("billNumber"))
                             if bt and bn:
                                 cur.execute(
                                     "INSERT INTO bill_references (meeting_id, bill_type, bill_number, congress)"
@@ -4946,7 +4941,7 @@ def _create_or_update_prepared_meeting(event: dict, ece_id: int) -> str:
         dtstart_dt = datetime.fromisoformat(dtstart_str)
         date_str = dtstart_dt.date().isoformat()
     except Exception:
-        date_str = date_cls.today().isoformat()
+        date_str = app_today().isoformat()
 
     uid_hash = hashlib.sha1(f"{uid}:{recurrence_id}".encode()).hexdigest()[:8]
     safe_summary = re.sub(r'[^a-zA-Z0-9_-]', '-', summary[:30])
@@ -5200,7 +5195,7 @@ def shortcut_add_task():
         tags.append(f"due {deadline_in}")
     full_text = text + ((" " + " ".join(tags)) if tags else "")
 
-    deadline, deadline_raw = extract_deadline(full_text, context_year=datetime.now().year)
+    deadline, deadline_raw = extract_deadline(full_text, context_year=app_today().year)
     tid = str(uuid.uuid4())
 
     try:
@@ -5212,7 +5207,7 @@ def shortcut_add_task():
                          group_name, source_date, deadline, deadline_raw)
                     VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
                             %s, %s, %s, %s)
-                """, (tid, full_text, group, date_cls.today(), deadline, deadline_raw))
+                """, (tid, full_text, group, app_today(), deadline, deadline_raw))
         return jsonify({"ok": True, "text": full_text})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

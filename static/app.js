@@ -13,13 +13,14 @@ const state = {
   selectedMeetingId: null,
   selectedOrgId: null,
   selectedTaskIdx: -1,
-  facets: { groups: [], purposes: [], attendees: [], unaliased_raw_groups: [] },
+  facets: { groups: [], purposes: [], attendees: [] },
   people: [],
   stats: null,
   meetingFilters: { group: "", purpose: "", attendee: "", dateFrom: "", dateTo: "", hasOpenTasks: false },
   billsFilter: { relationship: "all", q: "", congress: "current" },
   dailyPlanTasks: [],
   dailyPlanOrder: [],
+  deadlineFilter: "",  // exact ISO date set by clicking the Home deadlines strip
 };
 
 // ---------- Utilities ----------
@@ -60,6 +61,7 @@ function tasksFilters() {
   if ($("#t-overdue").checked) p.set("overdue", "1");
   if ($("#t-snoozed")?.checked) p.set("snoozed", "1");
   const pr = $("#t-priority")?.value; if (pr) p.set("priority", pr);
+  if (state.deadlineFilter) p.set("deadline", state.deadlineFilter);
   return p.toString();
 }
 
@@ -154,7 +156,7 @@ async function renderHome() {
   _refreshTodayCalloutsSummary();
 
   // Daily planning: auto-open on first visit each day
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
   if (localStorage.getItem("last_plan_date") !== today && s.open_count > 0) {
     openDailyPlan();
   }
@@ -504,15 +506,44 @@ function renderTasks() {
 
   const gSel = $("#t-group");
   const current = gSel.value;
-  const opts = [`<option value="">All groups</option>`]
+  const opts = [`<option value="">All organizations</option>`]
     .concat(state.tasksGroupsInScope.map((g) => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`));
   gSel.innerHTML = opts.join("");
   if (current && state.tasksGroupsInScope.includes(current)) gSel.value = current;
   else gSel.value = "";
 
+  renderTaskActiveFilters();
+
   // Keep the phone segmented control in sync with the front paper
   const front = state.paperOrder[0];
   document.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.seg === front));
+}
+
+// Renders the removable "Due <date>" chip when a deadline filter is active.
+function renderTaskActiveFilters() {
+  const el = $("#task-active-filters");
+  if (!el) return;
+  if (!state.deadlineFilter) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  const label = fmtDayLabel(state.deadlineFilter);
+  el.hidden = false;
+  el.innerHTML =
+    `<span class="active-filter-chip">Due ${escapeHtml(label)}` +
+    `<button class="active-filter-x" data-clear-deadline title="Clear">✕</button></span>`;
+  el.querySelector("[data-clear-deadline]").addEventListener("click", () => {
+    state.deadlineFilter = "";
+    refreshTasks();
+  });
+}
+
+// "2026-07-15" -> "Wed Jul 15" for a compact chip label.
+function fmtDayLabel(iso) {
+  const d = new Date(iso + "T12:00:00");
+  if (isNaN(d)) return iso;
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
 function bringToFront(paperName) {
@@ -1562,7 +1593,7 @@ async function _saveMeetingEdit() {
   const groupInput = $("#meeting-edit-group");
   const mid = groupInput.dataset.mid;
   const group = groupInput.value.trim();
-  if (!group) { alert("Group is required"); return; }
+  if (!group) { alert("Organization is required"); return; }
 
   const btn = $("#meeting-edit-save");
   btn.disabled = true;
@@ -2595,7 +2626,10 @@ function _editScanItemDateInline(anchorEl, idx) {
 // Which callout types the user is allowed to switch between in the review queue.
 // Deadline/person/bill have distinct downstream semantics and aren't task-producing,
 // so they're not interchangeable with task/followup/important.
-const _SWITCHABLE_CALLOUT_TYPES = ["task", "followup", "important", "ask", "commitment", "trigger"];
+// Stopgap (audit H8): only label-safe types are switchable in the review UI. Changing a
+// callout to ask/commitment/trigger has no backend conversion yet, so offering it would lie.
+// Phase 8 restores the full set once POST /api/scan-items/<id>/convert exists.
+const _SWITCHABLE_CALLOUT_TYPES = ["task", "followup", "important"];
 // Types where setting a due date downstream makes sense.
 const _DATABLE_CALLOUT_TYPES = ["task", "followup", "important", "ask", "commitment", "trigger", "deadline"];
 
@@ -2687,7 +2721,7 @@ let _todayCalloutsData = null;  // {date, meetings: [...]}
 
 function openTodayCalloutsModal() {
   $("#today-callouts-backdrop").classList.remove("hidden");
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
   _todayCalloutsDate = today;
   $("#today-callouts-date").value = today;
   _loadTodayCallouts(today);
@@ -3073,7 +3107,7 @@ function _intakeBuildChips() {
   container.innerHTML = "";
 
   const fields = [
-    { id: "intake-group",     label: "Group",     type: "text"   },
+    { id: "intake-group",     label: "Organization", type: "text"   },
     { id: "intake-topic",     label: "Topic",     type: "text"   },
     { id: "intake-date",      label: "Date",      type: "date"   },
     { id: "intake-attendees", label: "Attendees", type: "text"   },
@@ -3365,16 +3399,18 @@ async function ensurePersonId(name) {
 function renderBillsTable(bills) {
   const tbody = $("#bills-body");
   if (!bills.length) {
-    tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:30px;">No bills referenced yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:30px;">No bills referenced yet.</td></tr>`;
     return;
   }
   tbody.innerHTML = bills.map((b) => {
     const meetingLinks = (b.meetings || []).map((m) =>
       `<button class="bill-meeting-link" data-meeting-id="${escapeHtml(m.meeting_id)}">${escapeHtml(m.topic || m.date || "Meeting")}</button>`
     ).join(" ");
+    const orgs = (b.organizations || []).map((o) => escapeHtml(o)).join(", ");
     return `<tr>
       <td><strong>${escapeHtml(b.bill_type)}${escapeHtml(b.bill_number)}</strong></td>
       <td class="bill-meetings-cell">${meetingLinks}</td>
+      <td>${orgs || "—"}</td>
       <td>${escapeHtml(b.last_seen || "—")}</td>
     </tr>`;
   }).join("");
@@ -4136,7 +4172,7 @@ function openSnoozePopup(task) {
   _snoozeTask = task;
   const popup = $("#snooze-popup");
   const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowISO = tomorrow.toISOString().slice(0, 10);
+  const tomorrowISO = localDateStr(tomorrow);
   const inp = $("#snooze-date-input");
   inp.min = tomorrowISO;
   inp.value = tomorrowISO;
@@ -4284,7 +4320,7 @@ async function openDailyPlan() {
 
 function closeDailyPlanModal() {
   $("#daily-plan-backdrop").classList.add("hidden");
-  localStorage.setItem("last_plan_date", new Date().toISOString().slice(0, 10));
+  localStorage.setItem("last_plan_date", localToday());
 }
 
 function _renderDailyPlanModal() {
@@ -4496,6 +4532,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if ($("#t-priority")) $("#t-priority").value = "";
     if ($("#t-snoozed")) $("#t-snoozed").checked = false;
     $("#q").value = "";
+    state.deadlineFilter = "";
     refreshTasks();
     updateTaskFilterToggleState();
   });
@@ -4624,12 +4661,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (file) uploadICS(file);
   });
 
-  // Deadline strip
+  // Deadline strip: set a real deadline filter (not the search box), then show Tasks.
   $("#deadlines-strip").addEventListener("click", (e) => {
     const day = e.target.closest(".deadline-day");
     if (!day) return;
+    state.deadlineFilter = day.dataset.date;
     switchTab("tasks");
-    $("#q").value = day.dataset.date;
     refreshTasks();
   });
 
@@ -5013,17 +5050,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.target.value) _loadTodayCallouts(e.target.value);
   });
   $("#today-callouts-prev")?.addEventListener("click", () => {
-    const d = new Date((_todayCalloutsDate || new Date().toISOString().slice(0, 10)) + "T12:00:00");
+    const d = new Date((_todayCalloutsDate || localToday()) + "T12:00:00");
     d.setDate(d.getDate() - 1);
     _loadTodayCallouts(d.toISOString().slice(0, 10));
   });
   $("#today-callouts-next")?.addEventListener("click", () => {
-    const d = new Date((_todayCalloutsDate || new Date().toISOString().slice(0, 10)) + "T12:00:00");
+    const d = new Date((_todayCalloutsDate || localToday()) + "T12:00:00");
     d.setDate(d.getDate() + 1);
     _loadTodayCallouts(d.toISOString().slice(0, 10));
   });
   $("#today-callouts-today-btn")?.addEventListener("click", () => {
-    _loadTodayCallouts(new Date().toISOString().slice(0, 10));
+    _loadTodayCallouts(localToday());
   });
 
   // Phase 0 type picker

@@ -4226,3 +4226,20 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
   /* Comfortable touch targets */
   .modal-close, .drawer-close, .focus-mode-close, .icon-btn { min-width: 44px; min-height: 44px; }
 }
+
+/* ---- Active task filters (e.g. the deadline-strip drill-down chip, audit H6) ---- */
+.task-active-filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 4px 0; }
+.task-active-filters[hidden] { display: none; }
+.active-filter-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--card-soft); color: var(--ink, #111);
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  padding: 4px 6px 4px 12px; font-size: 13px; font-weight: 600;
+}
+.active-filter-x {
+  border: none; background: rgba(0,0,0,0.06); color: inherit;
+  border-radius: 999px; width: 20px; height: 20px; line-height: 1;
+  cursor: pointer; font-size: 12px; display: inline-flex;
+  align-items: center; justify-content: center;
+}
+.active-filter-x:hover { background: rgba(0,0,0,0.14); }

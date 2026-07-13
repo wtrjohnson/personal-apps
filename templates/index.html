@@ -144,6 +144,7 @@
                 </button>
               </div>
             </div>
+            <div class="task-active-filters" id="task-active-filters" hidden></div>
             <div class="task-filter-bar" id="task-filter-bar" hidden>
               <div class="task-filter-bar-inner">
                 <div class="task-filter-field">
@@ -489,7 +490,6 @@
           <div>
             <label for="edit-m-estimate">Estimate (min)</label>
             <input id="edit-m-estimate" type="number" min="1" max="480" placeholder="e.g. 30" style="margin-bottom:0;">
-            <span id="edit-m-estimate-hint" class="estimate-hint"></span>
           </div>
           <div>
             <label for="edit-m-recur">Repeat</label>
@@ -961,6 +961,7 @@
     </div>
   </div>
 
+  <script src="/static/ui.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

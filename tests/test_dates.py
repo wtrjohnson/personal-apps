@@ -1,7 +1,28 @@
 """Date / time pure-function tests (no DB)."""
-from datetime import date
+from datetime import date, datetime, timezone
 
 import app
+
+
+# ---- app timezone helpers (C4) --------------------------------------------
+
+def test_app_now_is_tz_aware():
+    now = app.app_now()
+    assert now.tzinfo is not None
+    assert app.app_today() == now.date()
+
+
+def test_app_tz_bad_zone_falls_back_to_denver(monkeypatch):
+    monkeypatch.setattr(app, "APP_TIMEZONE", "Not/AZone")
+    assert app._app_tz().key == "America/Denver"
+
+
+def test_denver_evening_is_prior_utc_day(monkeypatch):
+    # The C4 bug: a late-UTC instant is still the previous calendar day in Denver.
+    monkeypatch.setattr(app, "APP_TIMEZONE", "America/Denver")
+    tz = app._app_tz()
+    utc_dt = datetime(2026, 7, 14, 2, 0, tzinfo=timezone.utc)  # 8 PM MDT on the 13th
+    assert utc_dt.astimezone(tz).date().isoformat() == "2026-07-13"
 
 
 # ---- _normalize_date -------------------------------------------------------
