@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import date as date_cls, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import frontmatter
 import markdown as md_lib
@@ -38,9 +39,45 @@ CONGRESS_API_KEY = os.environ.get("CONGRESS_API_KEY", "")
 CONGRESS_MEMBER_BIOGUIDE = os.environ.get("CONGRESS_MEMBER_BIOGUIDE", "M001213")
 # Shared secret for the scheduled-sync endpoint (GitHub Actions sends it as a bearer token).
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
+# Timezone for all user-facing "today" logic. Vercel runs in UTC, so without this the
+# app rolls over to the next day mid-evening Mountain time. Override via env if needed.
+APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "America/Denver")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = SECRET_KEY
+
+
+def _app_tz() -> ZoneInfo:
+    try:
+        return ZoneInfo(APP_TIMEZONE)
+    except Exception:
+        return ZoneInfo("America/Denver")
+
+
+def app_now() -> datetime:
+    """Current timezone-aware datetime in APP_TIMEZONE."""
+    return datetime.now(_app_tz())
+
+
+def app_today() -> date_cls:
+    """Today's date in APP_TIMEZONE — the canonical 'today' for all day logic."""
+    return app_now().date()
+
+
+# Canonical status vocabularies (audit H3, C2b). One working set per obligation type.
+ASK_STATUSES = ("open", "in_review", "accepted", "declined", "done", "no_action")
+COMMITMENT_STATUSES = ("open", "in_progress", "done", "dropped")
+TRIGGER_STATUSES = ("watching", "fired", "resolved", "dismissed")
+
+# Legacy -> canonical remaps applied once in the migrate hook.
+_ASK_STATUS_REMAP = {
+    "logged": "open", "needs_review": "in_review", "under_review": "in_review",
+    "task_created": "accepted", "completed": "done", "notify_if_changes": "open",
+}
+_COMMITMENT_STATUS_REMAP = {
+    "task_created": "in_progress", "waiting": "in_progress", "completed": "done",
+    "closed_no_action": "dropped", "needs_review": "open",
+}
 
 
 # --------------------------------------------------
@@ -72,7 +109,7 @@ def _current_congress(d: Optional[date_cls] = None) -> int:
             return int(override)
         except ValueError:
             pass
-    d = d or date_cls.today()
+    d = d or app_today()
     if d.year % 2 == 0:
         start = d.year - 1
     else:
@@ -88,6 +125,24 @@ def _normalize_bill_type(s: Optional[str]) -> str:
 def _normalize_bill_number(s: Optional[str]) -> str:
     """Digits only, e.g. 'No. 1234' -> '1234'."""
     return re.sub(r"\D", "", (s or ""))
+
+
+# Inline bill token in free text (longer chamber+type forms first). Mirrors the client
+# _BILL_RE so an ask like "support H.R. 5" can be linked to a bill (audit H4 / Phase 9).
+_BILL_TOKEN_RE = re.compile(
+    r"\b(H\.?\s?J\.?\s?Res\.?|S\.?\s?J\.?\s?Res\.?|H\.?\s?Con\.?\s?Res\.?|S\.?\s?Con\.?\s?Res\.?"
+    r"|H\.?\s?Res\.?|S\.?\s?Res\.?|H\.?\s?R\.?|S\.?)\s*(\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_bill(text: Optional[str]) -> Optional[Tuple[str, str]]:
+    """Return (normalized_type, normalized_number) for the first bill token in text, else None."""
+    m = _BILL_TOKEN_RE.search(text or "")
+    if not m:
+        return None
+    bt, bn = _normalize_bill_type(m.group(1)), _normalize_bill_number(m.group(2))
+    return (bt, bn) if bt and bn else None
 
 
 def init_db() -> None:
@@ -129,6 +184,8 @@ def init_db() -> None:
                     snoozed_until DATE DEFAULT NULL,
                     estimate_minutes INT DEFAULT NULL,
                     recurrence_rule JSONB DEFAULT NULL,
+                    import_key TEXT,
+                    import_locked BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT NOW()
                 );
                 CREATE TABLE IF NOT EXISTS groups_map (
@@ -145,22 +202,36 @@ def init_db() -> None:
                     completed_date DATE DEFAULT CURRENT_DATE,
                     completed_at TIMESTAMP DEFAULT NOW()
                 );
-                CREATE TABLE IF NOT EXISTS task_time_log (
-                    id SERIAL PRIMARY KEY,
-                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                    minutes_spent INT NOT NULL,
-                    logged_at TIMESTAMP DEFAULT NOW()
-                );
                 CREATE TABLE IF NOT EXISTS task_dependencies (
                     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                     depends_on_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                     PRIMARY KEY (task_id, depends_on_id)
                 );
+                -- Tombstones for meeting-sourced tasks the user deleted, so re-importing
+                -- the same .md file never resurrects them (audit M15).
+                CREATE TABLE IF NOT EXISTS import_tombstones (
+                    import_key TEXT PRIMARY KEY,
+                    deleted_at TIMESTAMP DEFAULT NOW()
+                );
                 CREATE INDEX IF NOT EXISTS tasks_parent_id     ON tasks (parent_id);
                 CREATE INDEX IF NOT EXISTS tasks_snoozed_until ON tasks (snoozed_until);
-                CREATE INDEX IF NOT EXISTS task_time_log_task  ON task_time_log (task_id);
                 CREATE INDEX IF NOT EXISTS task_deps_task      ON task_dependencies (task_id);
                 CREATE INDEX IF NOT EXISTS task_deps_depends   ON task_dependencies (depends_on_id);
+            """)
+            # ---- Stable task identity (audit C3/M15) ----
+            # import_key holds the content hash used only by the .md import upsert, so the
+            # primary key (tasks.id) can stay immutable across edits. Backfill = current id
+            # for meeting-sourced rows (whose id already IS that content hash).
+            cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS import_key TEXT")
+            cur.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS import_locked BOOLEAN DEFAULT FALSE")
+            cur.execute("""
+                UPDATE tasks SET import_key = id
+                WHERE import_key IS NULL
+                  AND source_filename NOT IN ('', 'tasks.md')
+            """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS tasks_import_key_uniq
+                    ON tasks (import_key) WHERE import_key IS NOT NULL
             """)
             cur.execute("""
                 DO $$ BEGIN
@@ -281,8 +352,10 @@ def init_db() -> None:
                     text         TEXT NOT NULL,
                     task_id      TEXT REFERENCES tasks(id) ON DELETE SET NULL,
                     accepted     BOOLEAN NOT NULL DEFAULT TRUE,
+                    acknowledged_at TIMESTAMP,
                     created_at   TIMESTAMP DEFAULT NOW()
                 );
+                ALTER TABLE meeting_scan_items ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMP;
                 CREATE INDEX IF NOT EXISTS scan_items_meeting ON meeting_scan_items (meeting_id);
                 CREATE TABLE IF NOT EXISTS external_calendar_events (
                     id           SERIAL PRIMARY KEY,
@@ -338,7 +411,7 @@ def init_db() -> None:
                     organization_id TEXT REFERENCES organizations(id) ON DELETE SET NULL,
                     contact_id      TEXT REFERENCES contacts(id) ON DELETE SET NULL,
                     bill_ref_id     INTEGER REFERENCES bill_references(id) ON DELETE SET NULL,
-                    status          TEXT NOT NULL DEFAULT 'logged',
+                    status          TEXT NOT NULL DEFAULT 'open',
                     priority        TEXT NOT NULL DEFAULT 'normal',
                     task_id         TEXT REFERENCES tasks(id) ON DELETE SET NULL,
                     source_excerpt  TEXT,
@@ -578,13 +651,101 @@ def init_db() -> None:
                 CREATE INDEX IF NOT EXISTS bill_sched_typenum ON bill_schedule_events (congress, bill_type, bill_number);
                 CREATE INDEX IF NOT EXISTS bill_sched_date ON bill_schedule_events (event_date);
             """)
+            # Fold legacy tasks.contact free-text into the linked contact's phone field
+            # when empty (audit M2), so the redundant per-task field can retire from the UI
+            # without losing data. The column itself is left in place as a harmless vestige.
+            cur.execute("""
+                UPDATE contacts c SET phone = sub.contact, updated_at = NOW()
+                FROM (
+                    SELECT DISTINCT ON (contact_id) contact_id, contact
+                    FROM tasks
+                    WHERE contact_id IS NOT NULL AND COALESCE(contact, '') <> ''
+                    ORDER BY contact_id, created_at DESC
+                ) sub
+                WHERE c.id = sub.contact_id AND COALESCE(c.phone, '') = ''
+            """)
+            # Unique email index (audit H5). Best-effort: if duplicate emails still exist,
+            # it can't be created yet — merge the dupes (POST /api/contacts/<id>/merge),
+            # then re-run migrate. A savepoint keeps the rest of the migration intact.
+            cur.execute("SAVEPOINT email_uniq")
+            try:
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS contacts_email_unique "
+                    "ON contacts (lower(email)) WHERE email <> ''"
+                )
+                cur.execute("RELEASE SAVEPOINT email_uniq")
+            except Exception as _e:
+                cur.execute("ROLLBACK TO SAVEPOINT email_uniq")
+                print(f"[migrate] contacts_email_unique skipped (merge duplicate emails first): {_e}")
+
+            # Canonical status vocabularies (audit H3/C2b): one-way remap of legacy values,
+            # then CHECK constraints. Run after the mapping so the constraint validates.
+            cur.execute("ALTER TABLE asks ALTER COLUMN status SET DEFAULT 'open'")
+            cur.execute("""
+                UPDATE asks SET status = CASE status
+                    WHEN 'logged' THEN 'open' WHEN 'needs_review' THEN 'in_review'
+                    WHEN 'under_review' THEN 'in_review' WHEN 'task_created' THEN 'accepted'
+                    WHEN 'completed' THEN 'done' WHEN 'notify_if_changes' THEN 'open'
+                    ELSE status END
+                WHERE status NOT IN ('open','in_review','accepted','declined','done','no_action')
+            """)
+            cur.execute("""
+                UPDATE commitments SET status = CASE status
+                    WHEN 'task_created' THEN 'in_progress' WHEN 'waiting' THEN 'in_progress'
+                    WHEN 'completed' THEN 'done' WHEN 'closed_no_action' THEN 'dropped'
+                    WHEN 'needs_review' THEN 'open'
+                    ELSE status END
+                WHERE status NOT IN ('open','in_progress','done','dropped')
+            """)
+            for _tbl, _statuses, _con in (
+                ("asks", ASK_STATUSES, "asks_status_check"),
+                ("commitments", COMMITMENT_STATUSES, "commitments_status_check"),
+                ("followup_triggers", TRIGGER_STATUSES, "followup_triggers_status_check"),
+            ):
+                _vals = ",".join(f"'{s}'" for s in _statuses)
+                cur.execute("SAVEPOINT status_ck")
+                try:
+                    cur.execute(f"ALTER TABLE {_tbl} DROP CONSTRAINT IF EXISTS {_con}")
+                    cur.execute(f"ALTER TABLE {_tbl} ADD CONSTRAINT {_con} CHECK (status IN ({_vals}))")
+                    cur.execute("RELEASE SAVEPOINT status_ck")
+                except Exception as _e:
+                    cur.execute("ROLLBACK TO SAVEPOINT status_ck")
+                    print(f"[migrate] {_con} skipped: {_e}")
 
 
-if DATABASE_URL:
+if DATABASE_URL and os.environ.get("JOS_SKIP_DB_INIT") != "1":
+    # Cold start does NOT run DDL (audit A1): schema migrations run deliberately via
+    # POST /api/admin/migrate after each deploy. Here we only verify connectivity so a
+    # broken DATABASE_URL still surfaces early in logs.
     try:
-        init_db()
+        with get_db() as _conn:
+            with _conn.cursor() as _cur:
+                _cur.execute("SELECT 1")
     except Exception as _e:
-        print(f"[db] init warning: {_e}")
+        print(f"[db] connectivity check failed: {_e}")
+
+
+# --------------------------------------------------
+# ERROR ENVELOPE
+# --------------------------------------------------
+
+def fail(msg: str, code: int = 400):
+    """Canonical JSON error response: {"ok": false, "error": msg}."""
+    return jsonify({"ok": False, "error": msg}), code
+
+
+@app.errorhandler(Exception)
+def _handle_uncaught(e):
+    """Never let an API route return an opaque HTML 500. Routing errors (404/405) and
+    redirects are HTTPExceptions and pass through unchanged; everything else on an /api/
+    path becomes {"ok": false, "error": ...} so the client toast can show the real cause."""
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    app.logger.exception("Unhandled error on %s", request.path)
+    if request.path.startswith("/api/"):
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return ("Internal Server Error", 500)
 
 
 # --------------------------------------------------
@@ -595,7 +756,7 @@ if DATABASE_URL:
 def require_login() -> Optional[Any]:
     if request.path.startswith("/static/"):
         return None
-    if request.endpoint in ("login", "logout", "shortcut_add_task", "cron_sync"):
+    if request.endpoint in ("login", "logout", "shortcut_add_task", "cron_sync", "admin_migrate"):
         return None
     if not session.get("logged_in"):
         return redirect(url_for("login"))
@@ -875,7 +1036,7 @@ def _normalize_date(raw: str, context_year: Optional[int] = None) -> Optional[st
             return None
         mo, d, y_raw = m.group(1), m.group(2), m.group(3)
         mo, d = int(mo), int(d)
-        y = int(y_raw) if y_raw else (context_year or datetime.now().year)
+        y = int(y_raw) if y_raw else (context_year or app_today().year)
         if y < 100:
             y += 2000
     try:
@@ -894,6 +1055,23 @@ def extract_deadline(
             if normalized:
                 return normalized, m.group(0)
     return None, None
+
+
+def _parse_trigger_text(full_text: str) -> Tuple[str, str]:
+    """Split a 'FU IF <condition> → <action>' trigger line into (condition, action).
+
+    The condition has its leading 'FU IF ' marker removed. Action is whatever follows
+    the first → / -> separator (empty when absent)."""
+    full_text = (full_text or "").strip()
+    if "→" in full_text:
+        parts = full_text.split("→", 1)
+    elif "->" in full_text:
+        parts = full_text.split("->", 1)
+    else:
+        parts = [full_text, ""]
+    cond = re.sub(r'^\s*FU\s+IF\s+', '', parts[0].strip(), flags=re.I).strip()
+    action = parts[1].strip() if len(parts) > 1 else ""
+    return cond, action
 
 
 # --------------------------------------------------
@@ -921,6 +1099,12 @@ def _org_for_name(cur, name: Optional[str]) -> Optional[str]:
     name = (name or "").strip()
     if not name or name == "intake":
         return None
+    # Resolve an existing org by name (case-insensitive) before minting a new slug, so
+    # renaming an org doesn't fork its history under a fresh slug (audit H7).
+    cur.execute("SELECT id FROM organizations WHERE lower(name) = lower(%s) LIMIT 1", (name,))
+    row = cur.fetchone()
+    if row:
+        return row["id"]
     oid = _org_slug(name)
     cur.execute("""
         INSERT INTO organizations (id, name, created_at, updated_at)
@@ -950,17 +1134,107 @@ def _upsert_attendee_contacts(cur, mid: str, attendees_str: Optional[str],
         name = raw.strip()
         if not name:
             continue
-        cid = _contact_name_key(name)
-        cur.execute("""
-            INSERT INTO contacts (id, name, organization_id, updated_at)
-            VALUES (%s, %s, %s, NOW())
-            ON CONFLICT (id) DO NOTHING
-        """, (cid, name, org_id))
+        # Skip the collapsed-attendee placeholder from large calendar meetings
+        # (e.g. "Large meeting (12 attendees)") so it never becomes a junk contact.
+        if re.match(r"^Large meeting \(\d+ attendees\)$", name):
+            continue
+        # Prefer an existing contact matched by name (e.g. a uuid contact from a card
+        # scan) so attendee saves don't fork a hash-id duplicate (audit H5). Fall back to
+        # the deterministic name-hash id, which keeps re-saving a meeting idempotent.
+        cur.execute("SELECT id FROM contacts WHERE lower(name) = lower(%s) LIMIT 1", (name,))
+        row = cur.fetchone()
+        if row:
+            cid = row["id"]
+        else:
+            cid = _contact_name_key(name)
+            cur.execute("""
+                INSERT INTO contacts (id, name, organization_id, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (id) DO NOTHING
+            """, (cid, name, org_id))
         cur.execute("""
             INSERT INTO meeting_contacts (meeting_id, contact_id)
             VALUES (%s, %s) ON CONFLICT DO NOTHING
         """, (mid, cid))
         _link_contact_org(cur, cid, org_id)
+
+
+def _ensure_contact_by_name(cur, name: Optional[str], org_id: Optional[str],
+                            mid: Optional[str] = None) -> Optional[str]:
+    """Resolve a person name to a contact id (match by name, else create), optionally
+    linking to a meeting. Same identity rules as attendee upsert (audit H1/H2)."""
+    name = (name or "").strip()
+    if not name or re.match(r"^Large meeting \(\d+ attendees\)$", name):
+        return None
+    cur.execute("SELECT id FROM contacts WHERE lower(name) = lower(%s) LIMIT 1", (name,))
+    row = cur.fetchone()
+    if row:
+        cid = row["id"]
+    else:
+        cid = _contact_name_key(name)
+        cur.execute("""
+            INSERT INTO contacts (id, name, organization_id, updated_at)
+            VALUES (%s, %s, %s, NOW()) ON CONFLICT (id) DO NOTHING
+        """, (cid, name, org_id))
+    if mid:
+        cur.execute(
+            "INSERT INTO meeting_contacts (meeting_id, contact_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+            (mid, cid))
+    _link_contact_org(cur, cid, org_id)
+    return cid
+
+
+def _single_at_name(text: Optional[str]) -> Optional[str]:
+    """Return the sole @name mentioned in a line, else None (ambiguous or absent)."""
+    names = re.findall(r"@([A-Za-z][A-Za-z0-9_'-]*)", text or "")
+    return names[0] if len(names) == 1 else None
+
+
+def _single_attendee_name(attendees_str: Optional[str]) -> Optional[str]:
+    """Return the sole real attendee name, else None (for defaulting a 1:1's person)."""
+    parts = [a.strip() for a in re.split(r"[;,]", attendees_str or "")
+             if a.strip() and not re.match(r"^Large meeting \(\d+ attendees\)$", a.strip())]
+    return parts[0] if len(parts) == 1 else None
+
+
+def _intake_person_for(cur, item: dict, note_attendees: Optional[str],
+                       org_id: Optional[str], mid: str) -> Optional[str]:
+    """Resolve the person a captured item belongs to (audit H1). Priority: an explicit
+    person_id/person from the review queue, then a lone @name in the text, then the lone
+    meeting attendee, else unset. Ensures the contact exists and links it to the meeting."""
+    pid = (item.get("person_id") or "").strip()
+    if pid:
+        cur.execute(
+            "INSERT INTO meeting_contacts (meeting_id, contact_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+            (mid, pid))
+        _link_contact_org(cur, pid, org_id)
+        return pid
+    pname = ((item.get("person") or "").strip()
+             or _single_at_name(item.get("text"))
+             or _single_attendee_name(note_attendees))
+    return _ensure_contact_by_name(cur, pname, org_id, mid)
+
+
+def _bill_ref_for_text(cur, mid: str, text: str) -> Optional[int]:
+    """If a line names a bill, return the meeting's bill_reference id for it (creating one
+    if needed), so an ask can link to the bill (audit Phase 9). None if no bill token."""
+    det = _detect_bill(text)
+    if not det:
+        return None
+    bt, bn = det
+    cur.execute(
+        "SELECT id FROM bill_references WHERE meeting_id=%s "
+        "AND UPPER(REGEXP_REPLACE(bill_type,'[^A-Za-z]','','g'))=%s "
+        "AND REGEXP_REPLACE(bill_number,'[^0-9]','','g')=%s LIMIT 1",
+        (mid, bt, bn))
+    row = cur.fetchone()
+    if row:
+        return row["id"]
+    cur.execute(
+        "INSERT INTO bill_references (meeting_id, bill_type, bill_number, congress) "
+        "VALUES (%s,%s,%s,%s) RETURNING id",
+        (mid, bt, bn, _current_congress()))
+    return cur.fetchone()["id"]
 
 
 def _year_from_date(s: Optional[str]) -> Optional[int]:
@@ -984,7 +1258,7 @@ _URGENCY_KW: list = [
 
 
 def _urgency_score(task: dict) -> int:
-    today = date_cls.today()
+    today = app_today()
     # Snoozed tasks are deprioritized to the bottom
     snoozed = task.get("snoozed_until")
     if snoozed:
@@ -1233,7 +1507,7 @@ _TASKS_SELECT = """
 
 
 def db_get_all_tasks(include_done: bool = False) -> List[Task]:
-    today = date_cls.today().isoformat()
+    today = app_today().isoformat()
     with get_db() as conn:
         with conn.cursor() as cur:
             if include_done:
@@ -1314,7 +1588,7 @@ def db_get_org_profile(org_id: str) -> Optional[dict]:
                   t.deadline ASC,
                   t.created_at DESC
             """, (org_id, org_id))
-            today_iso = date_cls.today().isoformat()
+            today_iso = app_today().isoformat()
             open_tasks = [_task_row_to_task(dict(r), today_iso).as_dict()
                           for r in cur.fetchall()]
             cur.execute(_TASKS_SELECT + f"""
@@ -1616,26 +1890,57 @@ def import_meeting_from_content(
                     "UPDATE meetings SET canvas_image = %s WHERE id = %s",
                     (canvas_image, mid),
                 )
+            # Tasks are matched by import_key (their content hash), NOT by primary key,
+            # so a user edit that changed tasks.text never blocks a re-import match and
+            # the immutable id keeps FK references intact (audit C3).
+            cur.execute("SELECT import_key FROM import_tombstones")
+            tombstoned = {r["import_key"] for r in cur.fetchall()}
             for t in tasks:
-                cur.execute("""
-                    INSERT INTO tasks
-                        (id, text, type, done, meeting_id, source_filename,
-                         section, group_name, source_date, deadline, deadline_raw, callout_source)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (id) DO UPDATE SET
-                        text=EXCLUDED.text, type=EXCLUDED.type,
-                        meeting_id=EXCLUDED.meeting_id,
-                        source_filename=EXCLUDED.source_filename,
-                        section=EXCLUDED.section, group_name=EXCLUDED.group_name,
-                        source_date=EXCLUDED.source_date,
-                        deadline=EXCLUDED.deadline, deadline_raw=EXCLUDED.deadline_raw,
-                        callout_source=COALESCE(EXCLUDED.callout_source, tasks.callout_source)
-                """, (
-                    t["id"], t["text"], t["type"], t["done"], t["meeting_id"],
-                    t["source_filename"], t["section"], t["group_name"],
-                    t["source_date"], t["deadline"], t["deadline_raw"],
-                    t.get("callout_source"),
-                ))
+                ik = t["id"]  # content hash == import key for meeting-sourced tasks
+                if ik in tombstoned:
+                    continue  # user deleted this task; don't resurrect it (M15)
+                cur.execute("SELECT id, import_locked FROM tasks WHERE import_key = %s", (ik,))
+                existing = cur.fetchone()
+                if existing is None:
+                    cur.execute("""
+                        INSERT INTO tasks
+                            (id, text, type, done, meeting_id, source_filename,
+                             section, group_name, source_date, deadline, deadline_raw,
+                             callout_source, import_key)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (id) DO NOTHING
+                    """, (
+                        t["id"], t["text"], t["type"], t["done"], t["meeting_id"],
+                        t["source_filename"], t["section"], t["group_name"],
+                        t["source_date"], t["deadline"], t["deadline_raw"],
+                        t.get("callout_source"), ik,
+                    ))
+                elif existing["import_locked"]:
+                    # User edited this task's text: refresh only file-owned narrative
+                    # fields, never overwrite the edited text/deadline (M15).
+                    cur.execute("""
+                        UPDATE tasks SET type=%s, meeting_id=%s, source_filename=%s,
+                            section=%s, group_name=%s, source_date=%s,
+                            callout_source=COALESCE(%s, callout_source)
+                        WHERE id=%s
+                    """, (
+                        t["type"], t["meeting_id"], t["source_filename"], t["section"],
+                        t["group_name"], t["source_date"], t.get("callout_source"),
+                        existing["id"],
+                    ))
+                else:
+                    cur.execute("""
+                        UPDATE tasks SET text=%s, type=%s, meeting_id=%s,
+                            source_filename=%s, section=%s, group_name=%s,
+                            source_date=%s, deadline=%s, deadline_raw=%s,
+                            callout_source=COALESCE(%s, callout_source)
+                        WHERE id=%s
+                    """, (
+                        t["text"], t["type"], t["meeting_id"], t["source_filename"],
+                        t["section"], t["group_name"], t["source_date"],
+                        t["deadline"], t["deadline_raw"], t.get("callout_source"),
+                        existing["id"],
+                    ))
 
     return {"id": mid, "filename": filename, "tasks": len(tasks)}
 
@@ -1726,13 +2031,13 @@ def log_completion(
                     INSERT INTO completions
                         (task_id, task_text, section, source_filename, done, completed_date)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, (task_id, text[:200], section, filename, done, date_cls.today()))
+                """, (task_id, text[:200], section, filename, done, app_today()))
     except Exception as e:
         print(f"[completions] log error: {e}")
 
 
 def completions_per_day(days: int = 30) -> List[Dict[str, Any]]:
-    today = date_cls.today()
+    today = app_today()
     window = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
     buckets: Dict[str, int] = {d.isoformat(): 0 for d in window}
     try:
@@ -1873,20 +2178,100 @@ def api_contacts_upsert():
     card_image = data.get("card_image") or None
     if not name:
         return jsonify({"ok": False, "error": "name required"}), 400
-    key = email if email else (name + company).lower()
-    cid = hashlib.sha1(key.encode()).hexdigest()[:16]
+    cid = (data.get("id") or "").strip()
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Resolve identity by email (case-insensitive), then exact name+company, else
+            # mint a fresh uuid — never derive the id from content (audit H5). This stops a
+            # card scan from silently merging into an unrelated contact that shares a hash.
+            if not cid and email:
+                cur.execute("SELECT id FROM contacts WHERE lower(email) = %s LIMIT 1", (email,))
+                row = cur.fetchone()
+                if row:
+                    cid = row["id"]
+            if not cid:
+                cur.execute(
+                    "SELECT id FROM contacts WHERE lower(name)=lower(%s) "
+                    "AND lower(COALESCE(company,''))=lower(%s) LIMIT 1",
+                    (name, company),
+                )
+                row = cur.fetchone()
+                if row:
+                    cid = row["id"]
+            if not cid:
+                cid = uuid.uuid4().hex[:16]
             cur.execute("""
                 INSERT INTO contacts (id, name, company, title, email, phone, notes, card_image, updated_at)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                 ON CONFLICT (id) DO UPDATE SET
-                    name=EXCLUDED.name, company=EXCLUDED.company, title=EXCLUDED.title,
-                    email=EXCLUDED.email, phone=EXCLUDED.phone, notes=EXCLUDED.notes,
+                    name=EXCLUDED.name,
+                    company=COALESCE(NULLIF(EXCLUDED.company,''), contacts.company),
+                    title=COALESCE(NULLIF(EXCLUDED.title,''), contacts.title),
+                    email=COALESCE(NULLIF(EXCLUDED.email,''), contacts.email),
+                    phone=COALESCE(NULLIF(EXCLUDED.phone,''), contacts.phone),
+                    notes=COALESCE(NULLIF(EXCLUDED.notes,''), contacts.notes),
                     card_image=COALESCE(EXCLUDED.card_image, contacts.card_image),
                     updated_at=NOW()
             """, (cid, name, company, title, email, phone, notes, card_image))
     return jsonify({"ok": True, "id": cid, "name": name})
+
+
+@app.route("/api/contacts/<contact_id>/merge", methods=["POST"])
+def api_contact_merge(contact_id):
+    """Merge `contact_id` (loser) into `into_id` (winner): repoint every reference and
+    keep the richest field values, in one transaction (audit H5b)."""
+    data = request.get_json(force=True, silent=True) or {}
+    into_id = (data.get("into_id") or "").strip()
+    if not into_id or into_id == contact_id:
+        return fail("into_id required and must differ from contact_id", 400)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM contacts WHERE id=%s", (contact_id,))
+            loser = cur.fetchone()
+            cur.execute("SELECT id FROM contacts WHERE id=%s", (into_id,))
+            winner = cur.fetchone()
+            if not loser or not winner:
+                return fail("contact not found", 404)
+            # Many-to-many tables: move rows that don't already exist on the winner, drop the rest.
+            cur.execute(
+                "UPDATE meeting_contacts mc SET contact_id=%s WHERE contact_id=%s AND NOT EXISTS "
+                "(SELECT 1 FROM meeting_contacts x WHERE x.meeting_id=mc.meeting_id AND x.contact_id=%s)",
+                (into_id, contact_id, into_id))
+            cur.execute("DELETE FROM meeting_contacts WHERE contact_id=%s", (contact_id,))
+            cur.execute(
+                "UPDATE contact_organizations co SET contact_id=%s WHERE contact_id=%s AND NOT EXISTS "
+                "(SELECT 1 FROM contact_organizations x WHERE x.organization_id=co.organization_id AND x.contact_id=%s)",
+                (into_id, contact_id, into_id))
+            cur.execute("DELETE FROM contact_organizations WHERE contact_id=%s", (contact_id,))
+            # Simple FK repoints.
+            for tbl in ("tasks", "asks", "commitments", "followup_triggers"):
+                cur.execute(f"UPDATE {tbl} SET contact_id=%s WHERE contact_id=%s", (into_id, contact_id))
+            cur.execute(
+                "UPDATE entity_notes SET entity_id=%s WHERE entity_type='contact' AND entity_id=%s",
+                (into_id, contact_id))
+            cur.execute(
+                "UPDATE bill_match_notifications bmn SET entity_id=%s WHERE entity_type='contact' "
+                "AND entity_id=%s AND NOT EXISTS (SELECT 1 FROM bill_match_notifications x "
+                "WHERE x.flag_id=bmn.flag_id AND x.entity_type='contact' AND x.entity_id=%s)",
+                (into_id, contact_id, into_id))
+            cur.execute(
+                "DELETE FROM bill_match_notifications WHERE entity_type='contact' AND entity_id=%s",
+                (contact_id,))
+            # Keep the richest field values on the winner, then delete the loser.
+            cur.execute("""
+                UPDATE contacts SET
+                    company=COALESCE(NULLIF(company,''), %s),
+                    title=COALESCE(NULLIF(title,''), %s),
+                    email=COALESCE(NULLIF(email,''), %s),
+                    phone=COALESCE(NULLIF(phone,''), %s),
+                    notes=COALESCE(NULLIF(notes,''), %s),
+                    card_image=COALESCE(card_image, %s),
+                    updated_at=NOW()
+                WHERE id=%s
+            """, (loser["company"], loser["title"], loser["email"], loser["phone"],
+                  loser["notes"], loser["card_image"], into_id))
+            cur.execute("DELETE FROM contacts WHERE id=%s", (contact_id,))
+    return jsonify({"ok": True, "id": into_id})
 
 
 @app.route("/api/people/<contact_id>", methods=["PUT"])
@@ -2047,51 +2432,40 @@ def api_meeting_unlink_contact(mid: str, cid: str):
     return jsonify({"ok": True})
 
 
-@app.route("/api/groups")
-def api_groups():
-    by_group: Dict[str, List[Meeting]] = {}
-    for m in db_get_all_meetings():
-        by_group.setdefault(m.canonical_group, []).append(m)
-    out = []
-    for group, grp_meetings in by_group.items():
-        dates = [m.date for m in grp_meetings if m.date]
-        out.append({
-            "group": group,
-            "meeting_count": len(grp_meetings),
-            "last_contact": max(dates) if dates else None,
-            "open_action_items": sum(len(m.action_items_open) for m in grp_meetings),
-            "open_reminders": sum(len(m.reminders_open) for m in grp_meetings),
-            "raw_variants": sorted(
-                {m.raw_group for m in grp_meetings if m.raw_group != group},
-                key=str.casefold,
-            ),
-        })
-    out.sort(key=lambda x: (x["last_contact"] or ""), reverse=True)
-    return jsonify(out)
-
-
 @app.route("/api/bills")
 def api_bills():
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Normalize type/number in SQL too, so legacy 'H.R.' rows collapse with 'HR',
+            # and key on congress so the same number in different Congresses stays distinct.
             cur.execute("""
-                SELECT br.bill_type, br.bill_number,
+                SELECT br.congress AS congress,
+                       UPPER(REGEXP_REPLACE(br.bill_type, '[^A-Za-z]', '', 'g')) AS bill_type,
+                       REGEXP_REPLACE(br.bill_number, '[^0-9]', '', 'g') AS bill_number,
                        json_agg(json_build_object(
                            'meeting_id', m.id,
                            'topic', COALESCE(NULLIF(m.topic, ''), m.filename),
                            'date', to_char(m.file_date, 'YYYY-MM-DD')
                        ) ORDER BY br.created_at DESC) AS meetings,
+                       array_agg(DISTINCT COALESCE(o.name, NULLIF(m.canonical_group, '')))
+                           FILTER (WHERE COALESCE(o.name, NULLIF(m.canonical_group, '')) IS NOT NULL)
+                           AS organizations,
                        max(br.created_at)::date AS last_seen
                 FROM bill_references br
                 JOIN meetings m ON br.meeting_id = m.id
-                GROUP BY br.bill_type, br.bill_number
+                LEFT JOIN organizations o ON m.organization_id = o.id
+                GROUP BY br.congress,
+                         UPPER(REGEXP_REPLACE(br.bill_type, '[^A-Za-z]', '', 'g')),
+                         REGEXP_REPLACE(br.bill_number, '[^0-9]', '', 'g')
                 ORDER BY max(br.created_at) DESC
             """)
             rows = cur.fetchall()
     return jsonify([{
+        "congress": r["congress"],
         "bill_type": r["bill_type"],
         "bill_number": r["bill_number"],
         "meetings": r["meetings"],
+        "organizations": r["organizations"] or [],
         "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
     } for r in rows])
 
@@ -2358,7 +2732,7 @@ def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
     offset, limit = 0, 250
     stop = False
     more = False  # True if we stopped early (cap/time budget) with work left for next run
-    today = date_cls.today()
+    today = app_today()
     deadline = time.monotonic() + _COMMITTEE_TIME_BUDGET
     while not stop and fetched < _COMMITTEE_DETAIL_CAP:
         if time.monotonic() > deadline:
@@ -2461,7 +2835,7 @@ def _parse_floor_weeks_feed(raw: bytes):
     import xml.etree.ElementTree as ET
     ns = "{http://www.w3.org/2005/Atom}"
     root = ET.fromstring(raw)
-    monday = date_cls.today() - timedelta(days=date_cls.today().weekday())
+    monday = app_today() - timedelta(days=app_today().weekday())
     by_date: dict = {}
     for entry in root.iter(f"{ns}entry"):
         wk = None
@@ -2564,7 +2938,7 @@ def _sync_house_floor(cur, congress: int, keys: set):
     import xml.etree.ElementTree as ET
     weeks = _discover_house_floor_weeks()
     if not weeks:
-        monday = date_cls.today() - timedelta(days=date_cls.today().weekday())
+        monday = app_today() - timedelta(days=app_today().weekday())
         weeks = [(wk, wk.strftime("%Y%m%d")) for wk in (monday, monday + timedelta(days=7))]
     stored = 0
     fetched_any = False
@@ -2855,6 +3229,58 @@ def api_tracked_bill_detail(bill_id: str):
     return jsonify({"ok": True, **data})
 
 
+@app.route("/api/tracked-bills/<bill_id>/context")
+def api_tracked_bill_context(bill_id: str):
+    """"In your world" for a bill (audit H4): meetings that referenced it, the orgs and
+    people from those meetings, linked asks, and the notification history — joined on the
+    normalized (congress, type, number) key."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT congress, bill_type, bill_number FROM tracked_bills WHERE id = %s", (bill_id,))
+            tb = cur.fetchone()
+            if not tb:
+                return fail("Not found", 404)
+            cong, bt, bn = tb["congress"], tb["bill_type"], tb["bill_number"]
+            key = ("br.congress = %s AND UPPER(REGEXP_REPLACE(br.bill_type,'[^A-Za-z]','','g')) = %s "
+                   "AND REGEXP_REPLACE(br.bill_number,'[^0-9]','','g') = %s")
+            params = (cong, bt, bn)
+            cur.execute(f"""
+                SELECT DISTINCT m.id, COALESCE(NULLIF(m.topic,''), m.filename) AS topic,
+                       to_char(m.file_date,'YYYY-MM-DD') AS date, o.name AS org_name, m.organization_id
+                FROM bill_references br
+                JOIN meetings m ON br.meeting_id = m.id
+                LEFT JOIN organizations o ON m.organization_id = o.id
+                WHERE {key}
+                ORDER BY date DESC NULLS LAST
+            """, params)
+            meetings = [dict(r) for r in cur.fetchall()]
+            cur.execute(f"""
+                SELECT a.id, a.text, a.status, a.contact_id, c.name AS contact_name,
+                       a.organization_id, o.name AS org_name
+                FROM asks a
+                JOIN bill_references br ON a.bill_ref_id = br.id
+                LEFT JOIN contacts c ON a.contact_id = c.id
+                LEFT JOIN organizations o ON a.organization_id = o.id
+                WHERE {key}
+                ORDER BY a.created_at DESC
+            """, params)
+            asks = [dict(r) for r in cur.fetchall()]
+            orgs = sorted({m["org_name"] for m in meetings if m["org_name"]},
+                          key=str.casefold)
+            cur.execute("""
+                SELECT bn.entity_type, bn.entity_id, to_char(bn.created_at,'YYYY-MM-DD') AS date
+                FROM bill_match_notifications bn
+                JOIN bill_match_flags f ON f.id = bn.flag_id
+                WHERE f.tracked_bill_id = %s
+                ORDER BY bn.created_at DESC
+            """, (bill_id,))
+            notifications = [dict(r) for r in cur.fetchall()]
+    return jsonify({
+        "ok": True, "meetings": meetings, "asks": asks,
+        "organizations": orgs, "notifications": notifications,
+    })
+
+
 def _refresh_bill_core(bill_id: str) -> bool:
     """Re-fetch one bill's headline fields (title, latest action, introduced date) from
     Congress.gov and update its tracked_bills row. Returns False if the bill is unknown."""
@@ -2997,6 +3423,24 @@ def cron_sync():
     except Exception as e:
         _record_sync_error("schedule_last_error" if job == "schedule" else "last_error", str(e))
         return jsonify({"ok": False, "job": job, "error": str(e)}), 500
+
+
+@app.route("/api/admin/migrate", methods=["POST"])
+def admin_migrate():
+    """Run schema migrations (init_db) deliberately, out of the request/cold-start path
+    (audit A1). Exempt from session login; authenticated by CRON_SECRET. Call once right
+    after each deploy that changes the schema."""
+    if not CRON_SECRET:
+        return jsonify({"ok": False, "error": "CRON_SECRET not configured"}), 503
+    provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() \
+        or request.headers.get("X-API-Key", "").strip()
+    if provided != CRON_SECRET:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        init_db()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/bill-matches")
@@ -3298,14 +3742,14 @@ def api_scan_items_for_day():
     grouped by meeting. Each item carries linked-task status if applicable."""
     date_str = (request.args.get("date") or "").strip()
     try:
-        target = date_cls.fromisoformat(date_str) if date_str else date_cls.today()
+        target = date_cls.fromisoformat(date_str) if date_str else app_today()
     except ValueError:
-        target = date_cls.today()
+        target = app_today()
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT si.id, si.meeting_id, si.callout_type, si.text,
-                       si.task_id, si.accepted,
+                       si.task_id, si.accepted, si.acknowledged_at,
                        to_char(si.created_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at_str,
                        m.topic AS meeting_topic, m.canonical_group AS meeting_group,
                        m.organization_id, m.file_date,
@@ -3337,6 +3781,7 @@ def api_scan_items_for_day():
             "text": r["text"],
             "task_id": r.get("task_id"),
             "accepted": r["accepted"],
+            "acknowledged": r.get("acknowledged_at") is not None,
             "task_done": r.get("task_done"),
             "task_deadline": r["task_deadline"].isoformat() if r.get("task_deadline") else None,
             "task_priority": r.get("task_priority"),
@@ -3345,6 +3790,41 @@ def api_scan_items_for_day():
         "date": target.isoformat(),
         "meetings": list(meetings_by_id.values()),
     })
+
+
+@app.route("/api/scan-items/<int:item_id>/ack", methods=["POST"])
+def api_scan_item_ack(item_id):
+    """Acknowledge a single Inbox item ("Looks right ✓") — audit Phase 10."""
+    data = request.get_json(force=True, silent=True) or {}
+    ack = data.get("acknowledged", True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE meeting_scan_items SET acknowledged_at = %s WHERE id = %s",
+                (datetime.now() if ack else None, item_id))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/scan-items/ack-meeting/<meeting_id>", methods=["POST"])
+def api_scan_items_ack_meeting(meeting_id):
+    """Acknowledge every Inbox item from one meeting at once."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE meeting_scan_items SET acknowledged_at = NOW() "
+                "WHERE meeting_id = %s AND acknowledged_at IS NULL",
+                (meeting_id,))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/scan-items/inbox-count")
+def api_scan_inbox_count():
+    """Count of unacknowledged Inbox items (drives the home badge)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM meeting_scan_items WHERE acknowledged_at IS NULL")
+            n = cur.fetchone()["n"]
+    return jsonify({"count": n})
 
 
 @app.route("/api/scan-items/<int:item_id>/update", methods=["POST"])
@@ -3520,7 +4000,7 @@ def api_person_detail(contact_id):
                 ORDER BY c.created_at DESC
             """, (contact_id,))
             commitments = [dict(r) for r in cur.fetchall()]
-            today_iso = date_cls.today().isoformat()
+            today_iso = app_today().isoformat()
             cur.execute(_TASKS_SELECT + """
                 WHERE t.contact_id = %s
                 ORDER BY t.done ASC,
@@ -3619,10 +4099,8 @@ def api_asks():
 def api_ask_status(ask_id):
     data = request.get_json(force=True, silent=True) or {}
     status = (data.get("status") or "").strip()
-    valid = {"logged","needs_review","under_review","task_created","accepted",
-             "declined","completed","no_action","notify_if_changes"}
-    if status not in valid:
-        return jsonify({"ok": False, "error": "Invalid status"}), 400
+    if status not in ASK_STATUSES:
+        return fail(f"Invalid status (expected one of {', '.join(ASK_STATUSES)})", 400)
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE asks SET status = %s WHERE id = %s", (status, ask_id))
@@ -3699,9 +4177,8 @@ def api_commitments():
 def api_commitment_status(commitment_id):
     data = request.get_json(force=True, silent=True) or {}
     status = (data.get("status") or "").strip()
-    valid = {"open","task_created","waiting","completed","closed_no_action","needs_review"}
-    if status not in valid:
-        return jsonify({"ok": False, "error": "Invalid status"}), 400
+    if status not in COMMITMENT_STATUSES:
+        return fail(f"Invalid status (expected one of {', '.join(COMMITMENT_STATUSES)})", 400)
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE commitments SET status = %s WHERE id = %s",
@@ -3770,34 +4247,179 @@ def api_commitment_create_task(commitment_id):
                 commitment_id,
                 row["organization_id"],
             ))
-            cur.execute("UPDATE commitments SET status='task_created', task_id=%s WHERE id=%s",
+            cur.execute("UPDATE commitments SET status='in_progress', task_id=%s WHERE id=%s",
                         (tid, commitment_id))
     return jsonify({"ok": True, "task_id": tid})
 
 
 @app.route("/api/followup-triggers")
 def api_followup_triggers():
-    status = request.args.get("status", "watching")
+    status = request.args.get("status")  # omit for all statuses
+    org_id = request.args.get("org_id")
+    contact_id = request.args.get("contact_id")
+    conds, params = [], []
+    if status:
+        conds.append("ft.status = %s"); params.append(status)
+    if org_id:
+        conds.append("ft.organization_id = %s"); params.append(org_id)
+    if contact_id:
+        conds.append("ft.contact_id = %s"); params.append(contact_id)
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT ft.*, o.name AS org_name,
                        to_char(ft.created_at,'YYYY-MM-DD') AS created_at_str,
                        to_char(m.file_date,'YYYY-MM-DD') AS meeting_date
                 FROM followup_triggers ft
                 LEFT JOIN organizations o ON ft.organization_id = o.id
                 LEFT JOIN meetings m ON ft.meeting_id = m.id
-                WHERE ft.status = %s
+                {where}
                 ORDER BY ft.created_at DESC
-            """, (status,))
+            """, params)
             rows = cur.fetchall()
     return jsonify([{
         "id": r["id"], "condition_text": r["condition_text"],
         "action_text": r["action_text"], "status": r["status"],
         "meeting_id": r["meeting_id"], "organization_id": r["organization_id"],
         "org_name": r["org_name"], "bill_ref_id": r["bill_ref_id"],
+        "contact_id": r["contact_id"],
         "created_at": r["created_at_str"], "meeting_date": r["meeting_date"],
     } for r in rows])
+
+
+@app.route("/api/followup-triggers", methods=["POST"])
+def api_trigger_create():
+    """Standalone trigger create (no meeting required) — audit §6.4."""
+    data = request.get_json(force=True, silent=True) or {}
+    cond = (data.get("condition_text") or data.get("text") or "").strip()
+    if not cond:
+        return fail("condition_text required", 400)
+    action = (data.get("action_text") or "").strip()
+    org_id = (data.get("organization_id") or "").strip() or None
+    contact_id = (data.get("contact_id") or "").strip() or None
+    tid = uuid.uuid4().hex[:16]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO followup_triggers
+                    (id, meeting_id, condition_text, action_text, organization_id, contact_id, status)
+                VALUES (%s, NULL, %s, %s, %s, %s, 'watching')
+            """, (tid, cond, action, org_id, contact_id))
+    return jsonify({"ok": True, "id": tid})
+
+
+@app.route("/api/followup-triggers/<trigger_id>", methods=["POST", "PUT"])
+def api_trigger_update(trigger_id):
+    """Update a trigger's status and/or text (audit C2b — triggers were write-only)."""
+    data = request.get_json(force=True, silent=True) or {}
+    sets, params = [], []
+    if "status" in data:
+        status = (data.get("status") or "").strip()
+        if status not in TRIGGER_STATUSES:
+            return fail(f"Invalid status (expected one of {', '.join(TRIGGER_STATUSES)})", 400)
+        sets.append("status = %s"); params.append(status)
+    if "condition_text" in data:
+        sets.append("condition_text = %s"); params.append((data.get("condition_text") or "").strip())
+    if "action_text" in data:
+        sets.append("action_text = %s"); params.append((data.get("action_text") or "").strip())
+    if not sets:
+        return fail("nothing to update", 400)
+    params.append(trigger_id)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE followup_triggers SET {', '.join(sets)} WHERE id = %s RETURNING id", params)
+            if cur.fetchone() is None:
+                return fail("Not found", 404)
+    return jsonify({"ok": True, "id": trigger_id})
+
+
+@app.route("/api/followup-triggers/<trigger_id>", methods=["DELETE"])
+def api_trigger_delete(trigger_id):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM followup_triggers WHERE id = %s", (trigger_id,))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/asks", methods=["POST"])
+def api_ask_create():
+    """Standalone ask create (org/person/meeting optional) — audit §6.4."""
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return fail("text required", 400)
+    org_id = (data.get("organization_id") or "").strip() or None
+    contact_id = (data.get("contact_id") or "").strip() or None
+    meeting_id = (data.get("meeting_id") or "").strip() or None
+    priority = (data.get("priority") or "normal").strip()
+    if priority not in ("high", "normal", "low"):
+        priority = "normal"
+    aid = uuid.uuid4().hex[:16]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO asks
+                    (id, meeting_id, text, organization_id, contact_id, status, priority, source_excerpt)
+                VALUES (%s, %s, %s, %s, %s, 'open', %s, %s)
+            """, (aid, meeting_id, text, org_id, contact_id, priority, text))
+    return jsonify({"ok": True, "id": aid})
+
+
+@app.route("/api/asks/<ask_id>/create-task", methods=["POST"])
+def api_ask_create_task(ask_id):
+    """Spawn a task from an ask, mirroring the commitment flow (audit H3)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT a.*, o.name AS org_name, to_char(m.file_date,'YYYY-MM-DD') AS meeting_date
+                FROM asks a
+                LEFT JOIN organizations o ON a.organization_id = o.id
+                LEFT JOIN meetings m ON a.meeting_id = m.id
+                WHERE a.id = %s
+            """, (ask_id,))
+            row = cur.fetchone()
+            if not row:
+                return fail("Ask not found", 404)
+            if row["task_id"]:
+                return jsonify({"ok": True, "task_id": row["task_id"], "already_exists": True})
+            tid = str(uuid.uuid4())
+            org_ctx = f" (for {row['org_name']})" if row["org_name"] else ""
+            cur.execute("""
+                INSERT INTO tasks
+                    (id, text, type, done, backburner, meeting_id, source_filename,
+                     section, group_name, source_date, priority, ask_id, organization_id,
+                     contact_id, callout_source, created_at)
+                VALUES (%s,%s,'action',FALSE,FALSE,%s,%s,'action_items',%s,%s,%s,%s,%s,%s,'task',NOW())
+            """, (
+                tid, row["text"] + org_ctx, row["meeting_id"],
+                f"ask-{ask_id[:8]}", row["org_name"] or "", row["meeting_date"],
+                row["priority"] or "normal", ask_id, row["organization_id"], row["contact_id"],
+            ))
+            cur.execute("UPDATE asks SET status='accepted', task_id=%s WHERE id=%s", (tid, ask_id))
+    return jsonify({"ok": True, "task_id": tid})
+
+
+@app.route("/api/commitments", methods=["POST"])
+def api_commitment_create():
+    """Standalone commitment create (org/person/meeting optional) — audit §6.4."""
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return fail("text required", 400)
+    org_id = (data.get("organization_id") or "").strip() or None
+    contact_id = (data.get("contact_id") or "").strip() or None
+    meeting_id = (data.get("meeting_id") or "").strip() or None
+    due_date = (data.get("due_date") or "").strip() or None
+    cid = uuid.uuid4().hex[:16]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO commitments
+                    (id, meeting_id, text, organization_id, contact_id, status, source_excerpt, due_date)
+                VALUES (%s, %s, %s, %s, %s, 'open', %s, %s)
+            """, (cid, meeting_id, text, org_id, contact_id, text, due_date))
+    return jsonify({"ok": True, "id": cid})
 
 
 @app.route("/api/facets")
@@ -3806,16 +4428,9 @@ def api_facets():
     groups: set = set()
     purposes: set = set()
     attendees: set = set()
-    raw_groups_seen: Dict[str, str] = {}
-
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT raw_name FROM groups_map")
-            aliased_raws = {r["raw_name"] for r in cur.fetchall()}
 
     for m in meetings:
         groups.add(m.canonical_group)
-        raw_groups_seen.setdefault(m.raw_group, m.canonical_group)
         for p in m.purpose:
             purposes.add(p)
         if m.attendees:
@@ -3824,25 +4439,11 @@ def api_facets():
                 if a:
                     attendees.add(a)
 
-    unaliased = [
-        raw for raw, canon in raw_groups_seen.items()
-        if raw.strip().lower() not in aliased_raws and raw == canon
-    ]
     return jsonify({
         "groups": sorted(groups, key=str.casefold),
         "purposes": sorted(purposes, key=str.casefold),
         "attendees": sorted(attendees, key=str.casefold),
-        "unaliased_raw_groups": sorted(unaliased, key=str.casefold),
     })
-
-
-@app.route("/api/reload", methods=["POST"])
-def api_reload():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS c FROM meetings")
-            count = cur.fetchone()["c"]
-    return jsonify({"ok": True, "count": count})
 
 
 # ---- Tasks ----
@@ -3860,11 +4461,12 @@ def api_tasks():
     show_subtasks = a.get("show_subtasks", "0").lower() not in ("0", "false", "no")
     parent_id_filter = a.get("parent_id", "")
     smart_view = a.get("smart_view", "")
+    deadline_filter = a.get("deadline", "")  # exact-match ISO deadline (YYYY-MM-DD)
 
-    today_iso = date_cls.today().isoformat()
-    tomorrow_iso = (date_cls.today() + timedelta(days=1)).isoformat()
-    week_out_iso = (date_cls.today() + timedelta(days=7)).isoformat()
-    neglect_cutoff = (date_cls.today() - timedelta(days=14)).isoformat()
+    today_iso = app_today().isoformat()
+    tomorrow_iso = (app_today() + timedelta(days=1)).isoformat()
+    week_out_iso = (app_today() + timedelta(days=7)).isoformat()
+    neglect_cutoff = (app_today() - timedelta(days=14)).isoformat()
 
     tasks = db_get_all_tasks(include_done=(status == "done" or smart_view != ""))
 
@@ -3872,7 +4474,7 @@ def api_tasks():
         if not t.snoozed_until:
             return False
         try:
-            return date_cls.fromisoformat(t.snoozed_until) > date_cls.today()
+            return date_cls.fromisoformat(t.snoozed_until) > app_today()
         except (ValueError, TypeError):
             return False
 
@@ -3901,6 +4503,7 @@ def api_tasks():
         if overdue_only and not t.overdue: continue
         if q and q not in t.text.lower() and q not in (t.group or "").lower(): continue
         if priority_filter and t.priority != priority_filter: continue
+        if deadline_filter and (t.deadline or "") != deadline_filter: continue
         pre_group.append(t)
 
     groups_in_scope = sorted({t.group for t in pre_group if t.group}, key=str.casefold)
@@ -4046,7 +4649,7 @@ def api_toggle_task():
                 # Spawn next recurrence instance when marking done
                 if done and row["recurrence_rule"]:
                     rule = row["recurrence_rule"]
-                    next_date = _compute_next_recurrence(rule, date_cls.today())
+                    next_date = _compute_next_recurrence(rule, app_today())
                     if next_date:
                         new_id = str(uuid.uuid4())
                         next_iso = next_date.isoformat()
@@ -4085,9 +4688,19 @@ def api_delete_task():
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM tasks WHERE id = %s RETURNING id", (task_id,))
-                if cur.fetchone() is None:
+                cur.execute(
+                    "DELETE FROM tasks WHERE id = %s RETURNING id, import_key", (task_id,)
+                )
+                row = cur.fetchone()
+                if row is None:
                     return jsonify({"ok": False, "error": "task not found"}), 404
+                # Tombstone meeting-sourced tasks so re-import can't resurrect them (M15).
+                if row["import_key"]:
+                    cur.execute(
+                        "INSERT INTO import_tombstones (import_key) VALUES (%s)"
+                        " ON CONFLICT (import_key) DO NOTHING",
+                        (row["import_key"],),
+                    )
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -4125,15 +4738,14 @@ def api_edit_task():
     else:
         new_deadline, new_deadline_raw = extract_deadline(new_text)
 
-    # Only recompute deterministic ID for meeting-sourced tasks; free tasks keep UUID
-    is_free = (filename == "tasks.md" or not filename)
-    new_id = task_id if is_free else (_task_id(filename, section, new_text) if filename and section else task_id)
-
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                sets = ["id = %s", "text = %s", "deadline = %s", "deadline_raw = %s"]
-                vals = [new_id, new_text, new_deadline, new_deadline_raw]
+                # tasks.id is immutable — never rewrite the primary key on edit (audit C3),
+                # so FK references (subtasks, scan items, asks, commitments) stay intact.
+                # import_locked stops a later .md re-import from reverting the edit (M15).
+                sets = ["text = %s", "deadline = %s", "deadline_raw = %s", "import_locked = TRUE"]
+                vals = [new_text, new_deadline, new_deadline_raw]
                 if new_priority:
                     sets.append("priority = %s"); vals.append(new_priority)
                 org_id = None
@@ -4190,7 +4802,7 @@ def api_add_task():
     # Organization + deadline are now structured fields, so keep the task text clean
     # (no more "@group:" / "due" tags appended into the text).
     full_text = text
-    deadline, deadline_raw = extract_deadline(text, context_year=datetime.now().year)
+    deadline, deadline_raw = extract_deadline(text, context_year=app_today().year)
     # If deadline was passed directly (already parsed client-side), prefer it
     if deadline_in and not deadline:
         deadline = deadline_in
@@ -4210,7 +4822,7 @@ def api_add_task():
                     VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
-                    tid, full_text, group, date_cls.today(), deadline, deadline_raw,
+                    tid, full_text, group, app_today(), deadline, deadline_raw,
                     add_priority, add_contact,
                     int(add_estimate) if add_estimate else None,
                     json.dumps(add_recurrence) if add_recurrence else None,
@@ -4225,7 +4837,7 @@ def api_add_task():
 
 @app.route("/api/stats")
 def api_stats():
-    today = date_cls.today()
+    today = app_today()
     today_iso = today.isoformat()
 
     all_tasks = db_get_all_tasks(include_done=True)
@@ -4235,11 +4847,10 @@ def api_stats():
     overdue_open = [t for t in open_tasks if t.overdue]
     due_today = [t for t in open_tasks if t.deadline == today_iso]
 
-    # Deadlines strip: Mon–Fri of the current work week
-    monday = today - timedelta(days=today.weekday())
-    work_week = [monday + timedelta(days=i) for i in range(5)]  # Mon=0 … Fri=4
+    # Deadlines strip: a true rolling 7 days from today, weekends included.
+    rolling_week = [today + timedelta(days=i) for i in range(7)]
     deadlines_by_day = []
-    for d in work_week:
+    for d in rolling_week:
         iso = d.isoformat()
         deadlines_by_day.append({
             "date": iso,
@@ -4275,12 +4886,6 @@ def api_stats():
     )[:8]
 
     # Weekly completion %: tasks completed this week / (completed this week + currently open)
-    week_start = monday.isoformat()
-    week_completions_this_week = sum(
-        1 for t in all_tasks
-        if t.done and not t.backburner
-        and (t.source_date or "") >= week_start  # proxy for "worked on this week"
-    )
     per_day = completions_per_day(days=7)
     week_done_count = sum(x["count"] for x in per_day)
     week_total = week_done_count + len(open_tasks)
@@ -4524,7 +5129,7 @@ def api_notes_intake():
 
     note_group = (data.get("group") or "").strip() or "intake"
     note_topic = (data.get("topic") or "").strip()
-    note_date = (data.get("date") or "").strip() or date_cls.today().isoformat()
+    note_date = (data.get("date") or "").strip() or app_today().isoformat()
     note_attendees = (data.get("attendees") or "").strip()
     canvas_image = data.get("canvas_image") or None
     meeting_type = (data.get("meeting_type") or "").strip()
@@ -4569,6 +5174,8 @@ def api_notes_intake():
 
     # If canvas items provided, merge them into the body sections.
     # Routing: task + followup -> Action Items (type=action), important -> Reminders.
+    person_refs: List[str] = []
+    deadline_refs: List[str] = []
     if confirmed_items:
         task_texts     = [i["text"] for i in confirmed_items if i.get("type") == "task"     and i.get("text")]
         followup_texts = [i["text"] for i in confirmed_items if i.get("type") == "followup" and i.get("text")]
@@ -4630,9 +5237,23 @@ def api_notes_intake():
         fm_parts.append("purpose: [" + ", ".join(f'"{p}"' for p in note_purpose) + "]")
 
     content = "---\n" + "\n".join(fm_parts) + "\n---\n\n" + body
-    now = datetime.now()
+    now = app_now()
     time_suffix = now.strftime("%H%M%S")
-    filename = f"{note_date} - {safe_group} [{time_suffix}].md"
+
+    # C1 fix: if the notes were started from a prepared calendar meeting, write into THAT
+    # row (reuse its filename so meeting id, calendar_event_id, dtstart, meeting_link are
+    # preserved) instead of minting a duplicate meeting.
+    prepared_meeting_id = (data.get("prepared_meeting_id") or "").strip()
+    prepared_filename = None
+    if prepared_meeting_id:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT filename, status FROM meetings WHERE id = %s", (prepared_meeting_id,))
+                _row = cur.fetchone()
+                if _row and _row["status"] in ("prepared", "in_progress"):
+                    prepared_filename = _row["filename"]
+
+    filename = prepared_filename or f"{note_date} - {safe_group} [{time_suffix}].md"
 
     try:
         summary = import_meeting_from_content(
@@ -4647,15 +5268,12 @@ def api_notes_intake():
         if mid_out:
             with get_db() as conn:
                 with conn.cursor() as cur:
-                    # Resolve or create organization for this meeting
-                    org_id_out: Optional[str] = None
-                    if note_group and note_group != "intake":
-                        org_id_out = _org_slug(note_group)
-                        cur.execute("""
-                            INSERT INTO organizations (id, name, created_at, updated_at)
-                            VALUES (%s, %s, NOW(), NOW())
-                            ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
-                        """, (org_id_out, note_group))
+                    # Prepared calendar meeting becomes the finished record (C1).
+                    if prepared_filename:
+                        cur.execute("UPDATE meetings SET status='complete' WHERE id=%s", (mid_out,))
+                    # Resolve or create organization for this meeting (resolve-by-name, H7).
+                    org_id_out: Optional[str] = _org_for_name(cur, note_group)
+                    if org_id_out:
                         cur.execute("""
                             UPDATE meetings SET organization_id = %s WHERE id = %s
                         """, (org_id_out, mid_out))
@@ -4663,11 +5281,26 @@ def api_notes_intake():
                     # Turn attendees into linked People contacts
                     _upsert_attendee_contacts(cur, mid_out, note_attendees, org_id_out)
 
-                    # Bill references
+                    # Person callouts (@name) become linked contacts, not just a body line (H2).
+                    for _pname in person_refs:
+                        _ensure_contact_by_name(cur, _pname, org_id_out, mid_out)
+
+                    # Deadline callouts: adopt the first parseable date as the meeting deadline
+                    # when none is set (H2), so a "due 8/1" note lands somewhere structured.
+                    for _dtext in deadline_refs:
+                        _norm, _ = extract_deadline(_dtext, context_year=_year_from_date(note_date))
+                        if _norm:
+                            cur.execute(
+                                "UPDATE meetings SET deadline = %s WHERE id = %s AND COALESCE(deadline,'') = ''",
+                                (_norm, mid_out))
+                            break
+
+                    # Bill references — normalized on write so 'H.R.'/'HR' collapse and
+                    # the congress+type+number key joins cleanly with tracked bills.
                     if bill_items:
                         for bill in bill_items:
-                            bt = (bill.get("billType") or "").strip()
-                            bn = (bill.get("billNumber") or "").strip()
+                            bt = _normalize_bill_type(bill.get("billType"))
+                            bn = _normalize_bill_number(bill.get("billNumber"))
                             if bt and bn:
                                 cur.execute(
                                     "INSERT INTO bill_references (meeting_id, bill_type, bill_number, congress)"
@@ -4686,12 +5319,15 @@ def api_notes_intake():
                         if not text:
                             continue
                         aid = _task_id(mid_out, "ask", text)
+                        pid = _intake_person_for(cur, item, note_attendees, org_id_out, mid_out)
+                        bref = _bill_ref_for_text(cur, mid_out, text)
                         cur.execute("""
                             INSERT INTO asks
-                                (id, meeting_id, text, organization_id, status, priority, source_excerpt)
-                            VALUES (%s, %s, %s, %s, 'logged', 'normal', %s)
+                                (id, meeting_id, text, organization_id, contact_id, bill_ref_id,
+                                 status, priority, source_excerpt)
+                            VALUES (%s, %s, %s, %s, %s, %s, 'open', 'normal', %s)
                             ON CONFLICT (id) DO NOTHING
-                        """, (aid, mid_out, text, org_id_out, text))
+                        """, (aid, mid_out, text, org_id_out, pid, bref, text))
                         cur.execute("""
                             INSERT INTO meeting_scan_items
                                 (meeting_id, callout_type, text, task_id, accepted)
@@ -4705,12 +5341,13 @@ def api_notes_intake():
                             continue
                         cid = _task_id(mid_out, "commitment", text)
                         c_due = due_map.get(text)
+                        pid = _intake_person_for(cur, item, note_attendees, org_id_out, mid_out)
                         cur.execute("""
                             INSERT INTO commitments
-                                (id, meeting_id, text, organization_id, status, source_excerpt, due_date)
-                            VALUES (%s, %s, %s, %s, 'open', %s, %s)
+                                (id, meeting_id, text, organization_id, contact_id, status, source_excerpt, due_date)
+                            VALUES (%s, %s, %s, %s, %s, 'open', %s, %s)
                             ON CONFLICT (id) DO NOTHING
-                        """, (cid, mid_out, text, org_id_out, text, c_due))
+                        """, (cid, mid_out, text, org_id_out, pid, text, c_due))
                         # Create a task for the commitment
                         task_tid = _task_id(mid_out, "commitment-task", text)
                         org_ctx = f" (for {note_group})" if note_group and note_group != "intake" else ""
@@ -4718,17 +5355,17 @@ def api_notes_intake():
                             INSERT INTO tasks
                                 (id, text, type, done, backburner, meeting_id, source_filename,
                                  section, group_name, source_date, deadline, priority, commitment_id,
-                                 organization_id, callout_source, created_at)
+                                 organization_id, contact_id, callout_source, created_at)
                             VALUES (%s,%s,'action',FALSE,FALSE,%s,%s,'action_items',%s,%s,%s,
-                                    'normal',%s,%s,'commitment',NOW())
+                                    'normal',%s,%s,%s,'commitment',NOW())
                             ON CONFLICT (id) DO NOTHING
                         """, (
                             task_tid, text + org_ctx, mid_out, filename,
                             note_group or "", note_date, c_due,
-                            cid, org_id_out,
+                            cid, org_id_out, pid,
                         ))
                         cur.execute("""
-                            UPDATE commitments SET status='task_created', task_id=%s WHERE id=%s
+                            UPDATE commitments SET status='in_progress', task_id=%s WHERE id=%s
                         """, (task_tid, cid))
                         cur.execute("""
                             INSERT INTO meeting_scan_items
@@ -4742,22 +5379,16 @@ def api_notes_intake():
                         if not full_text:
                             continue
                         # Split on → or -> for condition/action
-                        if "→" in full_text:
-                            parts = full_text.split("→", 1)
-                        elif "->" in full_text:
-                            parts = full_text.split("->", 1)
-                        else:
-                            parts = [full_text, ""]
-                        cond = parts[0].strip().lstrip("FU IF").lstrip("FU if").strip()
-                        action = parts[1].strip() if len(parts) > 1 else ""
+                        cond, action = _parse_trigger_text(full_text)
                         trig_id = _task_id(mid_out, "trigger", full_text)
+                        pid = _intake_person_for(cur, item, note_attendees, org_id_out, mid_out)
                         cur.execute("""
                             INSERT INTO followup_triggers
                                 (id, meeting_id, condition_text, action_text,
-                                 organization_id, status)
-                            VALUES (%s, %s, %s, %s, %s, 'watching')
+                                 organization_id, contact_id, status)
+                            VALUES (%s, %s, %s, %s, %s, %s, 'watching')
                             ON CONFLICT (id) DO NOTHING
-                        """, (trig_id, mid_out, cond or full_text, action, org_id_out))
+                        """, (trig_id, mid_out, cond or full_text, action, org_id_out, pid))
                         cur.execute("""
                             INSERT INTO meeting_scan_items
                                 (meeting_id, callout_type, text, task_id, accepted)
@@ -4826,20 +5457,22 @@ _TEAMS_RE = re.compile(r'https://teams\.microsoft\.com/l/meetup-join/[^\s<>"\']+
 _ZOOM_RE = re.compile(r'https://[\w.-]*zoom\.us/j/[^\s<>"\']+')
 
 
-def parse_ics_content(raw_bytes: bytes) -> Optional[dict]:
-    """Parse raw ICS bytes into a normalized event dict. Returns None on failure."""
+def parse_ics_events(raw_bytes: bytes) -> List[dict]:
+    """Parse raw ICS bytes into a list of normalized event dicts (one per VEVENT).
+    Returns [] on failure (audit: multi-VEVENT ICS files must not drop events)."""
     try:
         from icalendar import Calendar
     except ImportError:
-        return None
+        return []
     try:
         cal = Calendar.from_ical(raw_bytes)
     except Exception:
-        return None
+        return []
 
     cal_method = cal.get('METHOD')
     method = str(cal_method).upper() if cal_method else None
 
+    events: List[dict] = []
     for component in cal.walk():
         if component.name != 'VEVENT':
             continue
@@ -4895,7 +5528,7 @@ def parse_ics_content(raw_bytes: bytes) -> Optional[dict]:
         if rid is not None:
             recurrence_id = _dt_iso('RECURRENCE-ID') or str(rid)
 
-        return {
+        events.append({
             'uid': uid,
             'sequence': int(component.get('SEQUENCE', 0) or 0),
             'method': method,
@@ -4911,8 +5544,14 @@ def parse_ics_content(raw_bytes: bytes) -> Optional[dict]:
             'recurrence_id': recurrence_id,
             'teams_url': _str('X-MICROSOFT-SKYPETEAMSMEETINGURL'),
             'zoom_url': _str('X-ZOOM-JOIN-URL'),
-        }
-    return None
+        })
+    return events
+
+
+def parse_ics_content(raw_bytes: bytes) -> Optional[dict]:
+    """Backward-compatible single-event parse: returns the first VEVENT or None."""
+    events = parse_ics_events(raw_bytes)
+    return events[0] if events else None
 
 
 def extract_meeting_link(event: dict) -> Optional[str]:
@@ -4942,11 +5581,13 @@ def _create_or_update_prepared_meeting(event: dict, ece_id: int) -> str:
         dtstart_dt = datetime.fromisoformat(dtstart_str)
         date_str = dtstart_dt.date().isoformat()
     except Exception:
-        date_str = date_cls.today().isoformat()
+        date_str = app_today().isoformat()
 
     uid_hash = hashlib.sha1(f"{uid}:{recurrence_id}".encode()).hexdigest()[:8]
     safe_summary = re.sub(r'[^a-zA-Z0-9_-]', '-', summary[:30])
-    filename = f"{date_str} - {safe_summary} [cal-{uid_hash}].md"
+    # Identity from the UID only (no date), so a rescheduled invite updates the same stub
+    # instead of forking a new meeting. file_date still tracks the real date separately.
+    filename = f"{safe_summary} [cal-{uid_hash}].md"
     mid = hashlib.sha1(filename.encode()).hexdigest()[:16]
 
     _ATTENDEE_COLLAPSE_THRESHOLD = 8
@@ -4990,10 +5631,10 @@ def _create_or_update_prepared_meeting(event: dict, ece_id: int) -> str:
             elif existing['status'] == 'prepared':
                 cur.execute("""
                     UPDATE meetings SET
-                        topic = %s, attendees = %s, dtstart = %s,
+                        topic = %s, attendees = %s, dtstart = %s, file_date = %s,
                         meeting_link = %s, calendar_event_id = %s
                     WHERE id = %s
-                """, (summary, attendees_str, event.get('dtstart'), meeting_link, ece_id, mid))
+                """, (summary, attendees_str, event.get('dtstart'), file_date, meeting_link, ece_id, mid))
                 cur.execute(
                     "UPDATE external_calendar_events SET meeting_id = %s WHERE id = %s",
                     (mid, ece_id),
@@ -5002,11 +5643,23 @@ def _create_or_update_prepared_meeting(event: dict, ece_id: int) -> str:
 
 
 def _ingest_ics_bytes(raw_ics: bytes) -> dict:
-    """Parse ICS bytes and upsert ECE + prepared meeting. Returns result dict."""
-    event = parse_ics_content(raw_ics)
-    if not event:
+    """Parse ICS bytes and upsert every VEVENT (audit: multi-event files must not drop
+    events). Returns an aggregate result with per-event details."""
+    events = parse_ics_events(raw_ics)
+    if not events:
         return {"ok": False, "error": "Could not parse ICS content"}
+    results = [_ingest_ics_event(ev, raw_ics) for ev in events]
+    primary = next((r for r in results if r.get("meeting_id")), results[0])
+    return {
+        "ok": True, "count": len(results), "events": results,
+        "action": primary.get("action"), "meeting_id": primary.get("meeting_id"),
+        "ece_id": primary.get("ece_id"), "summary": primary.get("summary"),
+        "dtstart": primary.get("dtstart"),
+    }
 
+
+def _ingest_ics_event(event: dict, raw_ics: bytes) -> dict:
+    """Upsert one calendar event (ECE + prepared meeting). Returns a per-event result."""
     uid = event['uid']
     recurrence_id = event.get('recurrence_id') or None
     sequence = event.get('sequence', 0)
@@ -5196,7 +5849,7 @@ def shortcut_add_task():
         tags.append(f"due {deadline_in}")
     full_text = text + ((" " + " ".join(tags)) if tags else "")
 
-    deadline, deadline_raw = extract_deadline(full_text, context_year=datetime.now().year)
+    deadline, deadline_raw = extract_deadline(full_text, context_year=app_today().year)
     tid = str(uuid.uuid4())
 
     try:
@@ -5208,7 +5861,7 @@ def shortcut_add_task():
                          group_name, source_date, deadline, deadline_raw)
                     VALUES (%s, %s, 'free', FALSE, FALSE, 'tasks.md', 'free',
                             %s, %s, %s, %s)
-                """, (tid, full_text, group, date_cls.today(), deadline, deadline_raw))
+                """, (tid, full_text, group, app_today(), deadline, deadline_raw))
         return jsonify({"ok": True, "text": full_text})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

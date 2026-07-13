@@ -1,0 +1,18 @@
+BEGIN:VCALENDAR
+PRODID:-//Microsoft Corporation//Outlook 16.0 MIMEDIR//EN
+VERSION:2.0
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:040000008200E00074C5B7101A82E00800000000-abc123@example.com
+SEQUENCE:2
+STATUS:CONFIRMED
+SUMMARY:Budget review with Acme Corp
+DESCRIPTION:Discuss FY26 appropriations.
+LOCATION:2247 Rayburn
+DTSTART;TZID=America/New_York:20260715T140000
+DTEND;TZID=America/New_York:20260715T150000
+ORGANIZER;CN=Jane Organizer:mailto:jane@acme.example
+ATTENDEE;CN=Bob Staffer:mailto:bob@example.com
+ATTENDEE;CN=Carol Aide:mailto:carol@example.com
+END:VEVENT
+END:VCALENDAR

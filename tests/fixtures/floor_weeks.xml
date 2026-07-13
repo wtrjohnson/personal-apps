@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Bills This Week</title>
+  <entry>
+    <title>Week of July 13, 2026 (Update 1)</title>
+    <link rel="alternate" href="https://docs.house.gov/floor/?date=2026-07-13"/>
+    <content type="html">See https://docs.house.gov/billsthisweek/20260713/index.html</content>
+  </entry>
+  <entry>
+    <title>Week of July 13, 2026 (Update 2)</title>
+    <link rel="alternate" href="https://docs.house.gov/floor/?date=2026-07-13"/>
+    <content type="html">Updated schedule</content>
+  </entry>
+  <entry>
+    <title>Week of July 20, 2026</title>
+    <link rel="alternate" href="https://docs.house.gov/floor/?date=2026-07-20"/>
+    <content type="html">See https://docs.house.gov/billsthisweek/20260720/index.html</content>
+  </entry>
+  <entry>
+    <title>Week of January 5, 2015 (stale)</title>
+    <link rel="alternate" href="https://docs.house.gov/floor/?date=2015-01-05"/>
+    <content type="html">Old week that must be dropped</content>
+  </entry>
+</feed>

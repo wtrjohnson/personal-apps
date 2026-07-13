@@ -13,13 +13,15 @@ const state = {
   selectedMeetingId: null,
   selectedOrgId: null,
   selectedTaskIdx: -1,
-  facets: { groups: [], purposes: [], attendees: [], unaliased_raw_groups: [] },
+  facets: { groups: [], purposes: [], attendees: [] },
   people: [],
   stats: null,
   meetingFilters: { group: "", purpose: "", attendee: "", dateFrom: "", dateTo: "", hasOpenTasks: false },
   billsFilter: { relationship: "all", q: "", congress: "current" },
   dailyPlanTasks: [],
   dailyPlanOrder: [],
+  deadlineFilter: "",  // exact ISO date set by clicking the Home deadlines strip
+  smartView: "",       // "" | today | upcoming | waiting | commitments | neglected
 };
 
 // ---------- Utilities ----------
@@ -35,7 +37,14 @@ function escapeHtml(s) {
 }
 async function api(path, opts) {
   const r = await fetch(path, opts);
-  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  if (!r.ok) {
+    let msg = `${path} → ${r.status}`;
+    try {
+      const data = await r.clone().json();
+      if (data && data.error) msg = data.error;
+    } catch (_) { /* non-JSON error body; keep the status message */ }
+    throw new Error(msg);
+  }
   return r.json();
 }
 
@@ -60,6 +69,8 @@ function tasksFilters() {
   if ($("#t-overdue").checked) p.set("overdue", "1");
   if ($("#t-snoozed")?.checked) p.set("snoozed", "1");
   const pr = $("#t-priority")?.value; if (pr) p.set("priority", pr);
+  if (state.deadlineFilter) p.set("deadline", state.deadlineFilter);
+  if (state.smartView) p.set("smart_view", state.smartView);
   return p.toString();
 }
 
@@ -77,7 +88,15 @@ function formatTodayLabel(d) {
 
 async function renderHome() {
   let s;
-  try { s = await api("/api/stats"); } catch (e) { console.error("stats load failed", e); return; }
+  try {
+    s = await api("/api/stats");
+  } catch (e) {
+    console.error("stats load failed", e);
+    const focusEl = $("#hero-focus");
+    if (focusEl) { focusEl.innerHTML = ""; focusEl.appendChild(errorState("Couldn't load your dashboard.", renderHome)); }
+    toastError(e.message);
+    return;
+  }
   state.stats = s;
 
   const now = new Date();
@@ -154,7 +173,7 @@ async function renderHome() {
   _refreshTodayCalloutsSummary();
 
   // Daily planning: auto-open on first visit each day
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
   if (localStorage.getItem("last_plan_date") !== today && s.open_count > 0) {
     openDailyPlan();
   }
@@ -241,7 +260,10 @@ async function loadUpcomingMeetings() {
       });
     });
   } catch (e) {
-    card.style.display = "none";
+    // Don't silently hide the card on error — show a retry (audit M8).
+    card.style.display = "";
+    list.innerHTML = "";
+    list.appendChild(errorState("Couldn't load upcoming meetings.", loadUpcomingMeetings));
   }
 }
 
@@ -299,11 +321,11 @@ async function uploadICS(file) {
     } else if (data.action === "skipped") {
       if (btn) { btn.disabled = false; btn.textContent = orig; }
     } else {
-      alert(data.error || "Could not parse ICS file.");
+      toastError(data.error || "Could not parse ICS file.");
       if (btn) { btn.disabled = false; btn.textContent = orig; }
     }
   } catch (e) {
-    alert("Upload failed: " + e.message);
+    toastError("Upload failed: " + e.message);
     if (btn) { btn.disabled = false; btn.textContent = orig; }
   }
   // Reset file input so the same file can be re-uploaded if needed
@@ -339,10 +361,11 @@ async function _refreshTodayCalloutsSummary() {
   try {
     const data = await api("/api/scan-items");
     const meetings = data.meetings || [];
-    const allItems = meetings.flatMap((m) => m.items || []);
+    // Inbox badge counts only UNACKNOWLEDGED items, so the card empties on review (M7).
+    const allItems = meetings.flatMap((m) => (m.items || []).filter((i) => !i.acknowledged));
     if (!allItems.length) {
-      summaryEl.textContent = "Nothing yet";
-      breakdownEl.innerHTML = `<span class="chip-mini">No meetings recorded today</span>`;
+      summaryEl.textContent = "Inbox clear ✓";
+      breakdownEl.innerHTML = `<span class="chip-mini">Nothing to review</span>`;
       return;
     }
     const counts = {};
@@ -504,15 +527,44 @@ function renderTasks() {
 
   const gSel = $("#t-group");
   const current = gSel.value;
-  const opts = [`<option value="">All groups</option>`]
+  const opts = [`<option value="">All organizations</option>`]
     .concat(state.tasksGroupsInScope.map((g) => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`));
   gSel.innerHTML = opts.join("");
   if (current && state.tasksGroupsInScope.includes(current)) gSel.value = current;
   else gSel.value = "";
 
+  renderTaskActiveFilters();
+
   // Keep the phone segmented control in sync with the front paper
   const front = state.paperOrder[0];
   document.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.seg === front));
+}
+
+// Renders the removable "Due <date>" chip when a deadline filter is active.
+function renderTaskActiveFilters() {
+  const el = $("#task-active-filters");
+  if (!el) return;
+  if (!state.deadlineFilter) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  const label = fmtDayLabel(state.deadlineFilter);
+  el.hidden = false;
+  el.innerHTML =
+    `<span class="active-filter-chip">Due ${escapeHtml(label)}` +
+    `<button class="active-filter-x" data-clear-deadline title="Clear">✕</button></span>`;
+  el.querySelector("[data-clear-deadline]").addEventListener("click", () => {
+    state.deadlineFilter = "";
+    refreshTasks();
+  });
+}
+
+// "2026-07-15" -> "Wed Jul 15" for a compact chip label.
+function fmtDayLabel(iso) {
+  const d = new Date(iso + "T12:00:00");
+  if (isNaN(d)) return iso;
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
 function bringToFront(paperName) {
@@ -603,41 +655,21 @@ async function deleteTask(task) {
 }
 
 // ---------- Undo toast ----------
-let _undoTimer = null;
-
+// Delegates to the shared toast() queue (ui.js) so completions stack instead of
+// clobbering each other's Undo (audit L4).
 function showUndoToast(task) {
-  clearTimeout(_undoTimer);
-  const container = $("#toast-container");
-  container.innerHTML = `
-    <div class="toast">
-      <span class="toast-msg">Marked complete.</span>
-      <button class="toast-undo" id="toast-undo-btn">Undo</button>
-      <button class="toast-dismiss" id="toast-dismiss-btn">×</button>
-    </div>
-  `;
-  container.classList.add("visible");
-
-  $("#toast-undo-btn").addEventListener("click", async () => {
-    clearTimeout(_undoTimer);
-    container.classList.remove("visible");
-    await api("/api/tasks/toggle", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: task.id,
-        done: false,
-      }),
-    });
-    await refreshTasks();
-    if (state.tab === "home") renderHome();
+  toast("Marked complete.", {
+    type: "success",
+    undo: async () => {
+      await api("/api/tasks/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: task.id, done: false }),
+      });
+      await refreshTasks();
+      if (state.tab === "home") renderHome();
+    },
   });
-
-  $("#toast-dismiss-btn").addEventListener("click", () => {
-    clearTimeout(_undoTimer);
-    container.classList.remove("visible");
-  });
-
-  _undoTimer = setTimeout(() => container.classList.remove("visible"), 6000);
 }
 
 // ---------- Context menu ----------
@@ -702,49 +734,38 @@ document.addEventListener("keydown", (e) => {
 
 // ---------- Edit modal ----------
 let _editTask = null;
+let _editOrgPicker = null;
+let _editPersonPicker = null;
+
+// Distinct org names (from tasks-in-scope + facets) as entityPicker org rows.
+function orgPickerList() {
+  return state.tasksGroupsInScope.concat(state.facets.groups)
+    .filter((v, i, a) => v && a.indexOf(v) === i)
+    .map((n) => ({ id: n, name: n }));
+}
 
 function openEditModal(task) {
   _editTask = task;
   $("#edit-m-text").value = task.text;
   if ($("#edit-m-priority")) $("#edit-m-priority").value = task.priority || "normal";
 
-  // Populate group datalist
-  const list = $("#edit-m-group-list");
-  if (list) {
-    list.innerHTML = state.tasksGroupsInScope.concat(state.facets.groups)
-      .filter((v, i, a) => a.indexOf(v) === i)
-      .map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
-  }
-  if ($("#edit-m-group")) $("#edit-m-group").value = task.group || "";
-  // Populate person datalist + current value
-  fillPersonDatalist("edit-m-person-list");
-  if ($("#edit-m-person")) {
+  // Organization & person: canonical entity pickers (explicit create only).
+  const orgHost = $("#edit-m-group-picker");
+  if (orgHost) _editOrgPicker = entityPicker(orgHost, { type: "org", value: task.group || "", orgList: orgPickerList() });
+  const personHost = $("#edit-m-person-picker");
+  if (personHost) {
     const cur = state.people.find((p) => p.id === task.contact_id);
-    $("#edit-m-person").value = cur ? cur.name : "";
+    _editPersonPicker = entityPicker(personHost, { type: "person", value: cur ? cur.name : "", valueId: cur ? cur.id : "" });
   }
-  if ($("#edit-m-contact")) $("#edit-m-contact").value = task.contact || "";
   if ($("#edit-m-estimate")) $("#edit-m-estimate").value = task.estimate_minutes || "";
   if ($("#edit-m-recur")) {
     _updateRecurDetail("edit-m", task.recurrence_rule || null);
   }
 
-  // Populate year select and deadline
-  const yearSel = $("#edit-m-dl-year");
-  if (yearSel) {
-    const thisYear = new Date().getFullYear();
-    yearSel.innerHTML = `<option value="">Year</option>` +
-      [thisYear - 1, thisYear, thisYear + 1, thisYear + 2]
-        .map((y) => `<option value="${y}">${y}</option>`).join("");
-  }
-  if (task.deadline && task.deadline.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    const [yy, mo, dd] = task.deadline.split("-");
-    if ($("#edit-m-dl-month")) $("#edit-m-dl-month").value = mo;
-    if ($("#edit-m-dl-day"))   $("#edit-m-dl-day").value = dd;
-    if ($("#edit-m-dl-year"))  $("#edit-m-dl-year").value = yy;
-  } else {
-    ["edit-m-dl-month", "edit-m-dl-day", "edit-m-dl-year"].forEach((id) => {
-      const el = $("#" + id); if (el) el.value = "";
-    });
+  // Deadline: single native date input (dateField).
+  const dlEl = $("#edit-m-dl-date");
+  if (dlEl) {
+    dlEl.value = (task.deadline && /^\d{4}-\d{2}-\d{2}$/.test(task.deadline)) ? task.deadline : "";
   }
 
   $("#edit-modal-backdrop").classList.remove("hidden");
@@ -765,13 +786,14 @@ async function submitEditModal() {
   const newText = $("#edit-m-text").value.trim();
   if (!newText) { $("#edit-m-text").focus(); return; }
   const newPriority = $("#edit-m-priority")?.value || "normal";
-  const newGroup = $("#edit-m-group")?.value.trim() || null;
+  const newGroup = (_editOrgPicker ? _editOrgPicker.getName() : "") || null;
   const newDeadline = getDeadlineValue("edit-m") || null;
-  const newContact = $("#edit-m-contact")?.value.trim() ?? null;
   const estimateVal = parseInt($("#edit-m-estimate")?.value);
-  // Person: "" clears; a typed name resolves to an existing contact or creates a new one.
-  const personRaw = $("#edit-m-person")?.value.trim() ?? "";
-  const personField = personRaw === "" ? "" : await ensurePersonId(personRaw);
+  // Person: empty input clears; a picked/created id assigns; a typed-but-unpicked name
+  // leaves the assignment unchanged (never a silent create — audit M4).
+  const personName = _editPersonPicker ? _editPersonPicker.getName() : "";
+  const personId = _editPersonPicker ? _editPersonPicker.getId() : "";
+  const personField = personName === "" ? "" : (personId || null);
   const payload = {
     source_filename: _editTask.source_filename,
     section: _editTask.section,
@@ -780,7 +802,6 @@ async function submitEditModal() {
     priority: newPriority,
     group: newGroup,
     deadline_direct: newDeadline,
-    contact: newContact,
     estimate_minutes: isNaN(estimateVal) ? null : estimateVal,
     recurrence_rule: getRecurrenceRule("edit-m"),
   };
@@ -899,21 +920,16 @@ async function openDrawer(task) {
 }
 
 // ---------- Add-task modal ----------
+// Canonical date read/write over the single native input rendered by dateField().
 function getDeadlineValue(prefix = "m") {
-  const mo = $(`#${prefix}-dl-month`).value;
-  const dd = $(`#${prefix}-dl-day`).value;
-  const yy = $(`#${prefix}-dl-year`).value;
-  if (!mo || !dd || !yy) return "";
-  return `${yy}-${mo}-${dd}`;
+  const el = $(`#${prefix}-dl-date`);
+  const v = (el && el.value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
 }
 
 function setDeadlineSelects(date, prefix = "m") {
-  const mo = String(date.getMonth() + 1).padStart(2, "0");
-  const dd = String(date.getDate()).padStart(2, "0");
-  const yy = String(date.getFullYear());
-  $(`#${prefix}-dl-month`).value = mo;
-  $(`#${prefix}-dl-day`).value = dd;
-  $(`#${prefix}-dl-year`).value = yy;
+  const el = $(`#${prefix}-dl-date`);
+  if (el) el.value = typeof date === "string" ? date : localDateStr(date);
 }
 
 function _nextWeekday(targetDay) {
@@ -1030,52 +1046,15 @@ function parseNLTask(text) {
   return result;
 }
 
-function _nlMonthOptions(sel) {
-  const months = [["01","Jan"],["02","Feb"],["03","Mar"],["04","Apr"],["05","May"],["06","Jun"],["07","Jul"],["08","Aug"],["09","Sep"],["10","Oct"],["11","Nov"],["12","Dec"]];
-  return `<option value="">Month</option>` + months.map(([v, l]) => `<option value="${v}"${v === sel ? " selected" : ""}>${l}</option>`).join("");
-}
-function _nlDayOptions(sel) {
-  let o = `<option value="">Day</option>`;
-  for (let d = 1; d <= 31; d++) { const v = String(d).padStart(2, "0"); o += `<option value="${v}"${v === sel ? " selected" : ""}>${d}</option>`; }
-  return o;
-}
-function _nlYearOptions(sel) {
-  const ty = new Date().getFullYear();
-  return `<option value="">Year</option>` + [ty - 1, ty, ty + 1, ty + 2].map((y) => `<option value="${y}"${String(y) === sel ? " selected" : ""}>${y}</option>`).join("");
-}
-
 function _populateNLStep2(parsed) {
-  // Deadline parts (matches the edit modal's month/day/year selects)
-  let dlMo = "", dlDd = "", dlYy = "";
-  if (parsed.deadline && /^\d{4}-\d{2}-\d{2}$/.test(parsed.deadline)) {
-    [dlYy, dlMo, dlDd] = parsed.deadline.split("-");
-  }
-  const allGroups = state.tasksGroupsInScope.concat(state.facets.groups).filter((v, i, a) => a.indexOf(v) === i);
-  const groupOpts = allGroups.map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
-  const contactVal = [parsed.email, parsed.phone, parsed.contact].filter(Boolean).join(", ");
-
   const blocks = [
     { uncertain: false, html: `<label>Priority</label>
       <select id="nl-f-priority">${[["normal","Normal"],["high","High"],["low","Low"]].map(([v, l]) => `<option value="${v}"${v === parsed.priority ? " selected" : ""}>${l}</option>`).join("")}</select>` },
     { uncertain: !!parsed.groupUncertain, html: `<label>Organization${parsed.groupUncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
-      <input id="nl-f-group" list="nl-f-group-list" value="${escapeHtml(parsed.group || "")}" placeholder="Pick or type new" autocomplete="off">
-      <datalist id="nl-f-group-list">${groupOpts}</datalist>` },
+      <div id="nl-f-group-picker"></div>` },
     { uncertain: false, html: `<label>Person</label>
-      <input id="nl-f-person" list="nl-f-person-list" value="" placeholder="Assign to a person" autocomplete="off">
-      <datalist id="nl-f-person-list">${state.people.map((p) => `<option value="${escapeHtml(p.name)}"></option>`).join("")}</datalist>` },
-    { uncertain: false, html: `<label>Deadline</label>
-      <div class="deadline-selects">
-        <select id="nl-f-dl-month">${_nlMonthOptions(dlMo)}</select>
-        <select id="nl-f-dl-day">${_nlDayOptions(dlDd)}</select>
-        <select id="nl-f-dl-year">${_nlYearOptions(dlYy)}</select>
-      </div>
-      <div class="dl-quick-btns">
-        <button type="button" class="dl-quick-btn" data-quick="today" data-prefix="nl-f">Today</button>
-        <button type="button" class="dl-quick-btn" data-quick="this-week" data-prefix="nl-f">This week</button>
-        <button type="button" class="dl-quick-btn" data-quick="next-week" data-prefix="nl-f">Next week</button>
-      </div>` },
-    { uncertain: false, html: `<label>Phone / email</label>
-      <input id="nl-f-contact" value="${escapeHtml(contactVal)}" placeholder="Phone number or email" autocomplete="off">` },
+      <div id="nl-f-person-picker"></div>` },
+    { uncertain: false, html: `<label>Deadline</label>${dateField("nl-f", parsed.deadline || "")}` },
     { uncertain: false, html: `<label>Estimate (min)</label>
       <input id="nl-f-estimate" type="number" min="1" max="480" value="${parsed.estimate_minutes || ""}" placeholder="e.g. 30" autocomplete="off">` },
   ];
@@ -1084,6 +1063,9 @@ function _populateNLStep2(parsed) {
   container.innerHTML = blocks.map((b, i) => `<div class="nl-field nl-field-blur${b.uncertain ? " nl-field-uncertain" : ""}" style="transition-delay:${i * 55}ms">
       ${b.html}
     </div>`).join("");
+
+  _nlOrgPicker = entityPicker($("#nl-f-group-picker"), { type: "org", value: parsed.group || "", orgList: orgPickerList() });
+  _nlPersonPicker = entityPicker($("#nl-f-person-picker"), { type: "person", value: "", valueId: "" });
 
   // Expand container, then unblur fields staggered
   requestAnimationFrame(() => {
@@ -1095,6 +1077,8 @@ function _populateNLStep2(parsed) {
 }
 
 let _nlParsed = null;
+let _nlOrgPicker = null;
+let _nlPersonPicker = null;
 
 function openNLModal() {
   _nlParsed = null;
@@ -1157,16 +1141,15 @@ async function submitNLModal() {
   if (!text) return;
   const priority = $("#nl-f-priority")?.value || "normal";
   const deadline = getDeadlineValue("nl-f") || "";
-  const group = $("#nl-f-group")?.value.trim() || "";
-  const contact = $("#nl-f-contact")?.value.trim() || null;
-  const contact_id = await ensurePersonId($("#nl-f-person")?.value);
+  const group = (_nlOrgPicker ? _nlOrgPicker.getName() : "") || "";
+  const contact_id = _nlPersonPicker ? _nlPersonPicker.getId() : "";
   const estimateRaw = parseInt($("#nl-f-estimate")?.value);
   const estimate_minutes = isNaN(estimateRaw) ? null : estimateRaw;
 
   await api("/api/tasks/add", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, group, deadline, priority, contact, contact_id, estimate_minutes }),
+    body: JSON.stringify({ text, group, deadline, priority, contact_id, estimate_minutes }),
   });
   closeNLModal();
   if (state.tab === "tasks") await refreshTasks();
@@ -1201,11 +1184,17 @@ function renderMeetingsList() {
     if (m.open_action_items_count) badges.push(`<span class="badge actions" title="Open action items">${m.open_action_items_count}A</span>`);
     if (m.open_reminders_count) badges.push(`<span class="badge reminders" title="Open reminders">${m.open_reminders_count}R</span>`);
     const active = m.id === state.selectedMeetingId ? "active" : "";
+    const topic = (m.topic || "").trim();
+    const statusChip = (m.status && m.status !== "complete")
+      ? `<span class="meeting-status-chip">${escapeHtml(m.status)}</span>` : "";
+    const primary = topic
+      ? `${escapeHtml(topic)} <span class="meeting-row-sub">${escapeHtml(m.group)}</span>`
+      : escapeHtml(m.group);
     return `
       <li data-id="${m.id}" class="${active}">
         <span class="date">${escapeHtml(date)}</span>
-        <span class="group">${escapeHtml(m.group)}</span>
-        <span class="badges">${badges.join("")}</span>
+        <span class="group">${primary}</span>
+        <span class="badges">${statusChip}${badges.join("")}</span>
       </li>`;
   }).join("");
 }
@@ -1454,7 +1443,7 @@ function _wireContactPicker(m) {
       body: JSON.stringify({ name }),
     });
     const data = await res.json();
-    if (!data.ok || !data.id) { alert(data.error || "Could not create contact"); return; }
+    if (!data.ok || !data.id) { toastError(data.error || "Could not create contact"); return; }
     await linkContact(data.id);
   };
 
@@ -1562,7 +1551,7 @@ async function _saveMeetingEdit() {
   const groupInput = $("#meeting-edit-group");
   const mid = groupInput.dataset.mid;
   const group = groupInput.value.trim();
-  if (!group) { alert("Group is required"); return; }
+  if (!group) { toastError("Organization is required"); return; }
 
   const btn = $("#meeting-edit-save");
   btn.disabled = true;
@@ -1580,17 +1569,18 @@ async function _saveMeetingEdit() {
       }),
     });
     const data = await res.json();
-    if (!data.ok) { alert(data.error || "Save failed"); btn.disabled = false; return; }
+    if (!data.ok) { toastError(data.error || "Save failed"); btn.disabled = false; return; }
 
     // Close modal and refresh (clear group cache so datalist reflects new names)
     _meetingEditGroups = null;
     $("#meeting-edit-backdrop").classList.add("hidden");
     await refreshMeetings();
     selectMeeting(mid);
+    toastSuccess("Meeting saved.");
     btn.disabled = false;
     btn.textContent = "Save";
   } catch (e) {
-    alert("Save failed");
+    toastError(e.message || "Save failed");
     btn.disabled = false;
     btn.textContent = "Save";
   }
@@ -1607,13 +1597,13 @@ $("#detail").addEventListener("click", async (e) => {
     try {
       const res = await fetch(`/api/meetings/${mid}`, { method: "DELETE" });
       const data = await res.json();
-      if (!data.ok) { alert(data.error || "Delete failed"); deleteBtn.disabled = false; return; }
+      if (!data.ok) { toastError(data.error || "Delete failed"); deleteBtn.disabled = false; return; }
       state.selectedMeetingId = null;
       renderDetail(null);
       await refreshMeetings();
       await loadFacets();
     } catch {
-      alert("Delete failed");
+      toastError("Delete failed");
       deleteBtn.disabled = false;
     }
     return;
@@ -1701,9 +1691,11 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     // Fetch org data first — panels stay hidden until everything is ready.
     const org = await api(`/api/organizations/${orgId}`);
     const openAsks = (org.asks || []).filter((a) =>
-      !["completed","declined","no_action"].includes(a.status));
+      !["declined", "done", "no_action"].includes(a.status));
     const openCommits = (org.commitments || []).filter((c) =>
-      ["open","needs_review","task_created"].includes(c.status));
+      ["open", "in_progress"].includes(c.status));
+    const watchingTriggers = (org.triggers || []).filter((t) =>
+      ["watching", "fired"].includes(t.status));
     const openTasks = org.open_tasks || [];
     const completedTasks = org.completed_tasks || [];
 
@@ -1717,8 +1709,8 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
           <div class="org-entity-row">
             <span class="callout-badge callout-badge--ask">${_SCAN_ICONS.ask}Ask</span>
             <span class="entity-text">${escapeHtml(a.text)}</span>
-            <span class="entity-status status-${a.status}">${escapeHtml(a.status.replace("_"," "))}</span>
-            <button class="entity-status-btn" data-ask-id="${a.id}" data-status="completed">✓</button>
+            ${statusControl("ask", a.id, a.status)}
+            ${!a.task_id ? `<button class="create-task-btn" data-ask-id="${a.id}">+ Task</button>` : ""}
             <button class="entity-edit-btn" data-ask-edit="${a.id}" title="Edit">✎</button>
             <button class="entity-del-btn" data-ask-del="${a.id}" title="Delete">🗑</button>
           </div>`).join("")
@@ -1729,10 +1721,20 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
           <div class="org-entity-row">
             <span class="callout-badge callout-badge--commitment">${_SCAN_ICONS.commitment}Commitment</span>
             <span class="entity-text">${escapeHtml(c.text)}</span>
-            <span class="entity-status status-${c.status}">${escapeHtml(c.status.replace("_"," "))}</span>
+            ${statusControl("commitment", c.id, c.status)}
             ${!c.task_id ? `<button class="create-task-btn" data-commit-id="${c.id}">+ Task</button>` : ""}
             <button class="entity-edit-btn" data-commit-edit="${c.id}" title="Edit">✎</button>
             <button class="entity-del-btn" data-commit-del="${c.id}" title="Delete">🗑</button>
+          </div>`).join("")
+      : "";
+
+    const watchingHtml = watchingTriggers.length
+      ? watchingTriggers.map((t) => `
+          <div class="org-entity-row">
+            <span class="callout-badge callout-badge--trigger">👁 Watching</span>
+            <span class="entity-text">${escapeHtml(t.condition_text)}${t.action_text ? " → " + escapeHtml(t.action_text) : ""}</span>
+            ${statusControl("trigger", t.id, t.status)}
+            <button class="entity-del-btn" data-trigger-del="${t.id}" title="Delete">🗑</button>
           </div>`).join("")
       : "";
 
@@ -1789,9 +1791,16 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     // dropped here — they live in the timeline as their own events.
     const railSection = (lbl, html) =>
       html ? `<div class="org-detail-section"><div class="drawer-section-label">${lbl}</div>${html}</div>` : "";
+    const addBtns = `<div class="rail-add-row">
+      <button class="rail-add-btn" data-add-ask="${escapeHtml(orgId)}">+ Ask</button>
+      <button class="rail-add-btn" data-add-commit="${escapeHtml(orgId)}">+ Commitment</button>
+      <button class="rail-add-btn" data-add-trigger="${escapeHtml(orgId)}">+ Trigger</button>
+    </div>`;
     const railHtml = [
+      addBtns,
       railSection("Open Asks", asksHtml),
       railSection("Open Commitments", commitsHtml),
+      railSection("Watching", watchingHtml),
       personFilterHtml,
       railSection("Open Tasks", tasksHtml),
       billsHtml && railSection("Bills", `<div class="bill-pills-row">${billsHtml}</div>`),
@@ -1866,24 +1875,40 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
       });
     });
 
-    // Wire interactive buttons
-    content?.querySelectorAll(".entity-status-btn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        await api(`/api/asks/${btn.dataset.askId}/status`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: btn.dataset.status }),
-        });
-        selectOrg(orgId, { skipToggle: true });
+    // Status controls (ask / commitment / trigger) → POST + refresh.
+    content?.querySelectorAll(".status-control").forEach((sel) => {
+      sel.addEventListener("change", async () => {
+        try {
+          await setEntityStatus(sel.dataset.statusKind, sel.dataset.statusId, sel.value);
+          selectOrg(orgId, { skipToggle: true });
+        } catch (e) { toastError(e.message || "Couldn't update status"); }
       });
     });
+    // + Task from an ask or a commitment.
     content?.querySelectorAll(".create-task-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        await api(`/api/commitments/${btn.dataset.commitId}/create-task`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
-        });
-        selectOrg(orgId, { skipToggle: true });
-        await refreshTasks();
+        const url = btn.dataset.askId
+          ? `/api/asks/${btn.dataset.askId}/create-task`
+          : `/api/commitments/${btn.dataset.commitId}/create-task`;
+        try {
+          await api(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+          toastSuccess("Task created.");
+          selectOrg(orgId, { skipToggle: true });
+          await refreshTasks();
+        } catch (e) { toastError(e.message || "Couldn't create task"); }
       });
     });
+    content?.querySelectorAll("[data-trigger-del]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Delete this trigger?")) return;
+        await api(`/api/followup-triggers/${btn.dataset.triggerDel}`, { method: "DELETE" });
+        selectOrg(orgId, { skipToggle: true });
+      });
+    });
+    // + Ask / + Commitment / + Trigger (standalone create for this org).
+    content?.querySelector("[data-add-ask]")?.addEventListener("click", () => addObligation("ask", orgId));
+    content?.querySelector("[data-add-commit]")?.addEventListener("click", () => addObligation("commitment", orgId));
+    content?.querySelector("[data-add-trigger]")?.addEventListener("click", () => addObligation("trigger", orgId));
     content?.querySelectorAll(".org-entity-row--task").forEach((row) => {
       row.addEventListener("click", () => {
         const task = [...openTasks, ...completedTasks].find((t) => t.id === row.dataset.taskId);
@@ -1905,14 +1930,17 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     content?.querySelectorAll("[data-ask-edit]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const a = openAsks.find((x) => x.id === btn.dataset.askEdit);
-        const text = prompt("Edit ask:", a?.text || "");
-        if (text === null || !text.trim()) return;
-        const priority = prompt("Priority (high / normal / low):", a?.priority || "normal");
-        if (priority === null) return;
+        const vals = await formModal({ title: "Edit ask", fields: [
+          { key: "text", label: "Ask", type: "text", value: a?.text || "" },
+          { key: "priority", label: "Priority", type: "select", value: a?.priority || "normal",
+            options: [{ value: "high", label: "High" }, { value: "normal", label: "Normal" }, { value: "low", label: "Low" }] },
+        ] });
+        if (!vals || !vals.text) return;
         await api(`/api/asks/${btn.dataset.askEdit}`, {
           method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: text.trim(), priority: (priority || "normal").trim() }),
+          body: JSON.stringify({ text: vals.text, priority: vals.priority || "normal" }),
         });
+        toastSuccess("Ask updated.");
         selectOrg(orgId, { skipToggle: true });
       });
     });
@@ -1928,14 +1956,16 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     content?.querySelectorAll("[data-commit-edit]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const c = openCommits.find((x) => x.id === btn.dataset.commitEdit);
-        const text = prompt("Edit commitment:", c?.text || "");
-        if (text === null || !text.trim()) return;
-        const due = prompt("Due date (YYYY-MM-DD, blank for none):", c?.due_date || "");
-        if (due === null) return;
+        const vals = await formModal({ title: "Edit commitment", fields: [
+          { key: "text", label: "Commitment", type: "text", value: c?.text || "" },
+          { key: "due", label: "Due date", type: "date", value: c?.due_date || "" },
+        ] });
+        if (!vals || !vals.text) return;
         await api(`/api/commitments/${btn.dataset.commitEdit}`, {
           method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: text.trim(), due_date: due.trim() }),
+          body: JSON.stringify({ text: vals.text, due_date: vals.due }),
         });
+        toastSuccess("Commitment updated.");
         selectOrg(orgId, { skipToggle: true });
       });
     });
@@ -1950,7 +1980,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     // Edit / delete the organization itself
     $("#org-edit-save")?.addEventListener("click", async () => {
       const name = $("#org-edit-name").value.trim();
-      if (!name) { alert("Organization name is required."); return; }
+      if (!name) { toastError("Organization name is required."); return; }
       try {
         await api(`/api/organizations/${orgId}`, {
           method: "PUT", headers: { "Content-Type": "application/json" },
@@ -1958,7 +1988,8 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         });
         loadGroups();
         selectOrg(orgId, { skipToggle: true });
-      } catch { alert("Couldn't save organization."); }
+        toastSuccess("Organization saved.");
+      } catch (e) { toastError(e.message || "Couldn't save organization."); }
     });
     $("#org-delete")?.addEventListener("click", async () => {
       if (!confirm(`Delete ${org.name}? This permanently removes the organization.`)) return;
@@ -1966,7 +1997,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         await api(`/api/organizations/${orgId}`, { method: "DELETE" });
         selectOrg(null);
         loadGroups();
-      } catch { alert("Couldn't delete organization."); }
+      } catch { toastError("Couldn't delete organization."); }
     });
 
     // Reveal col-2 — its content is already populated.
@@ -2135,12 +2166,12 @@ function _wirePersonEditor() {
         set("#pe-name", r.name); set("#pe-company", r.company);
         set("#pe-title", r.title); set("#pe-email", r.email); set("#pe-phone", r.phone);
       } else {
-        alert(r.error || "Card scan failed — fill in manually");
+        toastError(r.error || "Card scan failed — fill in manually");
       }
       const img = $("#pe-card-img");
       if (img && _pePendingCard) { img.src = _pePendingCard; img.classList.remove("hidden"); }
     } catch {
-      alert("Card scan failed — fill in manually");
+      toastError("Card scan failed — fill in manually");
     } finally {
       scanBtn.disabled = false;
       scanBtn.textContent = "Scan business card";
@@ -2155,7 +2186,7 @@ function _wirePersonEditor() {
       phone: $("#pe-phone").value.trim(),
     };
     if (_pePendingCard) body.card_image = _pePendingCard;
-    if (!body.name) { alert("Name is required"); $("#pe-name").focus(); return; }
+    if (!body.name) { toastError("Name is required"); $("#pe-name").focus(); return; }
     try {
       let savedId = _currentPersonId;
       if (_currentPersonId) {
@@ -2174,7 +2205,7 @@ function _wirePersonEditor() {
       await loadGroups();
       if (savedId) { if (_personRefresh) _personRefresh(savedId); else selectPerson(savedId); }
     } catch {
-      alert("Save failed");
+      toastError("Save failed");
     }
   });
 }
@@ -2288,7 +2319,10 @@ async function renderPersonInto(container, contactId, opts = {}) {
     content.innerHTML = `
       <div class="org-detail-header">
         <h2>${escapeHtml(p.name)}</h2>
-        <button class="detail-delete-btn" id="person-delete" title="Delete contact">Delete</button>
+        <div class="org-detail-header-actions">
+          <button class="linkish" id="person-merge" title="Merge this contact into another">Merge…</button>
+          <button class="detail-delete-btn" id="person-delete" title="Delete contact">Delete</button>
+        </div>
       </div>
       <div class="org-detail-section">
         <div class="drawer-section-label">Organizations</div>
@@ -2330,13 +2364,29 @@ async function renderPersonInto(container, contactId, opts = {}) {
         selectOrg(chip.dataset.orgId, { skipToggle: true });
       });
     });
-    // + org → prompt for org name, link, refresh
+    // Merge this contact into another (repoints all history to the winner).
+    $("#person-merge")?.addEventListener("click", async () => {
+      const winner = await pickEntityModal({ title: `Merge "${p.name}" into…`, type: "person", submitLabel: "Merge" });
+      if (!winner || !winner.id) return;
+      if (winner.id === contactId) { toastError("Pick a different contact."); return; }
+      try {
+        await api(`/api/contacts/${contactId}/merge`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ into_id: winner.id }),
+        });
+        toastSuccess(`Merged into ${winner.name}.`);
+        if (typeof loadGroups === "function") loadGroups();
+      } catch (e) { toastError(e.message || "Merge failed"); }
+    });
+    // + org → add-organization form, link, refresh
     $("#person-add-org")?.addEventListener("click", async () => {
-      const name = prompt("Add this person to which organization?");
-      if (!name || !name.trim()) return;
+      const vals = await formModal({ title: "Add to organization", submitLabel: "Add", fields: [
+        { key: "name", label: "Organization", type: "text", value: "" },
+      ] });
+      if (!vals || !vals.name) return;
       await api(`/api/people/${contactId}/organizations`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim() }),
+        body: JSON.stringify({ name: vals.name }),
       });
       refresh();
     });
@@ -2595,7 +2645,10 @@ function _editScanItemDateInline(anchorEl, idx) {
 // Which callout types the user is allowed to switch between in the review queue.
 // Deadline/person/bill have distinct downstream semantics and aren't task-producing,
 // so they're not interchangeable with task/followup/important.
-const _SWITCHABLE_CALLOUT_TYPES = ["task", "followup", "important", "ask", "commitment", "trigger"];
+// Stopgap (audit H8): only label-safe types are switchable in the review UI. Changing a
+// callout to ask/commitment/trigger has no backend conversion yet, so offering it would lie.
+// Phase 8 restores the full set once POST /api/scan-items/<id>/convert exists.
+const _SWITCHABLE_CALLOUT_TYPES = ["task", "followup", "important"];
 // Types where setting a due date downstream makes sense.
 const _DATABLE_CALLOUT_TYPES = ["task", "followup", "important", "ask", "commitment", "trigger", "deadline"];
 
@@ -2687,7 +2740,7 @@ let _todayCalloutsData = null;  // {date, meetings: [...]}
 
 function openTodayCalloutsModal() {
   $("#today-callouts-backdrop").classList.remove("hidden");
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
   _todayCalloutsDate = today;
   $("#today-callouts-date").value = today;
   _loadTodayCallouts(today);
@@ -2738,8 +2791,9 @@ function _renderTodayCallouts() {
         ? `<button class="scan-item-action" data-action="date" data-item-id="${item.id}" title="Set due date">${_SCAN_CALENDAR_SVG}</button>`
         : "";
       const doneCls = item.task_done ? " today-callouts-item-done" : "";
+      const ackCls = item.acknowledged ? " scan-item--acknowledged" : "";
       return `
-        <div class="scan-item scan-item--accepted${doneCls}" data-item-id="${item.id}">
+        <div class="scan-item scan-item--accepted${doneCls}${ackCls}" data-item-id="${item.id}">
           <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
           <div class="scan-item-body">
             ${typeControl}
@@ -2753,11 +2807,13 @@ function _renderTodayCallouts() {
         </div>`;
     }).join("");
     const dateLabel = m.date ? new Date(m.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
+    const allAcked = (m.items || []).length > 0 && (m.items || []).every((i) => i.acknowledged);
     return `
       <div class="today-callouts-meeting-block">
         <div class="today-callouts-meeting-header">
           <h3>${escapeHtml(m.topic || m.group || "Meeting")}</h3>
           <span class="meeting-meta">${escapeHtml(m.group || "")}${dateLabel ? " · " + escapeHtml(dateLabel) : ""}</span>
+          <button class="inbox-ack-btn${allAcked ? " done" : ""}" data-ack-meeting="${escapeHtml(m.meeting_id)}">${allAcked ? "Reviewed ✓" : "Looks right ✓"}</button>
         </div>
         ${itemsHtml}
       </div>`;
@@ -2767,6 +2823,16 @@ function _renderTodayCallouts() {
 
 function _wireTodayCalloutsHandlers() {
   const body = $("#today-callouts-body");
+  // "Looks right ✓" acknowledges a whole meeting's Inbox items (Phase 10).
+  body.querySelectorAll("[data-ack-meeting]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await api(`/api/scan-items/ack-meeting/${btn.dataset.ackMeeting}`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
+        await _loadTodayCallouts(_todayCalloutsDate);
+        _refreshTodayCalloutsSummary();
+      } catch (e) { toastError(e.message || "Couldn't acknowledge"); }
+    });
+  });
   body.querySelectorAll(".scan-item-text-input").forEach((inp) => {
     const original = inp.value;
     inp.addEventListener("change", async () => {
@@ -2928,11 +2994,11 @@ async function scanCardImage(file) {
         }
         preview.classList.remove("hidden");
       } else {
-        alert(fields.error || "Card scan failed — fill in manually");
+        toastError(fields.error || "Card scan failed — fill in manually");
         preview.classList.remove("hidden");
       }
     } catch (err) {
-      alert("Card scan failed — fill in manually");
+      toastError("Card scan failed — fill in manually");
       preview.classList.remove("hidden");
     } finally {
       scanBtn.disabled = false;
@@ -2950,7 +3016,7 @@ async function scanCardImage(file) {
       email: $("#card-field-email").value.trim(),
       phone: $("#card-field-phone").value.trim(),
     };
-    if (!contact.name) { alert("Name is required"); return; }
+    if (!contact.name) { toastError("Name is required"); return; }
 
     const res = await fetch("/api/contacts", {
       method: "POST",
@@ -2958,7 +3024,7 @@ async function scanCardImage(file) {
       body: JSON.stringify(contact),
     });
     const data = await res.json();
-    if (!data.ok) { alert(data.error || "Save failed"); return; }
+    if (!data.ok) { toastError(data.error || "Save failed"); return; }
 
     _intakeLinkedContacts.push({ ...contact, id: data.id });
     _renderSavedCards();
@@ -3018,8 +3084,10 @@ function closeIntakeModal() {
   document.body.style.userSelect = "";
 }
 
-const _intakeTypePresets = {
-  "1on1":       { group: "Rebekah",   topic: "1:1",                attendees: "", skipPremeeting: true,  constituent: false },
+// Defaults carry no personal data (audit M11). Override per-user via localStorage key
+// "jos_intake_presets" (a JSON object keyed by type), e.g. {"1on1":{"group":"Rebekah"}}.
+const _intakeTypePresetsDefault = {
+  "1on1":       { group: "",          topic: "1:1",                attendees: "", skipPremeeting: true,  constituent: false },
   "staff":      { group: "Staff",     topic: "Staff Meeting",      attendees: "", skipPremeeting: true,  constituent: false },
   "legteam":    { group: "Leg. Team", topic: "Leg. Team Meeting",  attendees: "", skipPremeeting: true,  constituent: false },
   "constituent":{ group: "",          topic: "",                                  skipPremeeting: false, constituent: true  },
@@ -3027,9 +3095,20 @@ const _intakeTypePresets = {
   "other":      { group: "",          topic: "",                                  skipPremeeting: false, constituent: false },
 };
 
+function _loadIntakePresets() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("jos_intake_presets") || "{}");
+    const out = {};
+    for (const k of Object.keys(_intakeTypePresetsDefault)) {
+      out[k] = Object.assign({}, _intakeTypePresetsDefault[k], saved[k] || {});
+    }
+    return out;
+  } catch { return _intakeTypePresetsDefault; }
+}
+
 function _intakeSelectType(type) {
   _intakeMeetingType = type;
-  const preset = _intakeTypePresets[type] || {};
+  const preset = _loadIntakePresets()[type] || {};
   const modal = $(".modal-intake");
 
   // Pre-fill fields
@@ -3073,7 +3152,7 @@ function _intakeBuildChips() {
   container.innerHTML = "";
 
   const fields = [
-    { id: "intake-group",     label: "Group",     type: "text"   },
+    { id: "intake-group",     label: "Organization", type: "text"   },
     { id: "intake-topic",     label: "Topic",     type: "text"   },
     { id: "intake-date",      label: "Date",      type: "date"   },
     { id: "intake-attendees", label: "Attendees", type: "text"   },
@@ -3160,7 +3239,7 @@ async function _intakeSaveNotes() {
   const transcription = (_intakeScanResult?.text || ($("#intake-notes-text").value || "")).trim();
 
   if (!transcription && !_intakeScanResult) {
-    alert("Nothing to save — add some notes or tasks first.");
+    toastError("Nothing to save — add some notes or tasks first.");
     return;
   }
 
@@ -3213,13 +3292,9 @@ async function _intakeSaveNotes() {
           })
         ));
       }
-      // Mark the prepared calendar-event stub as complete
+      // The backend now writes notes into the prepared meeting itself and marks it
+      // complete (C1), so no separate status flip is needed — just refresh the card.
       if (preparedMeetingId) {
-        await fetch(`/api/meetings/${preparedMeetingId}/status`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "complete" }),
-        });
         if ($("#intake-prepared-meeting-id")) $("#intake-prepared-meeting-id").value = "";
         loadUpcomingMeetings();
       }
@@ -3315,6 +3390,40 @@ const refreshMeetingsDebounced = debounce(async () => {
 
 async function refreshMeetings() { return refreshMeetingsDebounced(); }
 
+// Post a status change for an ask / commitment / trigger (StatusControl, audit H3/C2b).
+async function setEntityStatus(kind, id, status) {
+  const url = kind === "ask" ? `/api/asks/${id}/status`
+    : kind === "commitment" ? `/api/commitments/${id}/status`
+    : `/api/followup-triggers/${id}`;
+  await api(url, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+}
+
+// Create an ask / commitment / trigger against an org (or person) — audit §6.4.
+async function addObligation(kind, orgId, extra = {}) {
+  let body;
+  if (kind === "trigger") {
+    const vals = await formModal({ title: "New trigger (watch for…)", submitLabel: "Add", fields: [
+      { key: "condition_text", label: "When (condition)", type: "text", value: "" },
+      { key: "action_text", label: "Then (action)", type: "text", value: "" },
+    ] });
+    if (!vals || !vals.condition_text) return;
+    body = { condition_text: vals.condition_text, action_text: vals.action_text, organization_id: orgId, ...extra };
+    await api("/api/followup-triggers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  } else {
+    const fields = [{ key: "text", label: kind === "ask" ? "Ask" : "Commitment", type: "text", value: "" }];
+    if (kind === "commitment") fields.push({ key: "due_date", label: "Due date", type: "date", value: "" });
+    const vals = await formModal({ title: kind === "ask" ? "New ask" : "New commitment", submitLabel: "Add", fields });
+    if (!vals || !vals.text) return;
+    body = { text: vals.text, organization_id: orgId, due_date: vals.due_date, ...extra };
+    await api(kind === "ask" ? "/api/asks" : "/api/commitments", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  }
+  toastSuccess("Added.");
+  if (orgId && state.selectedOrgId === orgId) selectOrg(orgId, { skipToggle: true });
+}
+
 async function refreshMeetingsNow() {
   const qs = meetingsFilters();
   const data = await api("/api/meetings?" + qs);
@@ -3335,46 +3444,24 @@ async function loadFacets() {
 async function loadPeopleCache() {
   try { state.people = await api("/api/people") || []; } catch { state.people = []; }
 }
-// Fill a <datalist> with person names (value = name) for autosuggest.
-function fillPersonDatalist(id) {
-  const dl = $("#" + id);
-  if (!dl) return;
-  dl.innerHTML = state.people.map((p) => `<option value="${escapeHtml(p.name)}"></option>`).join("");
-}
-// Resolve a typed person name back to a contact id (exact, case-insensitive). null if no match.
-function resolvePersonId(name) {
-  const n = (name || "").trim().toLowerCase();
-  if (!n) return null;
-  const hit = state.people.find((p) => (p.name || "").trim().toLowerCase() === n);
-  return hit ? hit.id : null;
-}
-// Resolve a typed person name to a contact id, creating a new contact if none matches.
-async function ensurePersonId(name) {
-  const n = (name || "").trim();
-  if (!n) return null;
-  const existing = resolvePersonId(n);
-  if (existing) return existing;
-  const res = await api("/api/contacts", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: n }),
-  });
-  await loadPeopleCache();
-  return res.id;
-}
+// Person/org selection now happens through entityPicker (ui.js), which creates
+// contacts only via an explicit "+ Create" row — no silent create on typo (audit M4).
 
 function renderBillsTable(bills) {
   const tbody = $("#bills-body");
   if (!bills.length) {
-    tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:30px;">No bills referenced yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:30px;">No bills referenced yet.</td></tr>`;
     return;
   }
   tbody.innerHTML = bills.map((b) => {
     const meetingLinks = (b.meetings || []).map((m) =>
       `<button class="bill-meeting-link" data-meeting-id="${escapeHtml(m.meeting_id)}">${escapeHtml(m.topic || m.date || "Meeting")}</button>`
     ).join(" ");
+    const orgs = (b.organizations || []).map((o) => escapeHtml(o)).join(", ");
     return `<tr>
       <td><strong>${escapeHtml(b.bill_type)}${escapeHtml(b.bill_number)}</strong></td>
       <td class="bill-meetings-cell">${meetingLinks}</td>
+      <td>${orgs || "—"}</td>
       <td>${escapeHtml(b.last_seen || "—")}</td>
     </tr>`;
   }).join("");
@@ -4044,6 +4131,43 @@ async function openBillDrawer(billId, opts) {
   }
   if (force) refreshTrackedBills();
   renderBillDrawer(el, data);
+  // "In your world": meetings/orgs/asks that raised this bill (best-effort).
+  try {
+    const ctx = await api(`/api/tracked-bills/${encodeURIComponent(billId)}/context`);
+    renderBillContext(ctx);
+  } catch (_) { /* leave the section on its loading state */ }
+}
+
+function renderBillContext(ctx) {
+  const sec = $("#bill-context");
+  if (!sec) return;
+  const meetings = ctx.meetings || [];
+  const asks = ctx.asks || [];
+  const orgs = ctx.organizations || [];
+  if (!meetings.length && !asks.length) {
+    sec.innerHTML = `<h2>In your world</h2>${emptyState("No meetings have raised this bill yet.")}`;
+    return;
+  }
+  const mHtml = meetings.map((m) =>
+    `<button class="bill-context-link" data-meeting-id="${escapeHtml(m.id)}">${escapeHtml(m.topic || m.date || "Meeting")}${m.org_name ? ` · ${escapeHtml(m.org_name)}` : ""}</button>`
+  ).join(" ");
+  const aHtml = asks.map((a) =>
+    `<div class="bill-context-ask"><span class="entity-text">${escapeHtml(a.text)}</span>` +
+    `${a.contact_name ? `<span class="chip">${escapeHtml(a.contact_name)}</span>` : ""}` +
+    `<span class="entity-status status-${escapeHtml(a.status)}">${escapeHtml(String(a.status).replace(/_/g, " "))}</span></div>`
+  ).join("");
+  sec.innerHTML = `<h2>In your world</h2>` +
+    (orgs.length ? `<div class="bill-context-orgs">${orgs.map((o) => `<span class="chip">${escapeHtml(o)}</span>`).join(" ")}</div>` : "") +
+    (mHtml ? `<div class="bill-context-block"><div class="drawer-section-label">Raised in</div><div class="bill-context-meetings">${mHtml}</div></div>` : "") +
+    (aHtml ? `<div class="bill-context-block"><div class="drawer-section-label">Asks</div>${aHtml}</div>` : "");
+  sec.querySelectorAll(".bill-context-link").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $("#bill-drawer-backdrop")?.classList.remove("visible");
+      $("#bill-drawer-backdrop")?.classList.add("hidden");
+      switchTab("groups");
+      selectMeeting(btn.dataset.meetingId);
+    });
+  });
 }
 
 function renderBillDrawer(el, data) {
@@ -4105,6 +4229,7 @@ function renderBillDrawer(el, data) {
       <h2>Latest action</h2>
       <div class="bill-latest-action">${escapeHtml(b.latest_action)}${b.latest_action_date ? ` <span class="muted">— ${escapeHtml(fmtDate(b.latest_action_date))}</span>` : ""}</div>
     </section>` : ""}
+    <section class="bill-section" id="bill-context"><h2>In your world</h2><div class="detail-empty-inline">Loading…</div></section>
     ${d.summary ? `<section class="bill-section"><h2>Summary</h2><div class="bill-summary">${escapeHtml(d.summary).replace(/&lt;[^&]*&gt;/g, "")}</div></section>` : ""}
     <section class="bill-section"><h2>Action timeline</h2>${timeline}</section>
     <section class="bill-section"><h2>Cosponsors</h2>${cosList}</section>
@@ -4136,7 +4261,7 @@ function openSnoozePopup(task) {
   _snoozeTask = task;
   const popup = $("#snooze-popup");
   const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowISO = tomorrow.toISOString().slice(0, 10);
+  const tomorrowISO = localDateStr(tomorrow);
   const inp = $("#snooze-date-input");
   inp.min = tomorrowISO;
   inp.value = tomorrowISO;
@@ -4269,7 +4394,7 @@ async function openDailyPlan() {
     [...(todayData.tasks || []), ...(overdueData.tasks || [])].forEach((t) => {
       if (!seen.has(t.id)) { seen.add(t.id); tasks.push(t); }
     });
-    state.dailyPlanTasks = tasks;
+    state.dailyPlanTasks = _applySavedPlanOrder(tasks);
     if ($("#daily-plan-desc")) {
       $("#daily-plan-desc").textContent = tasks.length
         ? `${tasks.length} task${tasks.length === 1 ? "" : "s"} to tackle today.`
@@ -4284,7 +4409,24 @@ async function openDailyPlan() {
 
 function closeDailyPlanModal() {
   $("#daily-plan-backdrop").classList.add("hidden");
-  localStorage.setItem("last_plan_date", new Date().toISOString().slice(0, 10));
+  localStorage.setItem("last_plan_date", localToday());
+}
+
+// Persist the day's plan order so it survives reloads and drives focus mode (Q2: invest).
+function _applySavedPlanOrder(tasks) {
+  try {
+    const saved = JSON.parse(localStorage.getItem("jos_daily_plan") || "null");
+    if (!saved || saved.date !== localToday() || !Array.isArray(saved.order)) return tasks;
+    const pos = new Map(saved.order.map((id, i) => [id, i]));
+    return tasks.slice().sort((a, b) =>
+      (pos.has(a.id) ? pos.get(a.id) : 1e9) - (pos.has(b.id) ? pos.get(b.id) : 1e9));
+  } catch { return tasks; }
+}
+function _persistDailyPlan() {
+  try {
+    localStorage.setItem("jos_daily_plan",
+      JSON.stringify({ date: localToday(), order: state.dailyPlanTasks.map((t) => t.id) }));
+  } catch (_) { /* localStorage unavailable */ }
 }
 
 function _renderDailyPlanModal() {
@@ -4486,6 +4628,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  // Smart-view chips (Today / Upcoming / Waiting / Commitments / Neglected — M7).
+  $("#smart-view-chips")?.addEventListener("click", (e) => {
+    const chip = e.target.closest(".smart-chip");
+    if (!chip) return;
+    state.smartView = chip.dataset.smart || "";
+    $$("#smart-view-chips .smart-chip").forEach((c) => c.classList.toggle("active", c === chip));
+    refreshTasks();
+  });
+
   // Tasks filters
   ["t-type", "t-group", "t-overdue", "t-priority", "t-snoozed"].forEach((id) =>
     $("#" + id)?.addEventListener("change", () => { refreshTasks(); updateTaskFilterToggleState(); }));
@@ -4496,6 +4647,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if ($("#t-priority")) $("#t-priority").value = "";
     if ($("#t-snoozed")) $("#t-snoozed").checked = false;
     $("#q").value = "";
+    state.deadlineFilter = "";
     refreshTasks();
     updateTaskFilterToggleState();
   });
@@ -4624,12 +4776,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (file) uploadICS(file);
   });
 
-  // Deadline strip
+  // Deadline strip: set a real deadline filter (not the search box), then show Tasks.
   $("#deadlines-strip").addEventListener("click", (e) => {
     const day = e.target.closest(".deadline-day");
     if (!day) return;
+    state.deadlineFilter = day.dataset.date;
     switchTab("tasks");
-    $("#q").value = day.dataset.date;
     refreshTasks();
   });
 
@@ -4767,6 +4919,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#daily-plan-skip").addEventListener("click", closeDailyPlanModal);
   $("#daily-plan-go").addEventListener("click", () => {
     state.dailyPlanOrder = state.dailyPlanTasks.map((t) => t.id);
+    _persistDailyPlan();
     closeDailyPlanModal();
     openFocusMode(state.dailyPlanTasks);
   });
@@ -4780,10 +4933,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (upBtn) {
       const i = parseInt(upBtn.dataset.dpUp, 10);
       [state.dailyPlanTasks[i - 1], state.dailyPlanTasks[i]] = [state.dailyPlanTasks[i], state.dailyPlanTasks[i - 1]];
+      _persistDailyPlan();
       _renderDailyPlanModal();
     } else if (downBtn) {
       const i = parseInt(downBtn.dataset.dpDown, 10);
       [state.dailyPlanTasks[i], state.dailyPlanTasks[i + 1]] = [state.dailyPlanTasks[i + 1], state.dailyPlanTasks[i]];
+      _persistDailyPlan();
       _renderDailyPlanModal();
     } else if (deferBtn) {
       const i = parseInt(deferBtn.dataset.dpDefer, 10);
@@ -4850,7 +5005,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       closeBlockerModal();
       await refreshTasks();
     } catch (err) {
-      alert("Could not add dependency: " + err.message);
+      toastError("Could not add dependency: " + err.message);
     }
   });
 
@@ -5013,17 +5168,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.target.value) _loadTodayCallouts(e.target.value);
   });
   $("#today-callouts-prev")?.addEventListener("click", () => {
-    const d = new Date((_todayCalloutsDate || new Date().toISOString().slice(0, 10)) + "T12:00:00");
+    const d = new Date((_todayCalloutsDate || localToday()) + "T12:00:00");
     d.setDate(d.getDate() - 1);
     _loadTodayCallouts(d.toISOString().slice(0, 10));
   });
   $("#today-callouts-next")?.addEventListener("click", () => {
-    const d = new Date((_todayCalloutsDate || new Date().toISOString().slice(0, 10)) + "T12:00:00");
+    const d = new Date((_todayCalloutsDate || localToday()) + "T12:00:00");
     d.setDate(d.getDate() + 1);
     _loadTodayCallouts(d.toISOString().slice(0, 10));
   });
   $("#today-callouts-today-btn")?.addEventListener("click", () => {
-    _loadTodayCallouts(new Date().toISOString().slice(0, 10));
+    _loadTodayCallouts(localToday());
   });
 
   // Phase 0 type picker
