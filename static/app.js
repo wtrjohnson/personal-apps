@@ -2283,7 +2283,10 @@ async function renderPersonInto(container, contactId, opts = {}) {
     content.innerHTML = `
       <div class="org-detail-header">
         <h2>${escapeHtml(p.name)}</h2>
-        <button class="detail-delete-btn" id="person-delete" title="Delete contact">Delete</button>
+        <div class="org-detail-header-actions">
+          <button class="linkish" id="person-merge" title="Merge this contact into another">Merge…</button>
+          <button class="detail-delete-btn" id="person-delete" title="Delete contact">Delete</button>
+        </div>
       </div>
       <div class="org-detail-section">
         <div class="drawer-section-label">Organizations</div>
@@ -2324,6 +2327,20 @@ async function renderPersonInto(container, contactId, opts = {}) {
         $("#groups-panel-orgs")?.classList.remove("hidden");
         selectOrg(chip.dataset.orgId, { skipToggle: true });
       });
+    });
+    // Merge this contact into another (repoints all history to the winner).
+    $("#person-merge")?.addEventListener("click", async () => {
+      const winner = await pickEntityModal({ title: `Merge "${p.name}" into…`, type: "person", submitLabel: "Merge" });
+      if (!winner || !winner.id) return;
+      if (winner.id === contactId) { toastError("Pick a different contact."); return; }
+      try {
+        await api(`/api/contacts/${contactId}/merge`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ into_id: winner.id }),
+        });
+        toastSuccess(`Merged into ${winner.name}.`);
+        if (typeof loadGroups === "function") loadGroups();
+      } catch (e) { toastError(e.message || "Merge failed"); }
     });
     // + org → add-organization form, link, refresh
     $("#person-add-org")?.addEventListener("click", async () => {

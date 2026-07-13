@@ -615,6 +615,19 @@ def init_db() -> None:
                 CREATE INDEX IF NOT EXISTS bill_sched_typenum ON bill_schedule_events (congress, bill_type, bill_number);
                 CREATE INDEX IF NOT EXISTS bill_sched_date ON bill_schedule_events (event_date);
             """)
+            # Unique email index (audit H5). Best-effort: if duplicate emails still exist,
+            # it can't be created yet — merge the dupes (POST /api/contacts/<id>/merge),
+            # then re-run migrate. A savepoint keeps the rest of the migration intact.
+            cur.execute("SAVEPOINT email_uniq")
+            try:
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS contacts_email_unique "
+                    "ON contacts (lower(email)) WHERE email <> ''"
+                )
+                cur.execute("RELEASE SAVEPOINT email_uniq")
+            except Exception as _e:
+                cur.execute("ROLLBACK TO SAVEPOINT email_uniq")
+                print(f"[migrate] contacts_email_unique skipped (merge duplicate emails first): {_e}")
 
 
 if DATABASE_URL and os.environ.get("JOS_SKIP_DB_INIT") != "1":
@@ -1003,6 +1016,12 @@ def _org_for_name(cur, name: Optional[str]) -> Optional[str]:
     name = (name or "").strip()
     if not name or name == "intake":
         return None
+    # Resolve an existing org by name (case-insensitive) before minting a new slug, so
+    # renaming an org doesn't fork its history under a fresh slug (audit H7).
+    cur.execute("SELECT id FROM organizations WHERE lower(name) = lower(%s) LIMIT 1", (name,))
+    row = cur.fetchone()
+    if row:
+        return row["id"]
     oid = _org_slug(name)
     cur.execute("""
         INSERT INTO organizations (id, name, created_at, updated_at)
@@ -1036,12 +1055,20 @@ def _upsert_attendee_contacts(cur, mid: str, attendees_str: Optional[str],
         # (e.g. "Large meeting (12 attendees)") so it never becomes a junk contact.
         if re.match(r"^Large meeting \(\d+ attendees\)$", name):
             continue
-        cid = _contact_name_key(name)
-        cur.execute("""
-            INSERT INTO contacts (id, name, organization_id, updated_at)
-            VALUES (%s, %s, %s, NOW())
-            ON CONFLICT (id) DO NOTHING
-        """, (cid, name, org_id))
+        # Prefer an existing contact matched by name (e.g. a uuid contact from a card
+        # scan) so attendee saves don't fork a hash-id duplicate (audit H5). Fall back to
+        # the deterministic name-hash id, which keeps re-saving a meeting idempotent.
+        cur.execute("SELECT id FROM contacts WHERE lower(name) = lower(%s) LIMIT 1", (name,))
+        row = cur.fetchone()
+        if row:
+            cid = row["id"]
+        else:
+            cid = _contact_name_key(name)
+            cur.execute("""
+                INSERT INTO contacts (id, name, organization_id, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (id) DO NOTHING
+            """, (cid, name, org_id))
         cur.execute("""
             INSERT INTO meeting_contacts (meeting_id, contact_id)
             VALUES (%s, %s) ON CONFLICT DO NOTHING
@@ -1990,20 +2017,100 @@ def api_contacts_upsert():
     card_image = data.get("card_image") or None
     if not name:
         return jsonify({"ok": False, "error": "name required"}), 400
-    key = email if email else (name + company).lower()
-    cid = hashlib.sha1(key.encode()).hexdigest()[:16]
+    cid = (data.get("id") or "").strip()
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Resolve identity by email (case-insensitive), then exact name+company, else
+            # mint a fresh uuid — never derive the id from content (audit H5). This stops a
+            # card scan from silently merging into an unrelated contact that shares a hash.
+            if not cid and email:
+                cur.execute("SELECT id FROM contacts WHERE lower(email) = %s LIMIT 1", (email,))
+                row = cur.fetchone()
+                if row:
+                    cid = row["id"]
+            if not cid:
+                cur.execute(
+                    "SELECT id FROM contacts WHERE lower(name)=lower(%s) "
+                    "AND lower(COALESCE(company,''))=lower(%s) LIMIT 1",
+                    (name, company),
+                )
+                row = cur.fetchone()
+                if row:
+                    cid = row["id"]
+            if not cid:
+                cid = uuid.uuid4().hex[:16]
             cur.execute("""
                 INSERT INTO contacts (id, name, company, title, email, phone, notes, card_image, updated_at)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                 ON CONFLICT (id) DO UPDATE SET
-                    name=EXCLUDED.name, company=EXCLUDED.company, title=EXCLUDED.title,
-                    email=EXCLUDED.email, phone=EXCLUDED.phone, notes=EXCLUDED.notes,
+                    name=EXCLUDED.name,
+                    company=COALESCE(NULLIF(EXCLUDED.company,''), contacts.company),
+                    title=COALESCE(NULLIF(EXCLUDED.title,''), contacts.title),
+                    email=COALESCE(NULLIF(EXCLUDED.email,''), contacts.email),
+                    phone=COALESCE(NULLIF(EXCLUDED.phone,''), contacts.phone),
+                    notes=COALESCE(NULLIF(EXCLUDED.notes,''), contacts.notes),
                     card_image=COALESCE(EXCLUDED.card_image, contacts.card_image),
                     updated_at=NOW()
             """, (cid, name, company, title, email, phone, notes, card_image))
     return jsonify({"ok": True, "id": cid, "name": name})
+
+
+@app.route("/api/contacts/<contact_id>/merge", methods=["POST"])
+def api_contact_merge(contact_id):
+    """Merge `contact_id` (loser) into `into_id` (winner): repoint every reference and
+    keep the richest field values, in one transaction (audit H5b)."""
+    data = request.get_json(force=True, silent=True) or {}
+    into_id = (data.get("into_id") or "").strip()
+    if not into_id or into_id == contact_id:
+        return fail("into_id required and must differ from contact_id", 400)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM contacts WHERE id=%s", (contact_id,))
+            loser = cur.fetchone()
+            cur.execute("SELECT id FROM contacts WHERE id=%s", (into_id,))
+            winner = cur.fetchone()
+            if not loser or not winner:
+                return fail("contact not found", 404)
+            # Many-to-many tables: move rows that don't already exist on the winner, drop the rest.
+            cur.execute(
+                "UPDATE meeting_contacts mc SET contact_id=%s WHERE contact_id=%s AND NOT EXISTS "
+                "(SELECT 1 FROM meeting_contacts x WHERE x.meeting_id=mc.meeting_id AND x.contact_id=%s)",
+                (into_id, contact_id, into_id))
+            cur.execute("DELETE FROM meeting_contacts WHERE contact_id=%s", (contact_id,))
+            cur.execute(
+                "UPDATE contact_organizations co SET contact_id=%s WHERE contact_id=%s AND NOT EXISTS "
+                "(SELECT 1 FROM contact_organizations x WHERE x.organization_id=co.organization_id AND x.contact_id=%s)",
+                (into_id, contact_id, into_id))
+            cur.execute("DELETE FROM contact_organizations WHERE contact_id=%s", (contact_id,))
+            # Simple FK repoints.
+            for tbl in ("tasks", "asks", "commitments", "followup_triggers"):
+                cur.execute(f"UPDATE {tbl} SET contact_id=%s WHERE contact_id=%s", (into_id, contact_id))
+            cur.execute(
+                "UPDATE entity_notes SET entity_id=%s WHERE entity_type='contact' AND entity_id=%s",
+                (into_id, contact_id))
+            cur.execute(
+                "UPDATE bill_match_notifications bmn SET entity_id=%s WHERE entity_type='contact' "
+                "AND entity_id=%s AND NOT EXISTS (SELECT 1 FROM bill_match_notifications x "
+                "WHERE x.flag_id=bmn.flag_id AND x.entity_type='contact' AND x.entity_id=%s)",
+                (into_id, contact_id, into_id))
+            cur.execute(
+                "DELETE FROM bill_match_notifications WHERE entity_type='contact' AND entity_id=%s",
+                (contact_id,))
+            # Keep the richest field values on the winner, then delete the loser.
+            cur.execute("""
+                UPDATE contacts SET
+                    company=COALESCE(NULLIF(company,''), %s),
+                    title=COALESCE(NULLIF(title,''), %s),
+                    email=COALESCE(NULLIF(email,''), %s),
+                    phone=COALESCE(NULLIF(phone,''), %s),
+                    notes=COALESCE(NULLIF(notes,''), %s),
+                    card_image=COALESCE(card_image, %s),
+                    updated_at=NOW()
+                WHERE id=%s
+            """, (loser["company"], loser["title"], loser["email"], loser["phone"],
+                  loser["notes"], loser["card_image"], into_id))
+            cur.execute("DELETE FROM contacts WHERE id=%s", (contact_id,))
+    return jsonify({"ok": True, "id": into_id})
 
 
 @app.route("/api/people/<contact_id>", methods=["PUT"])

@@ -280,6 +280,34 @@ function formModal({ title = "Edit", fields = [], submitLabel = "Save" } = {}) {
   });
 }
 
+/* pickEntityModal: choose a person/org via entityPicker in a modal. Resolves {id,name} or null. */
+function pickEntityModal({ title = "Choose", type = "person", allowCreate = false, orgList = null, submitLabel = "Select" } = {}) {
+  return new Promise((resolve) => {
+    const back = document.createElement("div");
+    back.className = "form-modal-backdrop";
+    back.innerHTML =
+      `<div class="form-modal" role="dialog" aria-modal="true">` +
+      `<div class="form-modal-title">${_uiEscape(title)}</div>` +
+      `<div class="form-modal-field"><div id="pick-entity-host"></div></div>` +
+      `<div class="form-modal-actions">` +
+      `<button class="form-modal-cancel" type="button">Cancel</button>` +
+      `<button class="form-modal-save" type="button">${_uiEscape(submitLabel)}</button>` +
+      `</div></div>`;
+    document.body.appendChild(back);
+    const picker = entityPicker(back.querySelector("#pick-entity-host"), { type, allowCreate, orgList });
+    const cleanup = (r) => { back.remove(); resolve(r); };
+    back.querySelector(".form-modal-cancel").addEventListener("click", () => cleanup(null));
+    back.addEventListener("mousedown", (e) => { if (e.target === back) cleanup(null); });
+    back.addEventListener("keydown", (e) => { if (e.key === "Escape") cleanup(null); });
+    back.querySelector(".form-modal-save").addEventListener("click", () => {
+      const id = picker.getId();
+      if (!id) { toastError("Pick a match from the list."); return; }
+      cleanup({ id, name: picker.getName() });
+    });
+    setTimeout(() => picker.input.focus(), 20);
+  });
+}
+
 /* errorState returns a DOM node with a working Retry button (never a hidden card). */
 function errorState(message, retryFn) {
   const el = document.createElement("div");

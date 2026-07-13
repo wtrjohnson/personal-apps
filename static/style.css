@@ -4329,3 +4329,5 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
   border: 1px solid var(--border-strong); background: var(--card); color: inherit;
 }
 .form-modal-save { background: var(--card-dark); color: var(--card); border-color: transparent; }
+
+.org-detail-header-actions { display: flex; align-items: center; gap: 10px; }
