@@ -21,6 +21,7 @@ const state = {
   dailyPlanTasks: [],
   dailyPlanOrder: [],
   deadlineFilter: "",  // exact ISO date set by clicking the Home deadlines strip
+  smartView: "",       // "" | today | upcoming | waiting | commitments | neglected
 };
 
 // ---------- Utilities ----------
@@ -69,6 +70,7 @@ function tasksFilters() {
   if ($("#t-snoozed")?.checked) p.set("snoozed", "1");
   const pr = $("#t-priority")?.value; if (pr) p.set("priority", pr);
   if (state.deadlineFilter) p.set("deadline", state.deadlineFilter);
+  if (state.smartView) p.set("smart_view", state.smartView);
   return p.toString();
 }
 
@@ -359,10 +361,11 @@ async function _refreshTodayCalloutsSummary() {
   try {
     const data = await api("/api/scan-items");
     const meetings = data.meetings || [];
-    const allItems = meetings.flatMap((m) => m.items || []);
+    // Inbox badge counts only UNACKNOWLEDGED items, so the card empties on review (M7).
+    const allItems = meetings.flatMap((m) => (m.items || []).filter((i) => !i.acknowledged));
     if (!allItems.length) {
-      summaryEl.textContent = "Nothing yet";
-      breakdownEl.innerHTML = `<span class="chip-mini">No meetings recorded today</span>`;
+      summaryEl.textContent = "Inbox clear ✓";
+      breakdownEl.innerHTML = `<span class="chip-mini">Nothing to review</span>`;
       return;
     }
     const counts = {};
@@ -2782,8 +2785,9 @@ function _renderTodayCallouts() {
         ? `<button class="scan-item-action" data-action="date" data-item-id="${item.id}" title="Set due date">${_SCAN_CALENDAR_SVG}</button>`
         : "";
       const doneCls = item.task_done ? " today-callouts-item-done" : "";
+      const ackCls = item.acknowledged ? " scan-item--acknowledged" : "";
       return `
-        <div class="scan-item scan-item--accepted${doneCls}" data-item-id="${item.id}">
+        <div class="scan-item scan-item--accepted${doneCls}${ackCls}" data-item-id="${item.id}">
           <div class="scan-item-icon scan-item-icon--${item.type}">${_SCAN_ICONS[item.type] || ""}</div>
           <div class="scan-item-body">
             ${typeControl}
@@ -2797,11 +2801,13 @@ function _renderTodayCallouts() {
         </div>`;
     }).join("");
     const dateLabel = m.date ? new Date(m.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
+    const allAcked = (m.items || []).length > 0 && (m.items || []).every((i) => i.acknowledged);
     return `
       <div class="today-callouts-meeting-block">
         <div class="today-callouts-meeting-header">
           <h3>${escapeHtml(m.topic || m.group || "Meeting")}</h3>
           <span class="meeting-meta">${escapeHtml(m.group || "")}${dateLabel ? " · " + escapeHtml(dateLabel) : ""}</span>
+          <button class="inbox-ack-btn${allAcked ? " done" : ""}" data-ack-meeting="${escapeHtml(m.meeting_id)}">${allAcked ? "Reviewed ✓" : "Looks right ✓"}</button>
         </div>
         ${itemsHtml}
       </div>`;
@@ -2811,6 +2817,16 @@ function _renderTodayCallouts() {
 
 function _wireTodayCalloutsHandlers() {
   const body = $("#today-callouts-body");
+  // "Looks right ✓" acknowledges a whole meeting's Inbox items (Phase 10).
+  body.querySelectorAll("[data-ack-meeting]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await api(`/api/scan-items/ack-meeting/${btn.dataset.ackMeeting}`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
+        await _loadTodayCallouts(_todayCalloutsDate);
+        _refreshTodayCalloutsSummary();
+      } catch (e) { toastError(e.message || "Couldn't acknowledge"); }
+    });
+  });
   body.querySelectorAll(".scan-item-text-input").forEach((inp) => {
     const original = inp.value;
     inp.addEventListener("change", async () => {
@@ -4574,6 +4590,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       const item = _searchResultItems[_searchActiveIdx] || _searchResultItems[0];
       if (item) { e.preventDefault(); navigateToSearchResult(item); }
     }
+  });
+
+  // Smart-view chips (Today / Upcoming / Waiting / Commitments / Neglected — M7).
+  $("#smart-view-chips")?.addEventListener("click", (e) => {
+    const chip = e.target.closest(".smart-chip");
+    if (!chip) return;
+    state.smartView = chip.dataset.smart || "";
+    $$("#smart-view-chips .smart-chip").forEach((c) => c.classList.toggle("active", c === chip));
+    refreshTasks();
   });
 
   // Tasks filters

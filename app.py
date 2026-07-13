@@ -352,8 +352,10 @@ def init_db() -> None:
                     text         TEXT NOT NULL,
                     task_id      TEXT REFERENCES tasks(id) ON DELETE SET NULL,
                     accepted     BOOLEAN NOT NULL DEFAULT TRUE,
+                    acknowledged_at TIMESTAMP,
                     created_at   TIMESTAMP DEFAULT NOW()
                 );
+                ALTER TABLE meeting_scan_items ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMP;
                 CREATE INDEX IF NOT EXISTS scan_items_meeting ON meeting_scan_items (meeting_id);
                 CREATE TABLE IF NOT EXISTS external_calendar_events (
                     id           SERIAL PRIMARY KEY,
@@ -3747,7 +3749,7 @@ def api_scan_items_for_day():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT si.id, si.meeting_id, si.callout_type, si.text,
-                       si.task_id, si.accepted,
+                       si.task_id, si.accepted, si.acknowledged_at,
                        to_char(si.created_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at_str,
                        m.topic AS meeting_topic, m.canonical_group AS meeting_group,
                        m.organization_id, m.file_date,
@@ -3779,6 +3781,7 @@ def api_scan_items_for_day():
             "text": r["text"],
             "task_id": r.get("task_id"),
             "accepted": r["accepted"],
+            "acknowledged": r.get("acknowledged_at") is not None,
             "task_done": r.get("task_done"),
             "task_deadline": r["task_deadline"].isoformat() if r.get("task_deadline") else None,
             "task_priority": r.get("task_priority"),
@@ -3787,6 +3790,41 @@ def api_scan_items_for_day():
         "date": target.isoformat(),
         "meetings": list(meetings_by_id.values()),
     })
+
+
+@app.route("/api/scan-items/<int:item_id>/ack", methods=["POST"])
+def api_scan_item_ack(item_id):
+    """Acknowledge a single Inbox item ("Looks right ✓") — audit Phase 10."""
+    data = request.get_json(force=True, silent=True) or {}
+    ack = data.get("acknowledged", True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE meeting_scan_items SET acknowledged_at = %s WHERE id = %s",
+                (datetime.now() if ack else None, item_id))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/scan-items/ack-meeting/<meeting_id>", methods=["POST"])
+def api_scan_items_ack_meeting(meeting_id):
+    """Acknowledge every Inbox item from one meeting at once."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE meeting_scan_items SET acknowledged_at = NOW() "
+                "WHERE meeting_id = %s AND acknowledged_at IS NULL",
+                (meeting_id,))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/scan-items/inbox-count")
+def api_scan_inbox_count():
+    """Count of unacknowledged Inbox items (drives the home badge)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM meeting_scan_items WHERE acknowledged_at IS NULL")
+            n = cur.fetchone()["n"]
+    return jsonify({"count": n})
 
 
 @app.route("/api/scan-items/<int:item_id>/update", methods=["POST"])

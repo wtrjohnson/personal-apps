@@ -4357,3 +4357,23 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
 }
 .bill-context-link:hover { background: var(--card-soft); }
 .bill-context-ask { display: flex; align-items: center; gap: 8px; padding: 5px 0; flex-wrap: wrap; }
+
+/* ---- Smart-view chips on Tasks (M7) ---- */
+.smart-view-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.smart-chip {
+  font: inherit; font-size: 13px; font-weight: 600; padding: 6px 14px;
+  border-radius: var(--r-pill); border: 1px solid var(--border-strong);
+  background: var(--card); color: var(--muted); cursor: pointer;
+}
+.smart-chip.active { background: var(--card-dark); color: var(--card); border-color: transparent; }
+.smart-chip:hover:not(.active) { background: var(--card-soft); color: inherit; }
+
+/* ---- Inbox acknowledgment (Phase 10) ---- */
+.inbox-ack-btn {
+  font: inherit; font-size: 12px; font-weight: 600; padding: 4px 12px;
+  border-radius: var(--r-pill); border: 1px solid var(--border-strong);
+  background: var(--card); color: var(--muted); cursor: pointer; margin-left: auto;
+}
+.inbox-ack-btn:hover { background: var(--card-soft); color: inherit; }
+.inbox-ack-btn.done { background: #14713a; color: #fff; border-color: transparent; }
+.scan-item--acknowledged { opacity: 0.5; }

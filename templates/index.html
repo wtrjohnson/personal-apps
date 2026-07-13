@@ -54,7 +54,7 @@
             </button>
             <button class="cta-pill ghost" id="hero-today-callouts" onclick="openTodayCalloutsModal()">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-              Today's callouts
+              Inbox
             </button>
             <button class="cta-pill ghost" id="hero-upload-ics">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
@@ -112,7 +112,7 @@
         </div>
 
         <div class="card card-today-callouts elevated" id="card-today-callouts">
-          <div class="card-title">Today's callouts</div>
+          <div class="card-title">Inbox</div>
           <div class="today-callouts-summary" id="today-callouts-summary">—</div>
           <div class="today-callouts-breakdown" id="today-callouts-breakdown"></div>
           <button class="cta-pill ghost" onclick="openTodayCalloutsModal()" style="margin-top: 12px;">Review now →</button>
@@ -121,6 +121,14 @@
 
       <!-- TASKS -->
       <section class="view" id="view-tasks">
+        <div class="smart-view-chips" id="smart-view-chips">
+          <button class="smart-chip active" data-smart="">All</button>
+          <button class="smart-chip" data-smart="today">Today</button>
+          <button class="smart-chip" data-smart="upcoming">Upcoming</button>
+          <button class="smart-chip" data-smart="waiting">Waiting</button>
+          <button class="smart-chip" data-smart="commitments">Commitments</button>
+          <button class="smart-chip" data-smart="neglected">Neglected</button>
+        </div>
         <div class="tasks-segmented" role="tablist">
           <button class="seg-btn active" data-seg="active">Active</button>
           <button class="seg-btn" data-seg="done">Done</button>
@@ -916,7 +924,7 @@
     <div class="modal modal-today-callouts" role="dialog" aria-modal="true">
       <div class="modal-header">
         <div class="modal-title-block">
-          <h2 id="today-callouts-title">Today's callouts</h2>
+          <h2 id="today-callouts-title">Inbox</h2>
           <div class="today-callouts-date-row">
             <button class="linkish" id="today-callouts-prev" title="Previous day">←</button>
             <input type="date" id="today-callouts-date" class="today-callouts-date-input">
