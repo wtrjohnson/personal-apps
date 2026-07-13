@@ -127,6 +127,24 @@ def _normalize_bill_number(s: Optional[str]) -> str:
     return re.sub(r"\D", "", (s or ""))
 
 
+# Inline bill token in free text (longer chamber+type forms first). Mirrors the client
+# _BILL_RE so an ask like "support H.R. 5" can be linked to a bill (audit H4 / Phase 9).
+_BILL_TOKEN_RE = re.compile(
+    r"\b(H\.?\s?J\.?\s?Res\.?|S\.?\s?J\.?\s?Res\.?|H\.?\s?Con\.?\s?Res\.?|S\.?\s?Con\.?\s?Res\.?"
+    r"|H\.?\s?Res\.?|S\.?\s?Res\.?|H\.?\s?R\.?|S\.?)\s*(\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_bill(text: Optional[str]) -> Optional[Tuple[str, str]]:
+    """Return (normalized_type, normalized_number) for the first bill token in text, else None."""
+    m = _BILL_TOKEN_RE.search(text or "")
+    if not m:
+        return None
+    bt, bn = _normalize_bill_type(m.group(1)), _normalize_bill_number(m.group(2))
+    return (bt, bn) if bt and bn else None
+
+
 def init_db() -> None:
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -1193,6 +1211,28 @@ def _intake_person_for(cur, item: dict, note_attendees: Optional[str],
              or _single_at_name(item.get("text"))
              or _single_attendee_name(note_attendees))
     return _ensure_contact_by_name(cur, pname, org_id, mid)
+
+
+def _bill_ref_for_text(cur, mid: str, text: str) -> Optional[int]:
+    """If a line names a bill, return the meeting's bill_reference id for it (creating one
+    if needed), so an ask can link to the bill (audit Phase 9). None if no bill token."""
+    det = _detect_bill(text)
+    if not det:
+        return None
+    bt, bn = det
+    cur.execute(
+        "SELECT id FROM bill_references WHERE meeting_id=%s "
+        "AND UPPER(REGEXP_REPLACE(bill_type,'[^A-Za-z]','','g'))=%s "
+        "AND REGEXP_REPLACE(bill_number,'[^0-9]','','g')=%s LIMIT 1",
+        (mid, bt, bn))
+    row = cur.fetchone()
+    if row:
+        return row["id"]
+    cur.execute(
+        "INSERT INTO bill_references (meeting_id, bill_type, bill_number, congress) "
+        "VALUES (%s,%s,%s,%s) RETURNING id",
+        (mid, bt, bn, _current_congress()))
+    return cur.fetchone()["id"]
 
 
 def _year_from_date(s: Optional[str]) -> Optional[int]:
@@ -3185,6 +3225,58 @@ def api_tracked_bill_detail(bill_id: str):
     if data is None:
         return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify({"ok": True, **data})
+
+
+@app.route("/api/tracked-bills/<bill_id>/context")
+def api_tracked_bill_context(bill_id: str):
+    """"In your world" for a bill (audit H4): meetings that referenced it, the orgs and
+    people from those meetings, linked asks, and the notification history — joined on the
+    normalized (congress, type, number) key."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT congress, bill_type, bill_number FROM tracked_bills WHERE id = %s", (bill_id,))
+            tb = cur.fetchone()
+            if not tb:
+                return fail("Not found", 404)
+            cong, bt, bn = tb["congress"], tb["bill_type"], tb["bill_number"]
+            key = ("br.congress = %s AND UPPER(REGEXP_REPLACE(br.bill_type,'[^A-Za-z]','','g')) = %s "
+                   "AND REGEXP_REPLACE(br.bill_number,'[^0-9]','','g') = %s")
+            params = (cong, bt, bn)
+            cur.execute(f"""
+                SELECT DISTINCT m.id, COALESCE(NULLIF(m.topic,''), m.filename) AS topic,
+                       to_char(m.file_date,'YYYY-MM-DD') AS date, o.name AS org_name, m.organization_id
+                FROM bill_references br
+                JOIN meetings m ON br.meeting_id = m.id
+                LEFT JOIN organizations o ON m.organization_id = o.id
+                WHERE {key}
+                ORDER BY date DESC NULLS LAST
+            """, params)
+            meetings = [dict(r) for r in cur.fetchall()]
+            cur.execute(f"""
+                SELECT a.id, a.text, a.status, a.contact_id, c.name AS contact_name,
+                       a.organization_id, o.name AS org_name
+                FROM asks a
+                JOIN bill_references br ON a.bill_ref_id = br.id
+                LEFT JOIN contacts c ON a.contact_id = c.id
+                LEFT JOIN organizations o ON a.organization_id = o.id
+                WHERE {key}
+                ORDER BY a.created_at DESC
+            """, params)
+            asks = [dict(r) for r in cur.fetchall()]
+            orgs = sorted({m["org_name"] for m in meetings if m["org_name"]},
+                          key=str.casefold)
+            cur.execute("""
+                SELECT bn.entity_type, bn.entity_id, to_char(bn.created_at,'YYYY-MM-DD') AS date
+                FROM bill_match_notifications bn
+                JOIN bill_match_flags f ON f.id = bn.flag_id
+                WHERE f.tracked_bill_id = %s
+                ORDER BY bn.created_at DESC
+            """, (bill_id,))
+            notifications = [dict(r) for r in cur.fetchall()]
+    return jsonify({
+        "ok": True, "meetings": meetings, "asks": asks,
+        "organizations": orgs, "notifications": notifications,
+    })
 
 
 def _refresh_bill_core(bill_id: str) -> bool:
@@ -5190,12 +5282,14 @@ def api_notes_intake():
                             continue
                         aid = _task_id(mid_out, "ask", text)
                         pid = _intake_person_for(cur, item, note_attendees, org_id_out, mid_out)
+                        bref = _bill_ref_for_text(cur, mid_out, text)
                         cur.execute("""
                             INSERT INTO asks
-                                (id, meeting_id, text, organization_id, contact_id, status, priority, source_excerpt)
-                            VALUES (%s, %s, %s, %s, %s, 'open', 'normal', %s)
+                                (id, meeting_id, text, organization_id, contact_id, bill_ref_id,
+                                 status, priority, source_excerpt)
+                            VALUES (%s, %s, %s, %s, %s, %s, 'open', 'normal', %s)
                             ON CONFLICT (id) DO NOTHING
-                        """, (aid, mid_out, text, org_id_out, pid, text))
+                        """, (aid, mid_out, text, org_id_out, pid, bref, text))
                         cur.execute("""
                             INSERT INTO meeting_scan_items
                                 (meeting_id, callout_type, text, task_id, accepted)

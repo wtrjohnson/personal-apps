@@ -4096,6 +4096,43 @@ async function openBillDrawer(billId, opts) {
   }
   if (force) refreshTrackedBills();
   renderBillDrawer(el, data);
+  // "In your world": meetings/orgs/asks that raised this bill (best-effort).
+  try {
+    const ctx = await api(`/api/tracked-bills/${encodeURIComponent(billId)}/context`);
+    renderBillContext(ctx);
+  } catch (_) { /* leave the section on its loading state */ }
+}
+
+function renderBillContext(ctx) {
+  const sec = $("#bill-context");
+  if (!sec) return;
+  const meetings = ctx.meetings || [];
+  const asks = ctx.asks || [];
+  const orgs = ctx.organizations || [];
+  if (!meetings.length && !asks.length) {
+    sec.innerHTML = `<h2>In your world</h2>${emptyState("No meetings have raised this bill yet.")}`;
+    return;
+  }
+  const mHtml = meetings.map((m) =>
+    `<button class="bill-context-link" data-meeting-id="${escapeHtml(m.id)}">${escapeHtml(m.topic || m.date || "Meeting")}${m.org_name ? ` · ${escapeHtml(m.org_name)}` : ""}</button>`
+  ).join(" ");
+  const aHtml = asks.map((a) =>
+    `<div class="bill-context-ask"><span class="entity-text">${escapeHtml(a.text)}</span>` +
+    `${a.contact_name ? `<span class="chip">${escapeHtml(a.contact_name)}</span>` : ""}` +
+    `<span class="entity-status status-${escapeHtml(a.status)}">${escapeHtml(String(a.status).replace(/_/g, " "))}</span></div>`
+  ).join("");
+  sec.innerHTML = `<h2>In your world</h2>` +
+    (orgs.length ? `<div class="bill-context-orgs">${orgs.map((o) => `<span class="chip">${escapeHtml(o)}</span>`).join(" ")}</div>` : "") +
+    (mHtml ? `<div class="bill-context-block"><div class="drawer-section-label">Raised in</div><div class="bill-context-meetings">${mHtml}</div></div>` : "") +
+    (aHtml ? `<div class="bill-context-block"><div class="drawer-section-label">Asks</div>${aHtml}</div>` : "");
+  sec.querySelectorAll(".bill-context-link").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $("#bill-drawer-backdrop")?.classList.remove("visible");
+      $("#bill-drawer-backdrop")?.classList.add("hidden");
+      switchTab("groups");
+      selectMeeting(btn.dataset.meetingId);
+    });
+  });
 }
 
 function renderBillDrawer(el, data) {
@@ -4157,6 +4194,7 @@ function renderBillDrawer(el, data) {
       <h2>Latest action</h2>
       <div class="bill-latest-action">${escapeHtml(b.latest_action)}${b.latest_action_date ? ` <span class="muted">— ${escapeHtml(fmtDate(b.latest_action_date))}</span>` : ""}</div>
     </section>` : ""}
+    <section class="bill-section" id="bill-context"><h2>In your world</h2><div class="detail-empty-inline">Loading…</div></section>
     ${d.summary ? `<section class="bill-section"><h2>Summary</h2><div class="bill-summary">${escapeHtml(d.summary).replace(/&lt;[^&]*&gt;/g, "")}</div></section>` : ""}
     <section class="bill-section"><h2>Action timeline</h2>${timeline}</section>
     <section class="bill-section"><h2>Cosponsors</h2>${cosList}</section>

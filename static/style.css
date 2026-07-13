@@ -4346,3 +4346,14 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
 }
 .rail-add-btn:hover { color: inherit; border-style: solid; background: var(--card-soft); }
 .callout-badge--trigger { background: #ede9fe; color: #5b21b6; }
+
+/* ---- Bill drawer "In your world" (Phase 9) ---- */
+.bill-context-orgs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.bill-context-block { margin-top: 10px; }
+.bill-context-meetings { display: flex; flex-wrap: wrap; gap: 6px; }
+.bill-context-link {
+  font: inherit; font-size: 13px; padding: 5px 12px; border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong); background: var(--card); color: inherit; cursor: pointer;
+}
+.bill-context-link:hover { background: var(--card-soft); }
+.bill-context-ask { display: flex; align-items: center; gap: 8px; padding: 5px 0; flex-wrap: wrap; }
