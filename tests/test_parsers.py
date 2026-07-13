@@ -109,6 +109,19 @@ def test_parse_ics_single_event():
 
 def test_parse_ics_garbage_returns_none():
     assert app.parse_ics_content(b"not an ics file") is None
+    assert app.parse_ics_events(b"not an ics file") == []
+
+
+def test_parse_ics_multi_vevent():
+    ics = (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\n"
+        "BEGIN:VEVENT\r\nUID:a@x\r\nSUMMARY:First\r\nDTSTART:20260715T140000Z\r\nEND:VEVENT\r\n"
+        "BEGIN:VEVENT\r\nUID:b@x\r\nSUMMARY:Second\r\nDTSTART:20260716T140000Z\r\nEND:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    ).encode()
+    events = app.parse_ics_events(ics)
+    assert [e["summary"] for e in events] == ["First", "Second"]  # neither dropped
+    assert app.parse_ics_content(ics)["summary"] == "First"  # wrapper returns the first
 
 
 # ---- callout grammar port (documents the client _extractCallouts spec) -----

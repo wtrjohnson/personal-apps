@@ -3257,13 +3257,9 @@ async function _intakeSaveNotes() {
           })
         ));
       }
-      // Mark the prepared calendar-event stub as complete
+      // The backend now writes notes into the prepared meeting itself and marks it
+      // complete (C1), so no separate status flip is needed — just refresh the card.
       if (preparedMeetingId) {
-        await fetch(`/api/meetings/${preparedMeetingId}/status`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "complete" }),
-        });
         if ($("#intake-prepared-meeting-id")) $("#intake-prepared-meeting-id").value = "";
         loadUpcomingMeetings();
       }

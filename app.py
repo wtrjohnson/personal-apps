@@ -5109,7 +5109,21 @@ def api_notes_intake():
     content = "---\n" + "\n".join(fm_parts) + "\n---\n\n" + body
     now = app_now()
     time_suffix = now.strftime("%H%M%S")
-    filename = f"{note_date} - {safe_group} [{time_suffix}].md"
+
+    # C1 fix: if the notes were started from a prepared calendar meeting, write into THAT
+    # row (reuse its filename so meeting id, calendar_event_id, dtstart, meeting_link are
+    # preserved) instead of minting a duplicate meeting.
+    prepared_meeting_id = (data.get("prepared_meeting_id") or "").strip()
+    prepared_filename = None
+    if prepared_meeting_id:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT filename, status FROM meetings WHERE id = %s", (prepared_meeting_id,))
+                _row = cur.fetchone()
+                if _row and _row["status"] in ("prepared", "in_progress"):
+                    prepared_filename = _row["filename"]
+
+    filename = prepared_filename or f"{note_date} - {safe_group} [{time_suffix}].md"
 
     try:
         summary = import_meeting_from_content(
@@ -5124,15 +5138,12 @@ def api_notes_intake():
         if mid_out:
             with get_db() as conn:
                 with conn.cursor() as cur:
-                    # Resolve or create organization for this meeting
-                    org_id_out: Optional[str] = None
-                    if note_group and note_group != "intake":
-                        org_id_out = _org_slug(note_group)
-                        cur.execute("""
-                            INSERT INTO organizations (id, name, created_at, updated_at)
-                            VALUES (%s, %s, NOW(), NOW())
-                            ON CONFLICT (id) DO UPDATE SET updated_at = NOW()
-                        """, (org_id_out, note_group))
+                    # Prepared calendar meeting becomes the finished record (C1).
+                    if prepared_filename:
+                        cur.execute("UPDATE meetings SET status='complete' WHERE id=%s", (mid_out,))
+                    # Resolve or create organization for this meeting (resolve-by-name, H7).
+                    org_id_out: Optional[str] = _org_for_name(cur, note_group)
+                    if org_id_out:
                         cur.execute("""
                             UPDATE meetings SET organization_id = %s WHERE id = %s
                         """, (org_id_out, mid_out))
@@ -5314,20 +5325,22 @@ _TEAMS_RE = re.compile(r'https://teams\.microsoft\.com/l/meetup-join/[^\s<>"\']+
 _ZOOM_RE = re.compile(r'https://[\w.-]*zoom\.us/j/[^\s<>"\']+')
 
 
-def parse_ics_content(raw_bytes: bytes) -> Optional[dict]:
-    """Parse raw ICS bytes into a normalized event dict. Returns None on failure."""
+def parse_ics_events(raw_bytes: bytes) -> List[dict]:
+    """Parse raw ICS bytes into a list of normalized event dicts (one per VEVENT).
+    Returns [] on failure (audit: multi-VEVENT ICS files must not drop events)."""
     try:
         from icalendar import Calendar
     except ImportError:
-        return None
+        return []
     try:
         cal = Calendar.from_ical(raw_bytes)
     except Exception:
-        return None
+        return []
 
     cal_method = cal.get('METHOD')
     method = str(cal_method).upper() if cal_method else None
 
+    events: List[dict] = []
     for component in cal.walk():
         if component.name != 'VEVENT':
             continue
@@ -5383,7 +5396,7 @@ def parse_ics_content(raw_bytes: bytes) -> Optional[dict]:
         if rid is not None:
             recurrence_id = _dt_iso('RECURRENCE-ID') or str(rid)
 
-        return {
+        events.append({
             'uid': uid,
             'sequence': int(component.get('SEQUENCE', 0) or 0),
             'method': method,
@@ -5399,8 +5412,14 @@ def parse_ics_content(raw_bytes: bytes) -> Optional[dict]:
             'recurrence_id': recurrence_id,
             'teams_url': _str('X-MICROSOFT-SKYPETEAMSMEETINGURL'),
             'zoom_url': _str('X-ZOOM-JOIN-URL'),
-        }
-    return None
+        })
+    return events
+
+
+def parse_ics_content(raw_bytes: bytes) -> Optional[dict]:
+    """Backward-compatible single-event parse: returns the first VEVENT or None."""
+    events = parse_ics_events(raw_bytes)
+    return events[0] if events else None
 
 
 def extract_meeting_link(event: dict) -> Optional[str]:
@@ -5434,7 +5453,9 @@ def _create_or_update_prepared_meeting(event: dict, ece_id: int) -> str:
 
     uid_hash = hashlib.sha1(f"{uid}:{recurrence_id}".encode()).hexdigest()[:8]
     safe_summary = re.sub(r'[^a-zA-Z0-9_-]', '-', summary[:30])
-    filename = f"{date_str} - {safe_summary} [cal-{uid_hash}].md"
+    # Identity from the UID only (no date), so a rescheduled invite updates the same stub
+    # instead of forking a new meeting. file_date still tracks the real date separately.
+    filename = f"{safe_summary} [cal-{uid_hash}].md"
     mid = hashlib.sha1(filename.encode()).hexdigest()[:16]
 
     _ATTENDEE_COLLAPSE_THRESHOLD = 8
@@ -5478,10 +5499,10 @@ def _create_or_update_prepared_meeting(event: dict, ece_id: int) -> str:
             elif existing['status'] == 'prepared':
                 cur.execute("""
                     UPDATE meetings SET
-                        topic = %s, attendees = %s, dtstart = %s,
+                        topic = %s, attendees = %s, dtstart = %s, file_date = %s,
                         meeting_link = %s, calendar_event_id = %s
                     WHERE id = %s
-                """, (summary, attendees_str, event.get('dtstart'), meeting_link, ece_id, mid))
+                """, (summary, attendees_str, event.get('dtstart'), file_date, meeting_link, ece_id, mid))
                 cur.execute(
                     "UPDATE external_calendar_events SET meeting_id = %s WHERE id = %s",
                     (mid, ece_id),
@@ -5490,11 +5511,23 @@ def _create_or_update_prepared_meeting(event: dict, ece_id: int) -> str:
 
 
 def _ingest_ics_bytes(raw_ics: bytes) -> dict:
-    """Parse ICS bytes and upsert ECE + prepared meeting. Returns result dict."""
-    event = parse_ics_content(raw_ics)
-    if not event:
+    """Parse ICS bytes and upsert every VEVENT (audit: multi-event files must not drop
+    events). Returns an aggregate result with per-event details."""
+    events = parse_ics_events(raw_ics)
+    if not events:
         return {"ok": False, "error": "Could not parse ICS content"}
+    results = [_ingest_ics_event(ev, raw_ics) for ev in events]
+    primary = next((r for r in results if r.get("meeting_id")), results[0])
+    return {
+        "ok": True, "count": len(results), "events": results,
+        "action": primary.get("action"), "meeting_id": primary.get("meeting_id"),
+        "ece_id": primary.get("ece_id"), "summary": primary.get("summary"),
+        "dtstart": primary.get("dtstart"),
+    }
 
+
+def _ingest_ics_event(event: dict, raw_ics: bytes) -> dict:
+    """Upsert one calendar event (ECE + prepared meeting). Returns a per-event result."""
     uid = event['uid']
     recurrence_id = event.get('recurrence_id') or None
     sequence = event.get('sequence', 0)
