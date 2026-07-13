@@ -630,6 +630,29 @@ if DATABASE_URL and os.environ.get("JOS_SKIP_DB_INIT") != "1":
 
 
 # --------------------------------------------------
+# ERROR ENVELOPE
+# --------------------------------------------------
+
+def fail(msg: str, code: int = 400):
+    """Canonical JSON error response: {"ok": false, "error": msg}."""
+    return jsonify({"ok": False, "error": msg}), code
+
+
+@app.errorhandler(Exception)
+def _handle_uncaught(e):
+    """Never let an API route return an opaque HTML 500. Routing errors (404/405) and
+    redirects are HTTPExceptions and pass through unchanged; everything else on an /api/
+    path becomes {"ok": false, "error": ...} so the client toast can show the real cause."""
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    app.logger.exception("Unhandled error on %s", request.path)
+    if request.path.startswith("/api/"):
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return ("Internal Server Error", 500)
+
+
+# --------------------------------------------------
 # AUTH
 # --------------------------------------------------
 

@@ -36,7 +36,14 @@ function escapeHtml(s) {
 }
 async function api(path, opts) {
   const r = await fetch(path, opts);
-  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  if (!r.ok) {
+    let msg = `${path} → ${r.status}`;
+    try {
+      const data = await r.clone().json();
+      if (data && data.error) msg = data.error;
+    } catch (_) { /* non-JSON error body; keep the status message */ }
+    throw new Error(msg);
+  }
   return r.json();
 }
 
@@ -79,7 +86,15 @@ function formatTodayLabel(d) {
 
 async function renderHome() {
   let s;
-  try { s = await api("/api/stats"); } catch (e) { console.error("stats load failed", e); return; }
+  try {
+    s = await api("/api/stats");
+  } catch (e) {
+    console.error("stats load failed", e);
+    const focusEl = $("#hero-focus");
+    if (focusEl) { focusEl.innerHTML = ""; focusEl.appendChild(errorState("Couldn't load your dashboard.", renderHome)); }
+    toastError(e.message);
+    return;
+  }
   state.stats = s;
 
   const now = new Date();
@@ -243,7 +258,10 @@ async function loadUpcomingMeetings() {
       });
     });
   } catch (e) {
-    card.style.display = "none";
+    // Don't silently hide the card on error — show a retry (audit M8).
+    card.style.display = "";
+    list.innerHTML = "";
+    list.appendChild(errorState("Couldn't load upcoming meetings.", loadUpcomingMeetings));
   }
 }
 
@@ -301,11 +319,11 @@ async function uploadICS(file) {
     } else if (data.action === "skipped") {
       if (btn) { btn.disabled = false; btn.textContent = orig; }
     } else {
-      alert(data.error || "Could not parse ICS file.");
+      toastError(data.error || "Could not parse ICS file.");
       if (btn) { btn.disabled = false; btn.textContent = orig; }
     }
   } catch (e) {
-    alert("Upload failed: " + e.message);
+    toastError("Upload failed: " + e.message);
     if (btn) { btn.disabled = false; btn.textContent = orig; }
   }
   // Reset file input so the same file can be re-uploaded if needed
@@ -634,41 +652,21 @@ async function deleteTask(task) {
 }
 
 // ---------- Undo toast ----------
-let _undoTimer = null;
-
+// Delegates to the shared toast() queue (ui.js) so completions stack instead of
+// clobbering each other's Undo (audit L4).
 function showUndoToast(task) {
-  clearTimeout(_undoTimer);
-  const container = $("#toast-container");
-  container.innerHTML = `
-    <div class="toast">
-      <span class="toast-msg">Marked complete.</span>
-      <button class="toast-undo" id="toast-undo-btn">Undo</button>
-      <button class="toast-dismiss" id="toast-dismiss-btn">×</button>
-    </div>
-  `;
-  container.classList.add("visible");
-
-  $("#toast-undo-btn").addEventListener("click", async () => {
-    clearTimeout(_undoTimer);
-    container.classList.remove("visible");
-    await api("/api/tasks/toggle", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: task.id,
-        done: false,
-      }),
-    });
-    await refreshTasks();
-    if (state.tab === "home") renderHome();
+  toast("Marked complete.", {
+    type: "success",
+    undo: async () => {
+      await api("/api/tasks/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: task.id, done: false }),
+      });
+      await refreshTasks();
+      if (state.tab === "home") renderHome();
+    },
   });
-
-  $("#toast-dismiss-btn").addEventListener("click", () => {
-    clearTimeout(_undoTimer);
-    container.classList.remove("visible");
-  });
-
-  _undoTimer = setTimeout(() => container.classList.remove("visible"), 6000);
 }
 
 // ---------- Context menu ----------
@@ -759,23 +757,10 @@ function openEditModal(task) {
     _updateRecurDetail("edit-m", task.recurrence_rule || null);
   }
 
-  // Populate year select and deadline
-  const yearSel = $("#edit-m-dl-year");
-  if (yearSel) {
-    const thisYear = new Date().getFullYear();
-    yearSel.innerHTML = `<option value="">Year</option>` +
-      [thisYear - 1, thisYear, thisYear + 1, thisYear + 2]
-        .map((y) => `<option value="${y}">${y}</option>`).join("");
-  }
-  if (task.deadline && task.deadline.match(/^\d{4}-\d{2}-\d{2}$/)) {
-    const [yy, mo, dd] = task.deadline.split("-");
-    if ($("#edit-m-dl-month")) $("#edit-m-dl-month").value = mo;
-    if ($("#edit-m-dl-day"))   $("#edit-m-dl-day").value = dd;
-    if ($("#edit-m-dl-year"))  $("#edit-m-dl-year").value = yy;
-  } else {
-    ["edit-m-dl-month", "edit-m-dl-day", "edit-m-dl-year"].forEach((id) => {
-      const el = $("#" + id); if (el) el.value = "";
-    });
+  // Deadline: single native date input (dateField).
+  const dlEl = $("#edit-m-dl-date");
+  if (dlEl) {
+    dlEl.value = (task.deadline && /^\d{4}-\d{2}-\d{2}$/.test(task.deadline)) ? task.deadline : "";
   }
 
   $("#edit-modal-backdrop").classList.remove("hidden");
@@ -930,21 +915,16 @@ async function openDrawer(task) {
 }
 
 // ---------- Add-task modal ----------
+// Canonical date read/write over the single native input rendered by dateField().
 function getDeadlineValue(prefix = "m") {
-  const mo = $(`#${prefix}-dl-month`).value;
-  const dd = $(`#${prefix}-dl-day`).value;
-  const yy = $(`#${prefix}-dl-year`).value;
-  if (!mo || !dd || !yy) return "";
-  return `${yy}-${mo}-${dd}`;
+  const el = $(`#${prefix}-dl-date`);
+  const v = (el && el.value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "";
 }
 
 function setDeadlineSelects(date, prefix = "m") {
-  const mo = String(date.getMonth() + 1).padStart(2, "0");
-  const dd = String(date.getDate()).padStart(2, "0");
-  const yy = String(date.getFullYear());
-  $(`#${prefix}-dl-month`).value = mo;
-  $(`#${prefix}-dl-day`).value = dd;
-  $(`#${prefix}-dl-year`).value = yy;
+  const el = $(`#${prefix}-dl-date`);
+  if (el) el.value = typeof date === "string" ? date : localDateStr(date);
 }
 
 function _nextWeekday(targetDay) {
@@ -1061,26 +1041,7 @@ function parseNLTask(text) {
   return result;
 }
 
-function _nlMonthOptions(sel) {
-  const months = [["01","Jan"],["02","Feb"],["03","Mar"],["04","Apr"],["05","May"],["06","Jun"],["07","Jul"],["08","Aug"],["09","Sep"],["10","Oct"],["11","Nov"],["12","Dec"]];
-  return `<option value="">Month</option>` + months.map(([v, l]) => `<option value="${v}"${v === sel ? " selected" : ""}>${l}</option>`).join("");
-}
-function _nlDayOptions(sel) {
-  let o = `<option value="">Day</option>`;
-  for (let d = 1; d <= 31; d++) { const v = String(d).padStart(2, "0"); o += `<option value="${v}"${v === sel ? " selected" : ""}>${d}</option>`; }
-  return o;
-}
-function _nlYearOptions(sel) {
-  const ty = new Date().getFullYear();
-  return `<option value="">Year</option>` + [ty - 1, ty, ty + 1, ty + 2].map((y) => `<option value="${y}"${String(y) === sel ? " selected" : ""}>${y}</option>`).join("");
-}
-
 function _populateNLStep2(parsed) {
-  // Deadline parts (matches the edit modal's month/day/year selects)
-  let dlMo = "", dlDd = "", dlYy = "";
-  if (parsed.deadline && /^\d{4}-\d{2}-\d{2}$/.test(parsed.deadline)) {
-    [dlYy, dlMo, dlDd] = parsed.deadline.split("-");
-  }
   const allGroups = state.tasksGroupsInScope.concat(state.facets.groups).filter((v, i, a) => a.indexOf(v) === i);
   const groupOpts = allGroups.map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
   const contactVal = [parsed.email, parsed.phone, parsed.contact].filter(Boolean).join(", ");
@@ -1094,17 +1055,7 @@ function _populateNLStep2(parsed) {
     { uncertain: false, html: `<label>Person</label>
       <input id="nl-f-person" list="nl-f-person-list" value="" placeholder="Assign to a person" autocomplete="off">
       <datalist id="nl-f-person-list">${state.people.map((p) => `<option value="${escapeHtml(p.name)}"></option>`).join("")}</datalist>` },
-    { uncertain: false, html: `<label>Deadline</label>
-      <div class="deadline-selects">
-        <select id="nl-f-dl-month">${_nlMonthOptions(dlMo)}</select>
-        <select id="nl-f-dl-day">${_nlDayOptions(dlDd)}</select>
-        <select id="nl-f-dl-year">${_nlYearOptions(dlYy)}</select>
-      </div>
-      <div class="dl-quick-btns">
-        <button type="button" class="dl-quick-btn" data-quick="today" data-prefix="nl-f">Today</button>
-        <button type="button" class="dl-quick-btn" data-quick="this-week" data-prefix="nl-f">This week</button>
-        <button type="button" class="dl-quick-btn" data-quick="next-week" data-prefix="nl-f">Next week</button>
-      </div>` },
+    { uncertain: false, html: `<label>Deadline</label>${dateField("nl-f", parsed.deadline || "")}` },
     { uncertain: false, html: `<label>Phone / email</label>
       <input id="nl-f-contact" value="${escapeHtml(contactVal)}" placeholder="Phone number or email" autocomplete="off">` },
     { uncertain: false, html: `<label>Estimate (min)</label>
@@ -1485,7 +1436,7 @@ function _wireContactPicker(m) {
       body: JSON.stringify({ name }),
     });
     const data = await res.json();
-    if (!data.ok || !data.id) { alert(data.error || "Could not create contact"); return; }
+    if (!data.ok || !data.id) { toastError(data.error || "Could not create contact"); return; }
     await linkContact(data.id);
   };
 
@@ -1593,7 +1544,7 @@ async function _saveMeetingEdit() {
   const groupInput = $("#meeting-edit-group");
   const mid = groupInput.dataset.mid;
   const group = groupInput.value.trim();
-  if (!group) { alert("Organization is required"); return; }
+  if (!group) { toastError("Organization is required"); return; }
 
   const btn = $("#meeting-edit-save");
   btn.disabled = true;
@@ -1611,17 +1562,18 @@ async function _saveMeetingEdit() {
       }),
     });
     const data = await res.json();
-    if (!data.ok) { alert(data.error || "Save failed"); btn.disabled = false; return; }
+    if (!data.ok) { toastError(data.error || "Save failed"); btn.disabled = false; return; }
 
     // Close modal and refresh (clear group cache so datalist reflects new names)
     _meetingEditGroups = null;
     $("#meeting-edit-backdrop").classList.add("hidden");
     await refreshMeetings();
     selectMeeting(mid);
+    toastSuccess("Meeting saved.");
     btn.disabled = false;
     btn.textContent = "Save";
   } catch (e) {
-    alert("Save failed");
+    toastError(e.message || "Save failed");
     btn.disabled = false;
     btn.textContent = "Save";
   }
@@ -1638,13 +1590,13 @@ $("#detail").addEventListener("click", async (e) => {
     try {
       const res = await fetch(`/api/meetings/${mid}`, { method: "DELETE" });
       const data = await res.json();
-      if (!data.ok) { alert(data.error || "Delete failed"); deleteBtn.disabled = false; return; }
+      if (!data.ok) { toastError(data.error || "Delete failed"); deleteBtn.disabled = false; return; }
       state.selectedMeetingId = null;
       renderDetail(null);
       await refreshMeetings();
       await loadFacets();
     } catch {
-      alert("Delete failed");
+      toastError("Delete failed");
       deleteBtn.disabled = false;
     }
     return;
@@ -1981,7 +1933,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     // Edit / delete the organization itself
     $("#org-edit-save")?.addEventListener("click", async () => {
       const name = $("#org-edit-name").value.trim();
-      if (!name) { alert("Organization name is required."); return; }
+      if (!name) { toastError("Organization name is required."); return; }
       try {
         await api(`/api/organizations/${orgId}`, {
           method: "PUT", headers: { "Content-Type": "application/json" },
@@ -1989,7 +1941,8 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         });
         loadGroups();
         selectOrg(orgId, { skipToggle: true });
-      } catch { alert("Couldn't save organization."); }
+        toastSuccess("Organization saved.");
+      } catch (e) { toastError(e.message || "Couldn't save organization."); }
     });
     $("#org-delete")?.addEventListener("click", async () => {
       if (!confirm(`Delete ${org.name}? This permanently removes the organization.`)) return;
@@ -1997,7 +1950,7 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         await api(`/api/organizations/${orgId}`, { method: "DELETE" });
         selectOrg(null);
         loadGroups();
-      } catch { alert("Couldn't delete organization."); }
+      } catch { toastError("Couldn't delete organization."); }
     });
 
     // Reveal col-2 — its content is already populated.
@@ -2166,12 +2119,12 @@ function _wirePersonEditor() {
         set("#pe-name", r.name); set("#pe-company", r.company);
         set("#pe-title", r.title); set("#pe-email", r.email); set("#pe-phone", r.phone);
       } else {
-        alert(r.error || "Card scan failed — fill in manually");
+        toastError(r.error || "Card scan failed — fill in manually");
       }
       const img = $("#pe-card-img");
       if (img && _pePendingCard) { img.src = _pePendingCard; img.classList.remove("hidden"); }
     } catch {
-      alert("Card scan failed — fill in manually");
+      toastError("Card scan failed — fill in manually");
     } finally {
       scanBtn.disabled = false;
       scanBtn.textContent = "Scan business card";
@@ -2186,7 +2139,7 @@ function _wirePersonEditor() {
       phone: $("#pe-phone").value.trim(),
     };
     if (_pePendingCard) body.card_image = _pePendingCard;
-    if (!body.name) { alert("Name is required"); $("#pe-name").focus(); return; }
+    if (!body.name) { toastError("Name is required"); $("#pe-name").focus(); return; }
     try {
       let savedId = _currentPersonId;
       if (_currentPersonId) {
@@ -2205,7 +2158,7 @@ function _wirePersonEditor() {
       await loadGroups();
       if (savedId) { if (_personRefresh) _personRefresh(savedId); else selectPerson(savedId); }
     } catch {
-      alert("Save failed");
+      toastError("Save failed");
     }
   });
 }
@@ -2962,11 +2915,11 @@ async function scanCardImage(file) {
         }
         preview.classList.remove("hidden");
       } else {
-        alert(fields.error || "Card scan failed — fill in manually");
+        toastError(fields.error || "Card scan failed — fill in manually");
         preview.classList.remove("hidden");
       }
     } catch (err) {
-      alert("Card scan failed — fill in manually");
+      toastError("Card scan failed — fill in manually");
       preview.classList.remove("hidden");
     } finally {
       scanBtn.disabled = false;
@@ -2984,7 +2937,7 @@ async function scanCardImage(file) {
       email: $("#card-field-email").value.trim(),
       phone: $("#card-field-phone").value.trim(),
     };
-    if (!contact.name) { alert("Name is required"); return; }
+    if (!contact.name) { toastError("Name is required"); return; }
 
     const res = await fetch("/api/contacts", {
       method: "POST",
@@ -2992,7 +2945,7 @@ async function scanCardImage(file) {
       body: JSON.stringify(contact),
     });
     const data = await res.json();
-    if (!data.ok) { alert(data.error || "Save failed"); return; }
+    if (!data.ok) { toastError(data.error || "Save failed"); return; }
 
     _intakeLinkedContacts.push({ ...contact, id: data.id });
     _renderSavedCards();
@@ -3194,7 +3147,7 @@ async function _intakeSaveNotes() {
   const transcription = (_intakeScanResult?.text || ($("#intake-notes-text").value || "")).trim();
 
   if (!transcription && !_intakeScanResult) {
-    alert("Nothing to save — add some notes or tasks first.");
+    toastError("Nothing to save — add some notes or tasks first.");
     return;
   }
 
@@ -4887,7 +4840,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       closeBlockerModal();
       await refreshTasks();
     } catch (err) {
-      alert("Could not add dependency: " + err.message);
+      toastError("Could not add dependency: " + err.message);
     }
   });
 

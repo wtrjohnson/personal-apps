@@ -1076,6 +1076,8 @@ input, select, textarea { font-family: inherit; }
   transform: translateX(-50%) translateY(0);
   pointer-events: auto;
 }
+/* Queue: stack toasts vertically (audit L4). */
+.toast-container { display: flex; flex-direction: column; gap: 8px; align-items: center; }
 .toast {
   background: var(--card-dark);
   color: var(--card);
@@ -1087,7 +1089,18 @@ input, select, textarea { font-family: inherit; }
   box-shadow: var(--shadow-pop);
   white-space: nowrap;
   font-size: 13.5px;
+  animation: toast-in 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
+.toast.leaving { opacity: 0; transform: translateY(8px); transition: opacity 0.18s, transform 0.18s; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.toast-success { background: #14713a; }
+.toast-error   { background: #8a1c1c; white-space: normal; max-width: min(520px, calc(100vw - 32px)); }
+.toast-link {
+  background: none; border: 1px solid rgba(255,255,255,0.35); color: var(--card);
+  padding: 5px 14px; border-radius: var(--r-pill); cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600;
+}
+.toast-link:hover { background: rgba(255,255,255,0.15); }
 .toast-msg { flex: 1; }
 .toast-undo {
   background: none;
@@ -4243,3 +4256,28 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
   align-items: center; justify-content: center;
 }
 .active-filter-x:hover { background: rgba(0,0,0,0.14); }
+
+/* ---- Shared empty & error states (audit M8, §8) ---- */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 28px 16px; color: var(--muted); text-align: center;
+}
+.empty-state-icon { font-size: 26px; opacity: 0.7; }
+.empty-state-text { font-size: 14px; }
+.empty-state-action {
+  margin-top: 4px; padding: 7px 16px; border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong); background: var(--card);
+  color: inherit; font: inherit; font-weight: 600; cursor: pointer;
+}
+.empty-state-action:hover { background: var(--card-soft); }
+.error-state {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 24px 16px; text-align: center; color: var(--muted);
+}
+.error-state-msg { font-size: 14px; }
+.error-state-retry {
+  padding: 7px 18px; border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong); background: var(--card);
+  color: inherit; font: inherit; font-weight: 600; cursor: pointer;
+}
+.error-state-retry:hover { background: var(--card-soft); }
