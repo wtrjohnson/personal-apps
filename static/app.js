@@ -1184,11 +1184,17 @@ function renderMeetingsList() {
     if (m.open_action_items_count) badges.push(`<span class="badge actions" title="Open action items">${m.open_action_items_count}A</span>`);
     if (m.open_reminders_count) badges.push(`<span class="badge reminders" title="Open reminders">${m.open_reminders_count}R</span>`);
     const active = m.id === state.selectedMeetingId ? "active" : "";
+    const topic = (m.topic || "").trim();
+    const statusChip = (m.status && m.status !== "complete")
+      ? `<span class="meeting-status-chip">${escapeHtml(m.status)}</span>` : "";
+    const primary = topic
+      ? `${escapeHtml(topic)} <span class="meeting-row-sub">${escapeHtml(m.group)}</span>`
+      : escapeHtml(m.group);
     return `
       <li data-id="${m.id}" class="${active}">
         <span class="date">${escapeHtml(date)}</span>
-        <span class="group">${escapeHtml(m.group)}</span>
-        <span class="badges">${badges.join("")}</span>
+        <span class="group">${primary}</span>
+        <span class="badges">${statusChip}${badges.join("")}</span>
       </li>`;
   }).join("");
 }
@@ -3078,8 +3084,10 @@ function closeIntakeModal() {
   document.body.style.userSelect = "";
 }
 
-const _intakeTypePresets = {
-  "1on1":       { group: "Rebekah",   topic: "1:1",                attendees: "", skipPremeeting: true,  constituent: false },
+// Defaults carry no personal data (audit M11). Override per-user via localStorage key
+// "jos_intake_presets" (a JSON object keyed by type), e.g. {"1on1":{"group":"Rebekah"}}.
+const _intakeTypePresetsDefault = {
+  "1on1":       { group: "",          topic: "1:1",                attendees: "", skipPremeeting: true,  constituent: false },
   "staff":      { group: "Staff",     topic: "Staff Meeting",      attendees: "", skipPremeeting: true,  constituent: false },
   "legteam":    { group: "Leg. Team", topic: "Leg. Team Meeting",  attendees: "", skipPremeeting: true,  constituent: false },
   "constituent":{ group: "",          topic: "",                                  skipPremeeting: false, constituent: true  },
@@ -3087,9 +3095,20 @@ const _intakeTypePresets = {
   "other":      { group: "",          topic: "",                                  skipPremeeting: false, constituent: false },
 };
 
+function _loadIntakePresets() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("jos_intake_presets") || "{}");
+    const out = {};
+    for (const k of Object.keys(_intakeTypePresetsDefault)) {
+      out[k] = Object.assign({}, _intakeTypePresetsDefault[k], saved[k] || {});
+    }
+    return out;
+  } catch { return _intakeTypePresetsDefault; }
+}
+
 function _intakeSelectType(type) {
   _intakeMeetingType = type;
-  const preset = _intakeTypePresets[type] || {};
+  const preset = _loadIntakePresets()[type] || {};
   const modal = $(".modal-intake");
 
   // Pre-fill fields
@@ -4375,7 +4394,7 @@ async function openDailyPlan() {
     [...(todayData.tasks || []), ...(overdueData.tasks || [])].forEach((t) => {
       if (!seen.has(t.id)) { seen.add(t.id); tasks.push(t); }
     });
-    state.dailyPlanTasks = tasks;
+    state.dailyPlanTasks = _applySavedPlanOrder(tasks);
     if ($("#daily-plan-desc")) {
       $("#daily-plan-desc").textContent = tasks.length
         ? `${tasks.length} task${tasks.length === 1 ? "" : "s"} to tackle today.`
@@ -4391,6 +4410,23 @@ async function openDailyPlan() {
 function closeDailyPlanModal() {
   $("#daily-plan-backdrop").classList.add("hidden");
   localStorage.setItem("last_plan_date", localToday());
+}
+
+// Persist the day's plan order so it survives reloads and drives focus mode (Q2: invest).
+function _applySavedPlanOrder(tasks) {
+  try {
+    const saved = JSON.parse(localStorage.getItem("jos_daily_plan") || "null");
+    if (!saved || saved.date !== localToday() || !Array.isArray(saved.order)) return tasks;
+    const pos = new Map(saved.order.map((id, i) => [id, i]));
+    return tasks.slice().sort((a, b) =>
+      (pos.has(a.id) ? pos.get(a.id) : 1e9) - (pos.has(b.id) ? pos.get(b.id) : 1e9));
+  } catch { return tasks; }
+}
+function _persistDailyPlan() {
+  try {
+    localStorage.setItem("jos_daily_plan",
+      JSON.stringify({ date: localToday(), order: state.dailyPlanTasks.map((t) => t.id) }));
+  } catch (_) { /* localStorage unavailable */ }
 }
 
 function _renderDailyPlanModal() {
@@ -4883,6 +4919,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#daily-plan-skip").addEventListener("click", closeDailyPlanModal);
   $("#daily-plan-go").addEventListener("click", () => {
     state.dailyPlanOrder = state.dailyPlanTasks.map((t) => t.id);
+    _persistDailyPlan();
     closeDailyPlanModal();
     openFocusMode(state.dailyPlanTasks);
   });
@@ -4896,10 +4933,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (upBtn) {
       const i = parseInt(upBtn.dataset.dpUp, 10);
       [state.dailyPlanTasks[i - 1], state.dailyPlanTasks[i]] = [state.dailyPlanTasks[i], state.dailyPlanTasks[i - 1]];
+      _persistDailyPlan();
       _renderDailyPlanModal();
     } else if (downBtn) {
       const i = parseInt(downBtn.dataset.dpDown, 10);
       [state.dailyPlanTasks[i], state.dailyPlanTasks[i + 1]] = [state.dailyPlanTasks[i + 1], state.dailyPlanTasks[i]];
+      _persistDailyPlan();
       _renderDailyPlanModal();
     } else if (deferBtn) {
       const i = parseInt(deferBtn.dataset.dpDefer, 10);
