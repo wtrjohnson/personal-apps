@@ -669,11 +669,21 @@ input, select, textarea { font-family: inherit; }
    ========================================================= */
 #view-tasks {
   grid-template-columns: 1fr;
-  grid-template-rows: 1fr;
+  /* Rows: smart-view chips, the segmented control (hidden on desktop, shown on
+     phones via the max-width:600px block below), then the paper stack fills
+     whatever height remains. Pin each child to an explicit row (rather than
+     relying on grid auto-placement) since .tasks-segmented is display:none on
+     desktop — auto-placement skips non-participating items when assigning
+     tracks, which would silently shift #paper-stack into the wrong (auto,
+     zero-height) row. */
+  grid-template-rows: auto auto 1fr;
   display: none;
   height: 100%;
 }
 #view-tasks.active { display: grid; }
+#smart-view-chips { grid-row: 1; }
+.tasks-segmented { grid-row: 2; }
+#paper-stack { grid-row: 3; min-height: 0; }
 
 /* Segmented Active/Done/Backburner toggle is phone-only; desktop uses the
    stacked paper UI with peek edges. Shown via @media (max-width: 600px). */
