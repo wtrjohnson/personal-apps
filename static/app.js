@@ -731,25 +731,28 @@ document.addEventListener("keydown", (e) => {
 
 // ---------- Edit modal ----------
 let _editTask = null;
+let _editOrgPicker = null;
+let _editPersonPicker = null;
+
+// Distinct org names (from tasks-in-scope + facets) as entityPicker org rows.
+function orgPickerList() {
+  return state.tasksGroupsInScope.concat(state.facets.groups)
+    .filter((v, i, a) => v && a.indexOf(v) === i)
+    .map((n) => ({ id: n, name: n }));
+}
 
 function openEditModal(task) {
   _editTask = task;
   $("#edit-m-text").value = task.text;
   if ($("#edit-m-priority")) $("#edit-m-priority").value = task.priority || "normal";
 
-  // Populate group datalist
-  const list = $("#edit-m-group-list");
-  if (list) {
-    list.innerHTML = state.tasksGroupsInScope.concat(state.facets.groups)
-      .filter((v, i, a) => a.indexOf(v) === i)
-      .map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
-  }
-  if ($("#edit-m-group")) $("#edit-m-group").value = task.group || "";
-  // Populate person datalist + current value
-  fillPersonDatalist("edit-m-person-list");
-  if ($("#edit-m-person")) {
+  // Organization & person: canonical entity pickers (explicit create only).
+  const orgHost = $("#edit-m-group-picker");
+  if (orgHost) _editOrgPicker = entityPicker(orgHost, { type: "org", value: task.group || "", orgList: orgPickerList() });
+  const personHost = $("#edit-m-person-picker");
+  if (personHost) {
     const cur = state.people.find((p) => p.id === task.contact_id);
-    $("#edit-m-person").value = cur ? cur.name : "";
+    _editPersonPicker = entityPicker(personHost, { type: "person", value: cur ? cur.name : "", valueId: cur ? cur.id : "" });
   }
   if ($("#edit-m-contact")) $("#edit-m-contact").value = task.contact || "";
   if ($("#edit-m-estimate")) $("#edit-m-estimate").value = task.estimate_minutes || "";
@@ -781,13 +784,15 @@ async function submitEditModal() {
   const newText = $("#edit-m-text").value.trim();
   if (!newText) { $("#edit-m-text").focus(); return; }
   const newPriority = $("#edit-m-priority")?.value || "normal";
-  const newGroup = $("#edit-m-group")?.value.trim() || null;
+  const newGroup = (_editOrgPicker ? _editOrgPicker.getName() : "") || null;
   const newDeadline = getDeadlineValue("edit-m") || null;
   const newContact = $("#edit-m-contact")?.value.trim() ?? null;
   const estimateVal = parseInt($("#edit-m-estimate")?.value);
-  // Person: "" clears; a typed name resolves to an existing contact or creates a new one.
-  const personRaw = $("#edit-m-person")?.value.trim() ?? "";
-  const personField = personRaw === "" ? "" : await ensurePersonId(personRaw);
+  // Person: empty input clears; a picked/created id assigns; a typed-but-unpicked name
+  // leaves the assignment unchanged (never a silent create — audit M4).
+  const personName = _editPersonPicker ? _editPersonPicker.getName() : "";
+  const personId = _editPersonPicker ? _editPersonPicker.getId() : "";
+  const personField = personName === "" ? "" : (personId || null);
   const payload = {
     source_filename: _editTask.source_filename,
     section: _editTask.section,
@@ -1042,19 +1047,15 @@ function parseNLTask(text) {
 }
 
 function _populateNLStep2(parsed) {
-  const allGroups = state.tasksGroupsInScope.concat(state.facets.groups).filter((v, i, a) => a.indexOf(v) === i);
-  const groupOpts = allGroups.map((g) => `<option value="${escapeHtml(g)}"></option>`).join("");
   const contactVal = [parsed.email, parsed.phone, parsed.contact].filter(Boolean).join(", ");
 
   const blocks = [
     { uncertain: false, html: `<label>Priority</label>
       <select id="nl-f-priority">${[["normal","Normal"],["high","High"],["low","Low"]].map(([v, l]) => `<option value="${v}"${v === parsed.priority ? " selected" : ""}>${l}</option>`).join("")}</select>` },
     { uncertain: !!parsed.groupUncertain, html: `<label>Organization${parsed.groupUncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
-      <input id="nl-f-group" list="nl-f-group-list" value="${escapeHtml(parsed.group || "")}" placeholder="Pick or type new" autocomplete="off">
-      <datalist id="nl-f-group-list">${groupOpts}</datalist>` },
+      <div id="nl-f-group-picker"></div>` },
     { uncertain: false, html: `<label>Person</label>
-      <input id="nl-f-person" list="nl-f-person-list" value="" placeholder="Assign to a person" autocomplete="off">
-      <datalist id="nl-f-person-list">${state.people.map((p) => `<option value="${escapeHtml(p.name)}"></option>`).join("")}</datalist>` },
+      <div id="nl-f-person-picker"></div>` },
     { uncertain: false, html: `<label>Deadline</label>${dateField("nl-f", parsed.deadline || "")}` },
     { uncertain: false, html: `<label>Phone / email</label>
       <input id="nl-f-contact" value="${escapeHtml(contactVal)}" placeholder="Phone number or email" autocomplete="off">` },
@@ -1067,6 +1068,9 @@ function _populateNLStep2(parsed) {
       ${b.html}
     </div>`).join("");
 
+  _nlOrgPicker = entityPicker($("#nl-f-group-picker"), { type: "org", value: parsed.group || "", orgList: orgPickerList() });
+  _nlPersonPicker = entityPicker($("#nl-f-person-picker"), { type: "person", value: "", valueId: "" });
+
   // Expand container, then unblur fields staggered
   requestAnimationFrame(() => {
     container.classList.add("nl-fields-visible");
@@ -1077,6 +1081,8 @@ function _populateNLStep2(parsed) {
 }
 
 let _nlParsed = null;
+let _nlOrgPicker = null;
+let _nlPersonPicker = null;
 
 function openNLModal() {
   _nlParsed = null;
@@ -1139,9 +1145,9 @@ async function submitNLModal() {
   if (!text) return;
   const priority = $("#nl-f-priority")?.value || "normal";
   const deadline = getDeadlineValue("nl-f") || "";
-  const group = $("#nl-f-group")?.value.trim() || "";
+  const group = (_nlOrgPicker ? _nlOrgPicker.getName() : "") || "";
   const contact = $("#nl-f-contact")?.value.trim() || null;
-  const contact_id = await ensurePersonId($("#nl-f-person")?.value);
+  const contact_id = _nlPersonPicker ? _nlPersonPicker.getId() : "";
   const estimateRaw = parseInt($("#nl-f-estimate")?.value);
   const estimate_minutes = isNaN(estimateRaw) ? null : estimateRaw;
 
@@ -1888,14 +1894,17 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     content?.querySelectorAll("[data-ask-edit]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const a = openAsks.find((x) => x.id === btn.dataset.askEdit);
-        const text = prompt("Edit ask:", a?.text || "");
-        if (text === null || !text.trim()) return;
-        const priority = prompt("Priority (high / normal / low):", a?.priority || "normal");
-        if (priority === null) return;
+        const vals = await formModal({ title: "Edit ask", fields: [
+          { key: "text", label: "Ask", type: "text", value: a?.text || "" },
+          { key: "priority", label: "Priority", type: "select", value: a?.priority || "normal",
+            options: [{ value: "high", label: "High" }, { value: "normal", label: "Normal" }, { value: "low", label: "Low" }] },
+        ] });
+        if (!vals || !vals.text) return;
         await api(`/api/asks/${btn.dataset.askEdit}`, {
           method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: text.trim(), priority: (priority || "normal").trim() }),
+          body: JSON.stringify({ text: vals.text, priority: vals.priority || "normal" }),
         });
+        toastSuccess("Ask updated.");
         selectOrg(orgId, { skipToggle: true });
       });
     });
@@ -1911,14 +1920,16 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     content?.querySelectorAll("[data-commit-edit]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const c = openCommits.find((x) => x.id === btn.dataset.commitEdit);
-        const text = prompt("Edit commitment:", c?.text || "");
-        if (text === null || !text.trim()) return;
-        const due = prompt("Due date (YYYY-MM-DD, blank for none):", c?.due_date || "");
-        if (due === null) return;
+        const vals = await formModal({ title: "Edit commitment", fields: [
+          { key: "text", label: "Commitment", type: "text", value: c?.text || "" },
+          { key: "due", label: "Due date", type: "date", value: c?.due_date || "" },
+        ] });
+        if (!vals || !vals.text) return;
         await api(`/api/commitments/${btn.dataset.commitEdit}`, {
           method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: text.trim(), due_date: due.trim() }),
+          body: JSON.stringify({ text: vals.text, due_date: vals.due }),
         });
+        toastSuccess("Commitment updated.");
         selectOrg(orgId, { skipToggle: true });
       });
     });
@@ -2314,13 +2325,15 @@ async function renderPersonInto(container, contactId, opts = {}) {
         selectOrg(chip.dataset.orgId, { skipToggle: true });
       });
     });
-    // + org → prompt for org name, link, refresh
+    // + org → add-organization form, link, refresh
     $("#person-add-org")?.addEventListener("click", async () => {
-      const name = prompt("Add this person to which organization?");
-      if (!name || !name.trim()) return;
+      const vals = await formModal({ title: "Add to organization", submitLabel: "Add", fields: [
+        { key: "name", label: "Organization", type: "text", value: "" },
+      ] });
+      if (!vals || !vals.name) return;
       await api(`/api/people/${contactId}/organizations`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim() }),
+        body: JSON.stringify({ name: vals.name }),
       });
       refresh();
     });
@@ -3322,32 +3335,8 @@ async function loadFacets() {
 async function loadPeopleCache() {
   try { state.people = await api("/api/people") || []; } catch { state.people = []; }
 }
-// Fill a <datalist> with person names (value = name) for autosuggest.
-function fillPersonDatalist(id) {
-  const dl = $("#" + id);
-  if (!dl) return;
-  dl.innerHTML = state.people.map((p) => `<option value="${escapeHtml(p.name)}"></option>`).join("");
-}
-// Resolve a typed person name back to a contact id (exact, case-insensitive). null if no match.
-function resolvePersonId(name) {
-  const n = (name || "").trim().toLowerCase();
-  if (!n) return null;
-  const hit = state.people.find((p) => (p.name || "").trim().toLowerCase() === n);
-  return hit ? hit.id : null;
-}
-// Resolve a typed person name to a contact id, creating a new contact if none matches.
-async function ensurePersonId(name) {
-  const n = (name || "").trim();
-  if (!n) return null;
-  const existing = resolvePersonId(n);
-  if (existing) return existing;
-  const res = await api("/api/contacts", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: n }),
-  });
-  await loadPeopleCache();
-  return res.id;
-}
+// Person/org selection now happens through entityPicker (ui.js), which creates
+// contacts only via an explicit "+ Create" row — no silent create on typo (audit M4).
 
 function renderBillsTable(bills) {
   const tbody = $("#bills-body");

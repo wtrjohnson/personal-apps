@@ -4281,3 +4281,51 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
   color: inherit; font: inherit; font-weight: 600; cursor: pointer;
 }
 .error-state-retry:hover { background: var(--card-soft); }
+
+/* ---- Entity picker (person / org) — audit M4 ---- */
+.entity-picker { position: relative; }
+.entity-picker-input {
+  width: 100%; box-sizing: border-box; padding: 9px 12px;
+  border: 1px solid var(--border-strong); border-radius: var(--r-md, 10px);
+  font: inherit; background: var(--card); color: inherit;
+}
+.entity-picker-menu {
+  position: absolute; z-index: 40; left: 0; right: 0; top: calc(100% + 4px);
+  background: var(--card); border: 1px solid var(--border-strong);
+  border-radius: var(--r-md, 10px); box-shadow: var(--shadow-pop);
+  max-height: 240px; overflow-y: auto;
+}
+.entity-picker-menu.hidden { display: none; }
+.entity-picker-row {
+  padding: 9px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 1px;
+  border-bottom: 1px solid var(--border);
+}
+.entity-picker-row:last-child { border-bottom: none; }
+.entity-picker-row:hover { background: var(--card-soft); }
+.entity-picker-name { font-size: 14px; }
+.entity-picker-sub { font-size: 12px; color: var(--muted); }
+.entity-picker-create { color: var(--card-blue); font-weight: 600; }
+.entity-picker-empty { padding: 9px 12px; color: var(--muted); font-size: 13px; }
+
+/* ---- formModal (prompt() replacement) ---- */
+.form-modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 400;
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.form-modal {
+  background: var(--card); color: inherit; border-radius: var(--r-lg, 16px);
+  box-shadow: var(--shadow-pop); width: min(420px, 100%); padding: 20px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.form-modal-title { font-size: 16px; font-weight: 700; }
+.form-modal-field { display: flex; flex-direction: column; gap: 5px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.form-modal-field input, .form-modal-field select {
+  padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: var(--r-md, 10px);
+  font: inherit; font-weight: 400; color: var(--ink, #111); background: var(--card);
+}
+.form-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.form-modal-actions button {
+  padding: 8px 18px; border-radius: var(--r-pill); font: inherit; font-weight: 600; cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--card); color: inherit;
+}
+.form-modal-save { background: var(--card-dark); color: var(--card); border-color: transparent; }
