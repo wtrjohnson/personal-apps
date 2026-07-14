@@ -3013,25 +3013,6 @@ table.bills-table tr:last-child td { border-bottom: none; }
   border-color: var(--ink);
 }
 
-.scan-action-btn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 14px;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  background: var(--ink);
-  color: var(--card);
-  border: none;
-  border-radius: var(--r-pill);
-  white-space: nowrap;
-}
-
-.scan-action-btn:hover { opacity: 0.85; }
-.scan-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
 .primary-btn-sm {
   padding: 5px 14px;
   font: inherit;
@@ -3080,18 +3061,14 @@ table.bills-table tr:last-child td { border-bottom: none; }
 /* Sections hidden outside Phase 3 */
 .modal-intake:not([data-phase="3"]) #intake-transcription-status,
 .modal-intake:not([data-phase="3"]) #card-scan-section,
-.modal-intake:not([data-phase="3"]) #intake-callout-legend,
 .modal-intake:not([data-phase="3"]) #intake-review-queue,
 .modal-intake:not([data-phase="3"]) #intake-result,
 .modal-intake:not([data-phase="3"]) .intake-phase3-only { display: none !important; }
 
-/* Notes area hidden in Phase 0 and 1 */
+/* Notes area only shown in Phase 2 (in-meeting note-taking) */
 .modal-intake[data-phase="0"] #intake-canvas-mode,
-.modal-intake[data-phase="1"] #intake-canvas-mode { display: none !important; }
-
-/* Constituent-only fields */
-.intake-constituent-only { display: none; }
-.intake-constituent-only.intake-show { display: flex; }
+.modal-intake[data-phase="1"] #intake-canvas-mode,
+.modal-intake[data-phase="3"] #intake-canvas-mode { display: none !important; }
 
 /* Pre-meeting form wrapper */
 .intake-premeeting {
@@ -3109,16 +3086,16 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .intake-meta-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
-  border: 1.5px solid var(--border-strong);
+  padding: 4px 12px;
+  border: 1.5px solid var(--accent);
   border-radius: var(--r-pill);
-  background: var(--card);
+  background: var(--accent);
   font: inherit;
-  font-size: 12px;
-  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #fff;
   cursor: pointer;
-  transition: border-color 0.1s, background 0.1s;
+  transition: border-color 0.1s, background 0.1s, color 0.1s;
   white-space: nowrap;
   user-select: none;
   -webkit-user-select: none;
@@ -3127,16 +3104,8 @@ table.bills-table tr:last-child td { border-bottom: none; }
   text-overflow: ellipsis;
 }
 .intake-meta-chip:hover {
-  border-color: var(--accent);
-  background: var(--accent-softer);
-}
-.intake-meta-chip-label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  color: var(--muted);
-  flex-shrink: 0;
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 .intake-meta-chip-value {
   overflow: hidden;
@@ -3144,25 +3113,29 @@ table.bills-table tr:last-child td { border-bottom: none; }
   white-space: nowrap;
 }
 .intake-meta-chip--expanded {
+  background: var(--card);
   border-color: var(--accent);
-  background: var(--accent-softer);
+  color: var(--ink);
   max-width: none;
-  flex: 1 0 180px;
+}
+.intake-meta-chip--expanded:hover {
+  background: var(--card);
 }
 .intake-meta-chip--expanded .intake-meta-chip-value { display: none; }
 .intake-meta-chip-input {
+  display: none;
   border: none;
   background: transparent;
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--ink);
   padding: 0;
-  min-width: 80px;
-  width: 120px;
   outline: none;
   user-select: text;
   -webkit-user-select: text;
 }
+.intake-meta-chip--expanded .intake-meta-chip-input { display: inline-block; }
+.intake-meta-chip-input[type="date"] { min-width: 110px; }
 .intake-meta-chip-input:focus { outline: none; }
 
 /* Phase 0 type picker */
@@ -3223,32 +3196,6 @@ table.bills-table tr:last-child td { border-bottom: none; }
   line-height: 1.3;
 }
 
-/* Select element matching input style */
-.intake-select {
-  width: 100%;
-  padding: 9px 11px;
-  font: inherit;
-  font-size: 16px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-sm);
-  background: var(--card);
-  color: var(--ink);
-  box-sizing: border-box;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-  padding-right: 32px;
-  cursor: pointer;
-  user-select: text;
-  -webkit-user-select: text;
-}
-.intake-select:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-softer);
-}
-
 @media (max-width: 480px) {
   .intake-type-grid { grid-template-columns: repeat(2, 1fr); }
 }
@@ -3273,54 +3220,31 @@ table.bills-table tr:last-child td { border-bottom: none; }
 }
 @keyframes intake-spin { to { transform: rotate(360deg); } }
 
-/* Phase 2 callout legend — collapsible, above review queue */
-.intake-callout-legend {
-  margin: 8px 0 6px;
-  border-top: 1px solid var(--border);
-  padding-top: 6px;
-}
-.intake-callout-legend summary {
-  font-size: 11.5px; color: var(--muted); cursor: pointer;
-  user-select: none; list-style: none; padding: 3px 0;
-}
-.intake-callout-legend summary::-webkit-details-marker { display: none; }
-.callout-legend-grid {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 12px;
-  margin-top: 8px;
-  align-items: center;
-}
-.callout-legend-marker {
-  font-family: var(--mono, monospace);
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--ink);
-  background: var(--card-soft);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 6px;
-  white-space: nowrap;
-  text-align: center;
-}
-.callout-legend-label {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-/* Phase 1 legend strip — always visible below canvas */
+/* Legend strip — clickable buttons that insert markers into the notes textarea */
 .intake-legend-strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 12px;
+  gap: 6px;
   padding: 6px 2px 2px;
 }
-.intake-legend-item {
+.intake-legend-btn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  font: inherit;
   font-size: 11px;
   color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  padding: 3px 8px 3px 4px;
+  cursor: pointer;
+  transition: border-color 0.1s, background 0.1s, color 0.1s;
+}
+.intake-legend-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-softer);
+  color: var(--ink);
 }
 .intake-legend-sym {
   font-family: var(--mono, monospace);

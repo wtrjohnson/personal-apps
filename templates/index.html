@@ -772,24 +772,8 @@
               <label for="intake-topic">Topic</label>
               <input id="intake-topic" type="text" placeholder="Meeting topic or title…" autocomplete="off" inputmode="text">
             </div>
-            <div class="intake-context-field" style="flex:2">
-              <label for="intake-attendees" id="intake-attendees-label">Attendees</label>
-              <input id="intake-attendees" type="text" placeholder="Alice, Bob…" autocomplete="off" inputmode="text">
-            </div>
           </div>
-          <div class="intake-context-row intake-constituent-only" id="intake-purpose-row" style="margin-top:8px">
-            <div class="intake-context-field">
-              <label for="intake-purpose">Purpose</label>
-              <select id="intake-purpose" class="intake-select">
-                <option value="">Select purpose…</option>
-                <option value="Cosponsor request">Cosponsor request</option>
-                <option value="Sign a letter">Sign a letter</option>
-                <option value="Introduction">Introduction / Get to know</option>
-                <option value="General ask">General ask</option>
-                <option value="Other">Other</option>
-              </select>
-            </div>
-          </div>
+          <input id="intake-attendees" type="hidden">
         </div>
         <!-- Pre-meeting brief (shown when group has history) -->
         <div id="intake-brief" class="intake-brief hidden"></div>
@@ -797,23 +781,19 @@
         <div id="intake-meta-chips" class="intake-meta-chips"></div>
         <!-- Phase 2: notes textarea with Apple Scribble support -->
         <div id="intake-canvas-mode" class="intake-notes-mode">
-          <div class="intake-legend-strip">
-            <span class="intake-legend-item"><span class="intake-legend-sym">[ ]</span> Task</span>
-            <span class="intake-legend-item"><span class="intake-legend-sym">!!</span> Important</span>
-            <span class="intake-legend-item"><span class="intake-legend-sym">??</span> Follow-up</span>
-            <span class="intake-legend-item"><span class="intake-legend-sym">~~</span> Ask</span>
-            <span class="intake-legend-item"><span class="intake-legend-sym">&gt;&gt;&gt;</span> Commitment</span>
-            <span class="intake-legend-item"><span class="intake-legend-sym">FU IF</span> Trigger</span>
-            <span class="intake-legend-item"><span class="intake-legend-sym">@name</span> Person</span>
-            <span class="intake-legend-item"><span class="intake-legend-sym">due:</span> Deadline</span>
-            <span class="intake-legend-item"><span class="intake-legend-sym">H.R./S.</span> Bill</span>
+          <div class="intake-legend-strip" id="intake-legend-strip">
+            <button type="button" class="intake-legend-btn" data-insert="[ ] "><span class="intake-legend-sym">[ ]</span> Task</button>
+            <button type="button" class="intake-legend-btn" data-insert="!! "><span class="intake-legend-sym">!!</span> Important</button>
+            <button type="button" class="intake-legend-btn" data-insert="?? "><span class="intake-legend-sym">??</span> Follow-up</button>
+            <button type="button" class="intake-legend-btn" data-insert="~~ "><span class="intake-legend-sym">~~</span> Ask</button>
+            <button type="button" class="intake-legend-btn" data-insert="&gt;&gt;&gt; "><span class="intake-legend-sym">&gt;&gt;&gt;</span> Commitment</button>
+            <button type="button" class="intake-legend-btn" data-insert="FU IF "><span class="intake-legend-sym">FU IF</span> Trigger</button>
+            <button type="button" class="intake-legend-btn" data-insert="@"><span class="intake-legend-sym">@name</span> Person</button>
+            <button type="button" class="intake-legend-btn" data-insert="due:"><span class="intake-legend-sym">due:</span> Deadline</button>
+            <button type="button" class="intake-legend-btn" data-insert="H.R. "><span class="intake-legend-sym">H.R./S.</span> Bill</button>
           </div>
           <textarea id="intake-notes-text" class="intake-notes-textarea"
             placeholder="Type notes — or write with Apple Pencil (Scribble)&#10;&#10;[ ] task   !! important   ?? followup   ~~ ask   >>> commitment   @name   due:date"></textarea>
-          <button id="intake-rescan-btn" class="scan-action-btn intake-phase3-only">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-            Re-scan
-          </button>
         </div>
         <!-- Phase 3: post-meeting only — business card scanner -->
         <div id="card-scan-section">
@@ -837,21 +817,6 @@
             </div>
           </div>
         </div>
-        <!-- Phase 2 only: callout legend -->
-        <details id="intake-callout-legend" class="intake-callout-legend" open>
-          <summary>Callout markers</summary>
-          <div class="callout-legend-grid">
-            <span class="callout-legend-marker">[ ]</span><span class="callout-legend-label">Task — action item</span>
-            <span class="callout-legend-marker">!!</span><span class="callout-legend-label">Important — high-priority note</span>
-            <span class="callout-legend-marker">??</span><span class="callout-legend-label">Follow-up — needs follow-up</span>
-            <span class="callout-legend-marker">~~</span><span class="callout-legend-label">Ask — request from a stakeholder (or "ASK …")</span>
-            <span class="callout-legend-marker">&gt;&gt;&gt;</span><span class="callout-legend-label">Commitment — what I promised (or "COMMIT …")</span>
-            <span class="callout-legend-marker">FU IF</span><span class="callout-legend-label">Trigger — follow up when condition is met</span>
-            <span class="callout-legend-marker">@name</span><span class="callout-legend-label">Person — someone mentioned</span>
-            <span class="callout-legend-marker">due:</span><span class="callout-legend-label">Deadline — date-bound item</span>
-            <span class="callout-legend-marker">H.R. / S.</span><span class="callout-legend-label">Bill — legislative reference (e.g. H.R. 1094)</span>
-          </div>
-        </details>
         <!-- Phase 2 only: scan results -->
         <div id="intake-review-queue" class="hidden">
           <div class="scan-result-header">
