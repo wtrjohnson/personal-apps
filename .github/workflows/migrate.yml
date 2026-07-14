@@ -1,0 +1,25 @@
+name: Run DB migrations
+
+# Applies schema migrations after every push to main, so a deploy that adds tables/
+# columns to schema.sql / init_db() never silently drifts from production like
+# import_tombstones did. Idempotent (CREATE ... IF NOT EXISTS), safe to run anytime —
+# does not need to wait for the Vercel build to finish since changes are additive-only.
+#
+# Requires the same two repo secrets already used by bill-sync.yml:
+#   CRON_SECRET  – must match the CRON_SECRET env var set in Vercel
+#   APP_URL      – production base URL, e.g. https://your-app.vercel.app (no trailing slash)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run migrations
+        run: |
+          curl -fsS --max-time 120 -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://wm.pebblesprings.co/api/admin/migrate"
