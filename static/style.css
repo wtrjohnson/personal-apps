@@ -3371,6 +3371,21 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .scan-item-icon--followup  { background: #f5f3ff; color: var(--violet); }
 .scan-item-icon--deadline  { background: #fff7ed; color: var(--sand); }
 .scan-item-icon--person    { background: #f0fdf4; color: var(--moss); }
+.scan-item-icon--commitment { background: #f0fdf4; color: var(--moss); }
+.scan-item-icon--trigger  { background: #ede9fe; color: #5b21b6; }
+
+/* "Needs attention" dashboard card (home) */
+#attention-list { max-height: 220px; overflow-y: auto; }
+.attention-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 8px 4px; border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.attention-row:last-child { border-bottom: none; }
+.attention-row:hover { background: var(--surface); }
+.attention-row-body { flex: 1; min-width: 0; }
+.attention-row-text { font-size: 13.5px; color: var(--ink); line-height: 1.4; }
+.attention-row-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
 .scan-item-body { flex: 1; min-width: 0; }
 .scan-item-type { font-size: 9.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; }

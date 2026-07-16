@@ -172,6 +172,8 @@ async function renderHome() {
   // Today's callouts summary card
   _refreshTodayCalloutsSummary();
 
+  renderAttention();
+
   // Daily planning: auto-open on first visit each day
   const today = localToday();
   if (localStorage.getItem("last_plan_date") !== today && s.open_count > 0) {
@@ -265,6 +267,95 @@ async function loadUpcomingMeetings() {
     list.innerHTML = "";
     list.appendChild(errorState("Couldn't load upcoming meetings.", loadUpcomingMeetings));
   }
+}
+
+function _attentionGoToBill(billType, billNumber) {
+  switchTab("bills");
+  const q = `${billType || ""} ${billNumber || ""}`.trim();
+  state.billsFilter.q = q;
+  const inp = $("#bills-search");
+  if (inp) inp.value = q;
+}
+
+function _attentionGoToOrg(orgId) {
+  if (!orgId) return;
+  switchTab("groups");
+  document.querySelectorAll(".groups-subtab").forEach((b) => b.classList.remove("active"));
+  document.querySelector(".groups-subtab[data-subtab='orgs']")?.classList.add("active");
+  document.querySelectorAll(".groups-panel").forEach((pp) => pp.classList.add("hidden"));
+  $("#groups-panel-orgs")?.classList.remove("hidden");
+  selectOrg(orgId, { skipToggle: true });
+}
+
+// Dashboard "Needs attention" card: surfaces overdue/due-soon commitments, new bill
+// matches, upcoming hearings/markups, and follow-up-trigger candidates — items that
+// previously only showed up if you went looking in the right tab.
+async function renderAttention() {
+  const card = $("#card-attention");
+  const list = $("#attention-list");
+  const badge = $("#nav-attention-count");
+  if (!card || !list) return;
+  let data;
+  try {
+    data = await api("/api/attention");
+  } catch (e) {
+    card.style.display = "";
+    list.innerHTML = "";
+    list.appendChild(errorState("Couldn't load attention items.", renderAttention));
+    return;
+  }
+  if (!data.count) {
+    card.style.display = "none";
+    if (badge) badge.textContent = "";
+    return;
+  }
+  card.style.display = "";
+  if (badge) badge.textContent = String(data.count);
+
+  const fmtDate = (s) => {
+    if (!s) return "";
+    const d = new Date(s.length > 10 ? s : s + "T00:00:00");
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  };
+  const rows = [];
+  (data.overdue_commitments || []).forEach((c) => rows.push({
+    icon: "commitment", text: c.text,
+    meta: `Overdue since ${fmtDate(c.due_date)}${c.org_name ? " · " + c.org_name : ""}`,
+    onClick: () => _attentionGoToOrg(c.organization_id),
+  }));
+  (data.due_soon_commitments || []).forEach((c) => rows.push({
+    icon: "commitment", text: c.text,
+    meta: `Due ${fmtDate(c.due_date)}${c.org_name ? " · " + c.org_name : ""}`,
+    onClick: () => _attentionGoToOrg(c.organization_id),
+  }));
+  (data.new_bill_matches || []).forEach((b) => rows.push({
+    icon: "bill", text: `${b.bill_type} ${b.bill_number} — ${b.title || "Untitled bill"}`,
+    meta: "New match to a bill you're tracking",
+    onClick: () => _attentionGoToBill(b.bill_type, b.bill_number),
+  }));
+  (data.upcoming_bill_events || []).forEach((e) => rows.push({
+    icon: "deadline", text: `${e.bill_type} ${e.bill_number} ${e.event_type || "event"}`,
+    meta: `${e.committee_name ? e.committee_name + " · " : ""}${fmtDate(e.event_date)}`,
+    onClick: () => _attentionGoToBill(e.bill_type, e.bill_number),
+  }));
+  (data.trigger_candidates || []).forEach((t) => rows.push({
+    icon: "trigger", text: t.condition_text,
+    meta: t.last_match_reason ? `Looks like: ${t.last_match_reason}` : "",
+    onClick: () => _attentionGoToOrg(t.organization_id),
+  }));
+
+  list.innerHTML = rows.map((r, i) => `
+    <div class="attention-row" data-idx="${i}">
+      <span class="scan-item-icon scan-item-icon--${r.icon}">${_SCAN_ICONS[r.icon] || ""}</span>
+      <div class="attention-row-body">
+        <div class="attention-row-text">${escapeHtml(r.text || "")}</div>
+        ${r.meta ? `<div class="attention-row-meta">${escapeHtml(r.meta)}</div>` : ""}
+      </div>
+    </div>`).join("");
+
+  list.querySelectorAll(".attention-row").forEach((el) => {
+    el.addEventListener("click", () => rows[Number(el.dataset.idx)].onClick());
+  });
 }
 
 let _meetingEditId = null;
@@ -1779,7 +1870,10 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
     const orgEditHtml = `
       <div class="org-detail-header">
         <input class="org-edit-name" id="org-edit-name" value="${escapeHtml(org.name || "")}" placeholder="Organization name">
-        <button class="detail-delete-btn" id="org-delete" title="Delete organization">Delete</button>
+        <div class="org-detail-header-actions">
+          <button class="linkish" id="org-merge" title="Merge this organization into another">Merge…</button>
+          <button class="detail-delete-btn" id="org-delete" title="Delete organization">Delete</button>
+        </div>
       </div>
       <div class="org-detail-section org-edit-fields">
         <input id="org-edit-type" placeholder="Type (e.g. trade association)" value="${escapeHtml(org.type || "")}">
@@ -1998,6 +2092,21 @@ async function selectOrg(orgId, { skipToggle = false } = {}) {
         selectOrg(null);
         loadGroups();
       } catch { toastError("Couldn't delete organization."); }
+    });
+    // Merge this organization into another (repoints all history to the winner).
+    $("#org-merge")?.addEventListener("click", async () => {
+      const winner = await pickEntityModal({ title: `Merge "${org.name}" into…`, type: "org", submitLabel: "Merge" });
+      if (!winner || !winner.id) return;
+      if (winner.id === orgId) { toastError("Pick a different organization."); return; }
+      try {
+        await api(`/api/organizations/${orgId}/merge`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ into_id: winner.id }),
+        });
+        toastSuccess(`Merged into ${winner.name}.`);
+        selectOrg(winner.id, { skipToggle: true });
+        loadGroups();
+      } catch (e) { toastError(e.message || "Merge failed"); }
     });
 
     // Reveal col-2 — its content is already populated.

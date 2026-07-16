@@ -712,6 +712,14 @@ def init_db() -> None:
                     cur.execute("ROLLBACK TO SAVEPOINT status_ck")
                     print(f"[migrate] {_con} skipped: {_e}")
 
+            # Tracks when a "watching" trigger was last checked against bill/schedule
+            # updates, so _evaluate_followup_triggers() never reconsiders the same update.
+            # last_match_at/last_match_reason hold the current suggest-and-confirm candidate
+            # (cleared whenever the trigger's status is next updated via the API).
+            cur.execute("ALTER TABLE followup_triggers ADD COLUMN IF NOT EXISTS checked_at TIMESTAMP")
+            cur.execute("ALTER TABLE followup_triggers ADD COLUMN IF NOT EXISTS last_match_at TIMESTAMP")
+            cur.execute("ALTER TABLE followup_triggers ADD COLUMN IF NOT EXISTS last_match_reason TEXT")
+
 
 if DATABASE_URL and os.environ.get("JOS_SKIP_DB_INIT") != "1":
     # Cold start does NOT run DDL (audit A1): schema migrations run deliberately via
@@ -2657,6 +2665,74 @@ def _recompute_bill_matches() -> dict:
     return {"new_matches": new_matches}
 
 
+_TRIGGER_KW = {
+    "hearing":   re.compile(r"\bhearing\b", re.IGNORECASE),
+    "markup":    re.compile(r"\bmark ?up\b", re.IGNORECASE),
+    "floor":     re.compile(r"\bfloor\b", re.IGNORECASE),
+    "vote":      re.compile(r"\bvotes?\b|\bpasses?\b|\bpassed\b", re.IGNORECASE),
+    "committee": re.compile(r"\bcommittee\b", re.IGNORECASE),
+    "signed":    re.compile(r"\bsign(?:ed|s)?\b|\bbecomes? law\b", re.IGNORECASE),
+}
+
+
+def _evaluate_followup_triggers(cur) -> int:
+    """Suggest-and-confirm heuristic for "watching" follow-up triggers tied to a bill:
+    checks whether the bill's latest_action or schedule changed since the trigger was
+    last checked, and whether condition_text's keywords plausibly describe that kind of
+    update. Matches are recorded on last_match_at/last_match_reason for /api/attention to
+    surface — status is never auto-flipped here, since condition_text is free text and
+    this is a guess, not a determination (the user confirms/dismisses via the existing
+    trigger status-update endpoint, which clears the candidate). checked_at always
+    advances so the same update isn't reconsidered on the next run. Returns the number
+    of new candidates found."""
+    cur.execute(r"""
+        SELECT ft.id, ft.condition_text, ft.checked_at, br.congress,
+               upper(regexp_replace(br.bill_type, '[^A-Za-z]', '', 'g')) AS btype,
+               regexp_replace(br.bill_number, '\D', '', 'g') AS bnum
+        FROM followup_triggers ft
+        JOIN bill_references br ON br.id = ft.bill_ref_id
+        WHERE ft.status = 'watching' AND ft.bill_ref_id IS NOT NULL
+    """)
+    triggers = cur.fetchall()
+    new_candidates = 0
+    for t in triggers:
+        cond = t["condition_text"] or ""
+        cur.execute("""
+            SELECT
+                (SELECT tb.latest_action FROM tracked_bills tb
+                    WHERE tb.congress=%(cong)s AND tb.bill_type=%(btype)s AND tb.bill_number=%(bnum)s
+                      AND (%(since)s::timestamp IS NULL OR tb.latest_action_date > %(since)s::timestamp)
+                    ORDER BY tb.latest_action_date DESC NULLS LAST LIMIT 1) AS bill_action,
+                (SELECT jsonb_build_object('event_type', e.event_type, 'event_date', e.event_date)
+                    FROM bill_schedule_events e
+                    WHERE e.congress=%(cong)s AND e.bill_type=%(btype)s AND e.bill_number=%(bnum)s
+                      AND (%(since)s::timestamp IS NULL OR e.last_seen > %(since)s::timestamp)
+                    ORDER BY e.event_date ASC NULLS LAST LIMIT 1) AS new_event
+        """, {"cong": t["congress"], "btype": t["btype"], "bnum": t["bnum"], "since": t["checked_at"]})
+        upd = cur.fetchone()
+        reason = None
+        new_event = upd["new_event"]
+        if new_event:
+            ev = (new_event.get("event_type") or "").lower()
+            if (("hearing" in ev and _TRIGGER_KW["hearing"].search(cond)) or
+                    ("markup" in ev and _TRIGGER_KW["markup"].search(cond)) or
+                    ("floor" in ev and _TRIGGER_KW["floor"].search(cond)) or
+                    _TRIGGER_KW["committee"].search(cond)):
+                reason = f"{new_event.get('event_type') or 'Event'} scheduled for {new_event.get('event_date')}"
+        if not reason and upd["bill_action"] and (
+                _TRIGGER_KW["vote"].search(cond) or _TRIGGER_KW["signed"].search(cond)
+                or _TRIGGER_KW["committee"].search(cond)):
+            reason = upd["bill_action"]
+        if reason:
+            cur.execute(
+                "UPDATE followup_triggers SET last_match_at=NOW(), last_match_reason=%s WHERE id=%s",
+                (reason[:300], t["id"]),
+            )
+            new_candidates += 1
+        cur.execute("UPDATE followup_triggers SET checked_at=NOW() WHERE id=%s", (t["id"],))
+    return new_candidates
+
+
 def _sync_congress_bills() -> dict:
     """Full sync: page sponsored + cosponsored legislation, upsert, recompute match flags.
     Used by the scheduled cron job; the interactive UI drives the same steps page-by-page
@@ -2669,10 +2745,14 @@ def _sync_congress_bills() -> dict:
             counts[kind] += page["stored"]
             offset = page["next_offset"]
     matches = _recompute_bill_matches()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            trigger_candidates = _evaluate_followup_triggers(cur)
     result = {
         "sponsored_count": counts["sponsored"],
         "cosponsored_count": counts["cosponsored"],
         "new_matches": matches["new_matches"],
+        "trigger_candidates": trigger_candidates,
     }
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -2979,12 +3059,14 @@ def _sync_bill_schedule() -> dict:
                 """
             )
             cur.execute("DELETE FROM bill_schedule_events WHERE event_date < CURRENT_DATE - INTERVAL '3 days'")
+            trigger_candidates = _evaluate_followup_triggers(cur)
             result = {
                 "committee_events": committee["events"],
                 "committee_scanned": committee["scanned"],
                 "committee_more": committee["more"],
                 "floor_events": floor_events,
                 "floor_ok": floor_ok,
+                "trigger_candidates": trigger_candidates,
             }
             cur.execute(
                 "INSERT INTO bill_sync_meta (id, schedule_last_synced, schedule_last_result, schedule_last_error) "
@@ -3637,6 +3719,133 @@ def api_organization_delete(org_id):
                         (org_id,))
             cur.execute("DELETE FROM organizations WHERE id=%s", (org_id,))
     return jsonify({"ok": True})
+
+
+@app.route("/api/organizations/<org_id>/merge", methods=["POST"])
+def api_organization_merge(org_id):
+    """Merge `org_id` (loser) into `into_id` (winner): repoint every reference and
+    keep the richest field values, in one transaction (mirrors api_contact_merge)."""
+    data = request.get_json(force=True, silent=True) or {}
+    into_id = (data.get("into_id") or "").strip()
+    if not into_id or into_id == org_id:
+        return fail("into_id required and must differ from org_id", 400)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM organizations WHERE id=%s", (org_id,))
+            loser = cur.fetchone()
+            cur.execute("SELECT id FROM organizations WHERE id=%s", (into_id,))
+            winner = cur.fetchone()
+            if not loser or not winner:
+                return fail("organization not found", 404)
+            # Many-to-many table: move rows that don't already exist on the winner, drop the rest.
+            cur.execute(
+                "UPDATE contact_organizations co SET organization_id=%s WHERE organization_id=%s "
+                "AND NOT EXISTS (SELECT 1 FROM contact_organizations x WHERE x.contact_id=co.contact_id "
+                "AND x.organization_id=%s)",
+                (into_id, org_id, into_id))
+            cur.execute("DELETE FROM contact_organizations WHERE organization_id=%s", (org_id,))
+            # Simple FK repoints.
+            for tbl in ("contacts", "meetings", "tasks", "asks", "commitments", "followup_triggers"):
+                cur.execute(f"UPDATE {tbl} SET organization_id=%s WHERE organization_id=%s", (into_id, org_id))
+            # Polymorphic tables keyed by entity_type/entity_id.
+            cur.execute(
+                "UPDATE entity_notes SET entity_id=%s WHERE entity_type='organization' AND entity_id=%s",
+                (into_id, org_id))
+            cur.execute(
+                "UPDATE bill_match_notifications bmn SET entity_id=%s WHERE entity_type='organization' "
+                "AND entity_id=%s AND NOT EXISTS (SELECT 1 FROM bill_match_notifications x "
+                "WHERE x.flag_id=bmn.flag_id AND x.entity_type='organization' AND x.entity_id=%s)",
+                (into_id, org_id, into_id))
+            cur.execute(
+                "DELETE FROM bill_match_notifications WHERE entity_type='organization' AND entity_id=%s",
+                (org_id,))
+            # Keep the richest field values on the winner, then delete the loser.
+            cur.execute("""
+                UPDATE organizations SET
+                    type=COALESCE(NULLIF(type,''), %s),
+                    notes=COALESCE(NULLIF(notes,''), %s),
+                    updated_at=NOW()
+                WHERE id=%s
+            """, (loser["type"], loser["notes"], into_id))
+            cur.execute("DELETE FROM organizations WHERE id=%s", (org_id,))
+    return jsonify({"ok": True, "id": into_id})
+
+
+def _build_attention(days: int = 7) -> dict:
+    """Assemble everything that needs a human look right now, computed live from existing
+    tables (same style as api_stats) rather than a separate synced table: overdue/due-soon
+    commitments, unresolved bill matches, upcoming committee/floor events, and follow-up
+    trigger candidates flagged by _evaluate_followup_triggers(). Backs GET /api/attention;
+    factored out as a plain function so a future digest builder can reuse it unchanged."""
+    today = app_today()
+    today_iso = today.isoformat()
+    horizon_iso = (today + timedelta(days=days)).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT c.id, c.text, to_char(c.due_date,'YYYY-MM-DD') AS due_date,
+                       c.organization_id, o.name AS org_name, ct.name AS contact_name
+                FROM commitments c
+                LEFT JOIN organizations o ON o.id = c.organization_id
+                LEFT JOIN contacts ct ON ct.id = c.contact_id
+                WHERE c.status IN ('open','in_progress') AND c.due_date IS NOT NULL
+                ORDER BY c.due_date ASC
+            """)
+            all_commitments = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT f.id, tb.congress, tb.bill_type, tb.bill_number, tb.title, tb.url
+                FROM bill_match_flags f
+                JOIN tracked_bills tb ON tb.id = f.tracked_bill_id
+                WHERE f.status = 'new'
+                ORDER BY f.noticed_at DESC
+            """)
+            new_bill_matches = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT e.id, e.event_type, e.congress, e.bill_type, e.bill_number,
+                       to_char(e.event_date,'YYYY-MM-DD') AS event_date, e.title,
+                       e.committee_name, tb.title AS bill_title
+                FROM bill_schedule_events e
+                JOIN tracked_bills tb ON tb.congress = e.congress AND tb.bill_type = e.bill_type
+                    AND tb.bill_number = e.bill_number
+                WHERE e.event_date >= CURRENT_DATE AND e.event_date <= %s
+                  AND tb.relationship = 'sponsored'
+                ORDER BY e.event_date ASC
+            """, (horizon_iso,))
+            upcoming_bill_events = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT ft.id, ft.condition_text, ft.action_text, ft.last_match_reason,
+                       to_char(ft.last_match_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS last_match_at,
+                       ft.organization_id, o.name AS org_name
+                FROM followup_triggers ft
+                LEFT JOIN organizations o ON o.id = ft.organization_id
+                WHERE ft.status = 'watching' AND ft.last_match_at IS NOT NULL
+                ORDER BY ft.last_match_at DESC
+            """)
+            trigger_candidates = [dict(r) for r in cur.fetchall()]
+
+    overdue_commitments = [c for c in all_commitments if c["due_date"] < today_iso]
+    due_soon_commitments = [c for c in all_commitments if today_iso <= c["due_date"] <= horizon_iso]
+    return {
+        "overdue_commitments": overdue_commitments,
+        "due_soon_commitments": due_soon_commitments,
+        "new_bill_matches": new_bill_matches,
+        "upcoming_bill_events": upcoming_bill_events,
+        "trigger_candidates": trigger_candidates,
+        "count": (len(overdue_commitments) + len(due_soon_commitments) + len(new_bill_matches)
+                  + len(upcoming_bill_events) + len(trigger_candidates)),
+    }
+
+
+@app.route("/api/attention")
+def api_attention():
+    try:
+        days = int(request.args.get("days", 7))
+    except (TypeError, ValueError):
+        days = 7
+    return jsonify(_build_attention(days=days))
 
 
 @app.route("/api/search")
