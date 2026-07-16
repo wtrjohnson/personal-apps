@@ -173,6 +173,7 @@ async function renderHome() {
   _refreshTodayCalloutsSummary();
 
   renderAttention();
+  renderTrends();
 
   // Daily planning: auto-open on first visit each day
   const today = localToday();
@@ -295,22 +296,26 @@ async function renderAttention() {
   const list = $("#attention-list");
   const badge = $("#nav-attention-count");
   if (!card || !list) return;
-  let data;
+  let data, orgs;
   try {
-    data = await api("/api/attention");
+    [data, orgs] = await Promise.all([api("/api/attention"), api("/api/organizations")]);
   } catch (e) {
     card.style.display = "";
     list.innerHTML = "";
     list.appendChild(errorState("Couldn't load attention items.", renderAttention));
     return;
   }
-  if (!data.count) {
+  // Nav badge reflects only time-sensitive items from the backend, not the neglected-
+  // relationships teaser below (that's an informational nudge, not something urgent).
+  const urgentCount = data.count || 0;
+  const neglected = (orgs || []).filter(_isNeglectedOrg).slice(0, 3);
+  if (!urgentCount && !neglected.length) {
     card.style.display = "none";
     if (badge) badge.textContent = "";
     return;
   }
   card.style.display = "";
-  if (badge) badge.textContent = String(data.count);
+  if (badge) badge.textContent = urgentCount ? String(urgentCount) : "";
 
   const fmtDate = (s) => {
     if (!s) return "";
@@ -343,6 +348,11 @@ async function renderAttention() {
     meta: t.last_match_reason ? `Looks like: ${t.last_match_reason}` : "",
     onClick: () => _attentionGoToOrg(t.organization_id),
   }));
+  neglected.forEach((o) => rows.push({
+    icon: "person", text: `${o.name} — no meeting in a while`,
+    meta: o.last_meeting ? `Last met ${fmtDate(o.last_meeting)}` : "",
+    onClick: () => _attentionGoToOrg(o.id),
+  }));
 
   list.innerHTML = rows.map((r, i) => `
     <div class="attention-row" data-idx="${i}">
@@ -356,6 +366,88 @@ async function renderAttention() {
   list.querySelectorAll(".attention-row").forEach((el) => {
     el.addEventListener("click", () => rows[Number(el.dataset.idx)].onClick());
   });
+}
+
+// Calendar modal: month grid of meetings, forwarded invites, and bill hearings/floor
+// dates, reached from the deadlines card's "View full calendar" link.
+let _calendarMonth = null; // "YYYY-MM"
+
+function openCalendarModal() {
+  $("#calendar-backdrop").classList.remove("hidden");
+  const now = new Date();
+  _calendarMonth = _calendarMonth || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  _loadCalendarMonth(_calendarMonth);
+}
+
+function closeCalendarModal() {
+  $("#calendar-backdrop").classList.add("hidden");
+  $("#calendar-day-detail").innerHTML = "";
+}
+
+async function _loadCalendarMonth(monthStr) {
+  const grid = $("#calendar-grid");
+  grid.innerHTML = `<div class="detail-empty">Loading…</div>`;
+  let data;
+  try {
+    data = await api("/api/calendar?month=" + encodeURIComponent(monthStr));
+  } catch (e) {
+    grid.innerHTML = "";
+    grid.appendChild(errorState("Couldn't load the calendar.", () => _loadCalendarMonth(monthStr)));
+    return;
+  }
+  _calendarMonth = data.month || monthStr;
+  const [y, m] = _calendarMonth.split("-").map(Number);
+  $("#calendar-month-label").textContent =
+    new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  $("#calendar-day-detail").innerHTML = "";
+
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const startDow = new Date(y, m - 1, 1).getDay();
+  const todayISO = localToday();
+
+  const cells = [];
+  for (let i = 0; i < startDow; i++) cells.push(`<div class="calendar-cell calendar-cell--empty"></div>`);
+  for (let d = 1; d <= daysInMonth; d++) {
+    const iso = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    const events = (data.days && data.days[iso]) || [];
+    const isToday = iso === todayISO;
+    const shown = events.slice(0, 3).map((e) =>
+      `<div class="calendar-cell-event calendar-cell-event--${e.kind}" data-day="${iso}" title="${escapeHtml(e.topic || "")}">${escapeHtml(e.topic || "")}</div>`
+    ).join("");
+    const more = events.length > 3
+      ? `<div class="calendar-cell-event" data-day="${iso}">+${events.length - 3} more</div>` : "";
+    cells.push(`
+      <div class="calendar-cell${isToday ? " calendar-cell--today" : ""}" data-day="${iso}">
+        <div class="calendar-cell-num">${d}</div>
+        <div class="calendar-cell-events">${shown}${more}</div>
+      </div>`);
+  }
+  grid.innerHTML = cells.join("");
+  grid.querySelectorAll("[data-day]").forEach((el) => {
+    el.addEventListener("click", () =>
+      _renderCalendarDayDetail(el.dataset.day, (data.days && data.days[el.dataset.day]) || []));
+  });
+}
+
+function _renderCalendarDayDetail(iso, events) {
+  const detail = $("#calendar-day-detail");
+  if (!events.length) { detail.innerHTML = ""; return; }
+  const label = new Date(iso + "T12:00:00")
+    .toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  detail.innerHTML = `
+    <div class="drawer-section-label">${escapeHtml(label)}</div>
+    ${events.map((e) => `
+      <div class="org-entity-row">
+        <span class="entity-text">${escapeHtml(e.topic || "")}</span>
+        ${e.meeting_link ? `<span class="entity-status">${escapeHtml(e.meeting_link)}</span>` : ""}
+      </div>`).join("")}
+  `;
+}
+
+function _calendarShiftMonth(delta) {
+  const [y, m] = (_calendarMonth || localToday().slice(0, 7)).split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  _loadCalendarMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
 }
 
 let _meetingEditId = null;
@@ -504,6 +596,65 @@ function drawSparkline(data) {
     <path d="${area}" fill="url(#spark-grad)"/>
     <path d="${line}" fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
     <circle cx="${lastPt[0].toFixed(2)}" cy="${lastPt[1].toFixed(2)}" r="3" fill="#2563eb"/>
+  `;
+}
+
+// Weekly opened-vs-closed line chart for asks + commitments. Colors match the
+// --accent/--moss CSS variables (validated as a colorblind-safe categorical pair);
+// hardcoded here since inline SVG presentation attributes don't reliably resolve
+// var(), matching the existing sparkline's approach.
+const _TRENDS_OPENED_COLOR = "#2563eb";
+const _TRENDS_CLOSED_COLOR = "#16a34a";
+
+async function renderTrends() {
+  const card = $("#card-trends");
+  const legend = $("#trends-legend");
+  const svg = $("#trends-svg");
+  if (!card || !svg) return;
+  let data;
+  try {
+    data = await api("/api/trends/asks-commitments?weeks=8");
+  } catch (e) {
+    card.style.display = "";
+    svg.innerHTML = "";
+    if (legend) legend.innerHTML = `<span class="trends-empty">Couldn't load trend data.</span>`;
+    return;
+  }
+  const weeks = data.weeks || [];
+  const total = weeks.reduce((s, w) => s + w.opened + w.closed, 0);
+  if (!total) { card.style.display = "none"; return; }
+  card.style.display = "";
+
+  if (legend) {
+    legend.innerHTML = `
+      <span class="trends-legend-item"><span class="trends-legend-swatch" style="background:${_TRENDS_OPENED_COLOR}"></span>Opened</span>
+      <span class="trends-legend-item"><span class="trends-legend-swatch" style="background:${_TRENDS_CLOSED_COLOR}"></span>Closed</span>
+    `;
+  }
+
+  const W = 300, H = 100, PAD = 8;
+  const maxVal = Math.max(1, ...weeks.map((w) => Math.max(w.opened, w.closed)));
+  const step = (W - PAD * 2) / Math.max(1, weeks.length - 1);
+  const toY = (v) => H - PAD - (v / maxVal) * (H - PAD * 2);
+  const openedPts = weeks.map((w, i) => [PAD + i * step, toY(w.opened)]);
+  const closedPts = weeks.map((w, i) => [PAD + i * step, toY(w.closed)]);
+  const lineOf = (pts) => pts.map(([x, y], i) => `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`).join(" ");
+
+  const hoverDots = (pts, color, key) => weeks.map((w, i) => `
+    <circle class="trends-point" cx="${pts[i][0].toFixed(2)}" cy="${pts[i][1].toFixed(2)}" r="6" fill="${color}" opacity="0">
+      <title>Week of ${w.week}: ${w[key]} ${key}</title>
+    </circle>`).join("");
+
+  const lastOpened = openedPts[openedPts.length - 1];
+  const lastClosed = closedPts[closedPts.length - 1];
+
+  svg.innerHTML = `
+    <path d="${lineOf(openedPts)}" fill="none" stroke="${_TRENDS_OPENED_COLOR}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="${lineOf(closedPts)}" fill="none" stroke="${_TRENDS_CLOSED_COLOR}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${lastOpened[0].toFixed(2)}" cy="${lastOpened[1].toFixed(2)}" r="4" fill="${_TRENDS_OPENED_COLOR}" stroke="#fff" stroke-width="2"/>
+    <circle cx="${lastClosed[0].toFixed(2)}" cy="${lastClosed[1].toFixed(2)}" r="4" fill="${_TRENDS_CLOSED_COLOR}" stroke="#fff" stroke-width="2"/>
+    ${hoverDots(openedPts, _TRENDS_OPENED_COLOR, "opened")}
+    ${hoverDots(closedPts, _TRENDS_CLOSED_COLOR, "closed")}
   `;
 }
 
@@ -3594,9 +3745,24 @@ async function loadGroups() {
     api("/api/people"),
     api("/api/bills"),
   ]);
-  renderOrgsTable(orgs);
+  state.orgsAll = orgs;
+  _applyOrgsFilter();
   renderPeopleTable(people);
   renderBillsTable(bills);
+}
+
+// An org counts as neglected once it's gone 60+ days since the last recorded meeting;
+// orgs with no meeting history yet aren't included (nothing to have gone cold on).
+function _isNeglectedOrg(o) {
+  if (!o.last_meeting) return false;
+  const days = Math.floor((Date.now() - new Date(o.last_meeting + "T00:00:00")) / 86400000);
+  return days >= 60;
+}
+
+function _applyOrgsFilter() {
+  const all = state.orgsAll || [];
+  const onlyNeglected = $("#orgs-neglected-filter")?.checked;
+  renderOrgsTable(onlyNeglected ? all.filter(_isNeglectedOrg) : all);
 }
 
 async function selectMeeting(id) {
@@ -4285,6 +4451,28 @@ function renderBillContext(ctx) {
   });
 }
 
+// Bill-lifecycle stepper — mirrors _BILL_STAGE_ORDER/_BILL_STAGE_LABELS in app.py.
+const _BILL_STAGE_STEPS = [
+  { key: "introduced", label: "Introduced" },
+  { key: "committee", label: "In Committee" },
+  { key: "passed_chamber", label: "Passed a Chamber" },
+  { key: "to_president", label: "Sent to President" },
+  { key: "enacted", label: "Signed Into Law" },
+];
+
+function _billStageStepperHtml(b) {
+  const idx = typeof b.stage_index === "number" ? b.stage_index : 0;
+  return `
+    <div class="bill-stage-stepper">
+      ${_BILL_STAGE_STEPS.map((s, i) => `
+        <div class="bill-stage-step${i <= idx ? " bill-stage-step--done" : ""}${i === idx ? " bill-stage-step--current" : ""}">
+          <span class="bill-stage-dot"></span>
+          <span class="bill-stage-label">${escapeHtml(s.label)}</span>
+        </div>`).join("")}
+      ${b.vetoed ? `<span class="bill-stage-vetoed">Vetoed</span>` : ""}
+    </div>`;
+}
+
 function renderBillDrawer(el, data) {
   const b = data.bill || {};
   const d = data.detail || {};
@@ -4340,6 +4528,7 @@ function renderBillDrawer(el, data) {
         ].filter(Boolean).map(escapeHtml).join(" · ")}</span>
       </div>
     </header>
+    <section class="bill-section bill-stage-section">${_billStageStepperHtml(b)}</section>
     ${b.latest_action ? `<section class="bill-section">
       <h2>Latest action</h2>
       <div class="bill-latest-action">${escapeHtml(b.latest_action)}${b.latest_action_date ? ` <span class="muted">— ${escapeHtml(fmtDate(b.latest_action_date))}</span>` : ""}</div>
@@ -5219,6 +5408,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   $("#add-person-btn")?.addEventListener("click", openAddPersonModal);
+  $("#orgs-neglected-filter")?.addEventListener("change", _applyOrgsFilter);
 
   // Intake modal
   $("#intake-modal-close").addEventListener("click", closeIntakeModal);
@@ -5294,6 +5484,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   $("#today-callouts-today-btn")?.addEventListener("click", () => {
     _loadTodayCallouts(localToday());
+  });
+
+  // Calendar modal
+  $("#open-calendar-btn")?.addEventListener("click", openCalendarModal);
+  $("#calendar-close")?.addEventListener("click", closeCalendarModal);
+  $("#calendar-backdrop")?.addEventListener("click", (e) => {
+    if (e.target.id === "calendar-backdrop") closeCalendarModal();
+  });
+  $("#calendar-prev")?.addEventListener("click", () => _calendarShiftMonth(-1));
+  $("#calendar-next")?.addEventListener("click", () => _calendarShiftMonth(1));
+  $("#calendar-today-btn")?.addEventListener("click", () => {
+    const now = new Date();
+    _loadCalendarMonth(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`);
   });
 
   // Phase 0 type picker

@@ -476,6 +476,11 @@ ALTER TABLE followup_triggers ADD COLUMN IF NOT EXISTS checked_at TIMESTAMP;
 ALTER TABLE followup_triggers ADD COLUMN IF NOT EXISTS last_match_at TIMESTAMP;
 ALTER TABLE followup_triggers ADD COLUMN IF NOT EXISTS last_match_reason TEXT;
 
+-- Timestamps the transition into a terminal status, so asks/commitments can be plotted as
+-- opened-vs-closed over time instead of only a closed-as-of-now count.
+ALTER TABLE asks ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP;
+ALTER TABLE commitments ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP;
+
 -- Indexes for common query patterns (core tables).
 CREATE INDEX IF NOT EXISTS tasks_meeting_id    ON tasks (meeting_id);
 CREATE INDEX IF NOT EXISTS tasks_done          ON tasks (done);

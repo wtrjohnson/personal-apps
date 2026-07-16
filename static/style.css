@@ -602,6 +602,15 @@ input, select, textarea { font-family: inherit; }
 }
 .card-spark .spark-svg { width: 100%; flex: 1; min-height: 80px; margin-top: auto; }
 
+/* Asks/commitments opened-vs-closed trend chart */
+.card-trends { grid-column: span 2; padding: 20px; display: flex; flex-direction: column; }
+.trends-legend { display: flex; gap: 14px; margin-bottom: 10px; font-size: 12px; color: var(--muted); }
+.trends-legend-item { display: flex; align-items: center; gap: 5px; }
+.trends-legend-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.trends-svg { width: 100%; flex: 1; min-height: 90px; }
+.trends-point { cursor: pointer; }
+.trends-empty { font-size: 12.5px; color: var(--muted); }
+
 .card-overdue { grid-column: span 2; padding: 20px; }
 .card-overdue .overdue-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .card-overdue h2 { font-size: 17px; font-weight: 600; margin: 0; }
@@ -2070,8 +2079,9 @@ table.bills-table tr:last-child td { border-bottom: none; }
   #view-home { grid-template-columns: repeat(4, 1fr); }
   .card-hero { grid-column: span 4; grid-row: span 1; min-height: 220px; }
   .card-focus-panel { grid-column: span 4; }
+  .card-attention { grid-column: span 4; }
   .card-deadlines { grid-column: span 4; }
-  .card-ring, .card-spark { grid-column: span 2; }
+  .card-ring, .card-spark, .card-trends { grid-column: span 2; }
   .card-overdue, .card-by-group, .card-recent { grid-column: span 2; }
 }
 
@@ -2081,6 +2091,7 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .card-focus-panel {
   grid-column: span 3;
 }
+.card-attention { grid-column: span 3; }
 .focus-task-text {
   font-size: 17px;
   font-weight: 600;
@@ -2387,6 +2398,30 @@ table.bills-table tr:last-child td { border-bottom: none; }
 .bill-drawer-actions { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
 .bill-drawer-fresh { font-size: 11.5px; color: var(--muted-2); }
 .bill-section { padding: 16px 26px; border-bottom: 1px solid var(--border); }
+.bill-stage-section { padding-top: 14px; padding-bottom: 14px; }
+.bill-stage-stepper { display: flex; align-items: flex-start; gap: 2px; flex-wrap: wrap; }
+.bill-stage-step {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  flex: 1; min-width: 76px; position: relative;
+}
+.bill-stage-step::before {
+  content: ""; position: absolute; top: 5px; left: -50%; width: 100%; height: 2px;
+  background: var(--border); z-index: 0;
+}
+.bill-stage-step:first-child::before { display: none; }
+.bill-stage-step--done::before { background: var(--accent); }
+.bill-stage-dot {
+  width: 12px; height: 12px; border-radius: 50%; background: var(--border-strong);
+  border: 2px solid var(--card); position: relative; z-index: 1;
+}
+.bill-stage-step--done .bill-stage-dot { background: var(--accent); }
+.bill-stage-step--current .bill-stage-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-softer); }
+.bill-stage-label { font-size: 10.5px; color: var(--muted); text-align: center; line-height: 1.3; }
+.bill-stage-step--done .bill-stage-label, .bill-stage-step--current .bill-stage-label { color: var(--ink); font-weight: 600; }
+.bill-stage-vetoed {
+  margin-left: 10px; align-self: center; font-size: 11px; font-weight: 700;
+  color: #dc2626; text-transform: uppercase; letter-spacing: 0.5px;
+}
 .bill-section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin: 0 0 10px; font-weight: 700; }
 .bill-section-empty { color: var(--muted-2); font-size: 12.5px; }
 .bill-latest-action, .bill-summary { font-size: 13px; line-height: 1.6; }
@@ -3854,6 +3889,13 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
 .org-edit-fields textarea { min-height: 54px; resize: vertical; }
 .org-edit-fields .cta-pill { align-self: flex-start; }
 
+/* Organizations tab: neglected-relationships filter */
+.rel-list-filter-row { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.rel-filter-toggle {
+  display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted);
+  cursor: pointer;
+}
+
 /* People tab: add-person header + person editor */
 .people-list-header { display: flex; justify-content: flex-end; margin-bottom: 8px; }
 .person-editor { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
@@ -3993,6 +4035,35 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
 .today-callouts-date-row {
   display: flex; align-items: center; gap: 8px; font-size: 13px;
 }
+
+/* Calendar modal (month grid) */
+.card-deadlines-cal-link { display: block; margin-top: 10px; font-size: 12.5px; }
+.modal-calendar { max-width: 760px; max-height: 88vh; display: flex; flex-direction: column; }
+.modal-calendar .modal-title-block { display: flex; flex-direction: column; gap: 8px; }
+.modal-calendar .modal-body { overflow-y: auto; flex: 1; padding-top: 12px; }
+#calendar-month-label { font-weight: 600; min-width: 110px; text-align: center; }
+.calendar-dow-row {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--muted);
+  text-align: center; margin-bottom: 6px;
+}
+.calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.calendar-cell {
+  min-height: 68px; border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 4px 6px; font-size: 12px; color: var(--ink); cursor: default;
+}
+.calendar-cell--empty { border-color: transparent; }
+.calendar-cell--today { border-color: var(--accent); }
+.calendar-cell-num { font-weight: 600; }
+.calendar-cell-events { margin-top: 3px; display: flex; flex-direction: column; gap: 2px; }
+.calendar-cell-event {
+  font-size: 10.5px; padding: 1px 4px; border-radius: 4px; background: var(--surface);
+  color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: pointer;
+}
+.calendar-cell-event--bill_event { background: #f0f9ff; color: #0369a1; }
+.calendar-day-detail { margin-top: 14px; }
+.calendar-day-detail:empty { margin-top: 0; }
 .today-callouts-date-input {
   border: 1px solid var(--border); border-radius: var(--r-sm);
   padding: 4px 8px; font: inherit; font-size: 13px;
@@ -4083,8 +4154,8 @@ button.attendee-chip--link:hover { border-color: var(--card-blue); color: var(--
 @media (min-width: 601px) and (max-width: 1024px) {
   #view-home { grid-template-columns: repeat(2, 1fr); }
   .card-hero { grid-column: span 2; min-height: 200px; }
-  .card-focus-panel, .card-deadlines { grid-column: span 2; }
-  .card-ring, .card-spark, .card-upcoming, .card-today-callouts { grid-column: span 1; }
+  .card-focus-panel, .card-deadlines, .card-attention { grid-column: span 2; }
+  .card-ring, .card-spark, .card-trends, .card-upcoming, .card-today-callouts { grid-column: span 1; }
 }
 
 /* Single-column relationships drill-down also on iPad portrait (3-col too tight) */

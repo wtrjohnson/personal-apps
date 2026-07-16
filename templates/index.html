@@ -85,6 +85,7 @@
           </div>
           <div class="subtitle" id="deadlines-subtitle">—</div>
           <div class="deadlines-strip" id="deadlines-strip"></div>
+          <button class="linkish card-deadlines-cal-link" id="open-calendar-btn">View full calendar →</button>
         </div>
 
         <div class="card card-ring elevated">
@@ -112,6 +113,12 @@
             <span class="spark-total-label">Completions</span>
           </div>
           <svg class="spark-svg" id="spark-svg" viewBox="0 0 300 100" preserveAspectRatio="none"></svg>
+        </div>
+
+        <div class="card card-trends elevated" id="card-trends" style="display:none">
+          <div class="card-title">Asks &amp; commitments</div>
+          <div class="trends-legend" id="trends-legend"></div>
+          <svg class="trends-svg" id="trends-svg" viewBox="0 0 300 100" preserveAspectRatio="none"></svg>
         </div>
 
         <div class="card card-upcoming elevated" id="card-upcoming-meetings" style="display:none">
@@ -252,6 +259,12 @@
               <button class="groups-subtab" data-subtab="bills">Bills</button>
             </div>
             <div class="groups-panel rel-list-panel" id="groups-panel-orgs">
+              <div class="rel-list-filter-row">
+                <label class="rel-filter-toggle">
+                  <input type="checkbox" id="orgs-neglected-filter">
+                  Not met in 60+ days
+                </label>
+              </div>
               <table class="groups">
                 <thead>
                   <tr>
@@ -910,6 +923,31 @@
       </div>
       <div class="modal-body" id="today-callouts-body">
         <div class="detail-empty">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Calendar modal (meetings, forwarded invites, and bill hearings/floor dates) -->
+  <div id="calendar-backdrop" class="modal-backdrop hidden">
+    <div class="modal modal-calendar" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <div class="modal-title-block">
+          <h2 id="calendar-title">Calendar</h2>
+          <div class="today-callouts-date-row">
+            <button class="linkish" id="calendar-prev" title="Previous month">←</button>
+            <span id="calendar-month-label"></span>
+            <button class="linkish" id="calendar-next" title="Next month">→</button>
+            <button class="linkish" id="calendar-today-btn">This month</button>
+          </div>
+        </div>
+        <button class="modal-close" id="calendar-close" title="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="calendar-dow-row">
+          <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+        </div>
+        <div class="calendar-grid" id="calendar-grid"></div>
+        <div class="calendar-day-detail" id="calendar-day-detail"></div>
       </div>
     </div>
   </div>

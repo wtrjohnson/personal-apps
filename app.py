@@ -720,6 +720,11 @@ def init_db() -> None:
             cur.execute("ALTER TABLE followup_triggers ADD COLUMN IF NOT EXISTS last_match_at TIMESTAMP")
             cur.execute("ALTER TABLE followup_triggers ADD COLUMN IF NOT EXISTS last_match_reason TEXT")
 
+            # Timestamps the transition into a terminal status, so asks/commitments can be
+            # plotted as opened-vs-closed over time instead of only a closed-as-of-now count.
+            cur.execute("ALTER TABLE asks ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP")
+            cur.execute("ALTER TABLE commitments ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP")
+
 
 if DATABASE_URL and os.environ.get("JOS_SKIP_DB_INIT") != "1":
     # Cold start does NOT run DDL (audit A1): schema migrations run deliberately via
@@ -3078,6 +3083,49 @@ def _sync_bill_schedule() -> dict:
     return result
 
 
+_BILL_STAGE_ORDER = ("introduced", "committee", "passed_chamber", "to_president", "enacted")
+_BILL_STAGE_LABELS = {
+    "introduced": "Introduced",
+    "committee": "In Committee",
+    "passed_chamber": "Passed a Chamber",
+    "to_president": "Sent to President",
+    "enacted": "Signed Into Law",
+}
+_BILL_STAGE_KW = (
+    ("enacted", re.compile(r"became public law|public law no|signed by the president|\benacted\b", re.IGNORECASE)),
+    ("to_president", re.compile(r"presented to president", re.IGNORECASE)),
+    ("passed_chamber", re.compile(r"\bpassed (?:the )?(?:house|senate)\b|agreed to in (?:the )?(?:house|senate)|"
+                                   r"\bon passage\b", re.IGNORECASE)),
+    ("committee", re.compile(r"\bcommittee\b", re.IGNORECASE)),
+)
+
+
+def _bill_stage(latest_action: Optional[str], actions: Optional[list] = None) -> dict:
+    """Heuristic bill-lifecycle stage derived from action text — Congress.gov gives no
+    explicit stage enum. Scans the latest action plus, when the full cached action
+    history is available (bill detail drawer), every action for the furthest stage
+    reached and a veto flag; the tracked-bills list only has latest_action, which is
+    enough for a coarse read."""
+    texts = [latest_action or ""]
+    if actions:
+        texts += [a.get("text") or "" for a in actions]
+    reached = {"introduced"}
+    vetoed = False
+    for text in texts:
+        if re.search(r"\bvetoed\b", text, re.IGNORECASE):
+            vetoed = True
+        for stage, pat in _BILL_STAGE_KW:
+            if pat.search(text):
+                reached.add(stage)
+    stage = next(s for s in reversed(_BILL_STAGE_ORDER) if s in reached)
+    return {
+        "stage": stage,
+        "label": _BILL_STAGE_LABELS[stage],
+        "stage_index": _BILL_STAGE_ORDER.index(stage),
+        "vetoed": vetoed,
+    }
+
+
 @app.route("/api/tracked-bills")
 def api_tracked_bills():
     a = request.args
@@ -3141,8 +3189,14 @@ def api_tracked_bills():
             )
             needs_sync = cur.fetchone()["needs"]
 
+    bills_out = []
+    for b in bills:
+        b = dict(b)
+        b.update(_bill_stage(b["latest_action"]))
+        bills_out.append(b)
+
     return jsonify({
-        "bills": [dict(b) for b in bills],
+        "bills": bills_out,
         "counts": counts,
         "congresses": congresses,
         "current_congress": _current_congress(),
@@ -3277,21 +3331,23 @@ def _build_bill_detail_response(bill_id: str, force: bool = False) -> Optional[d
                     "UPDATE tracked_bills SET detail = %s::jsonb, detail_synced = NOW() WHERE id = %s",
                     (json.dumps(detail), bill_id),
                 )
+    bill_out = {
+        "id": row["id"],
+        "congress": row["congress"],
+        "bill_type": row["bill_type"],
+        "bill_number": row["bill_number"],
+        "relationship": row["relationship"],
+        "title": row["title"],
+        "introduced_date": row["introduced_date"],
+        "latest_action": row["latest_action"],
+        "latest_action_date": row["latest_action_date"],
+        "url": row["url"],
+        "working_on": row["working_on"],
+        "last_synced": row["last_synced"].isoformat() if row["last_synced"] else None,
+    }
+    bill_out.update(_bill_stage(row["latest_action"], (detail or {}).get("actions")))
     return {
-        "bill": {
-            "id": row["id"],
-            "congress": row["congress"],
-            "bill_type": row["bill_type"],
-            "bill_number": row["bill_number"],
-            "relationship": row["relationship"],
-            "title": row["title"],
-            "introduced_date": row["introduced_date"],
-            "latest_action": row["latest_action"],
-            "latest_action_date": row["latest_action_date"],
-            "url": row["url"],
-            "working_on": row["working_on"],
-            "last_synced": row["last_synced"].isoformat() if row["last_synced"] else None,
-        },
+        "bill": bill_out,
         "detail": detail,
         "detail_synced": detail_synced.isoformat() if detail_synced else None,
     }
@@ -4310,9 +4366,14 @@ def api_ask_status(ask_id):
     status = (data.get("status") or "").strip()
     if status not in ASK_STATUSES:
         return fail(f"Invalid status (expected one of {', '.join(ASK_STATUSES)})", 400)
+    # resolved_at timestamps the transition into a terminal status, so the trend chart
+    # can plot closed-over-time rather than only a closed-as-of-now snapshot.
+    resolved = status in ("declined", "done", "no_action")
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE asks SET status = %s WHERE id = %s", (status, ask_id))
+            cur.execute(
+                "UPDATE asks SET status = %s, resolved_at = CASE WHEN %s THEN NOW() ELSE NULL END WHERE id = %s",
+                (status, resolved, ask_id))
     return jsonify({"ok": True})
 
 
@@ -4388,10 +4449,15 @@ def api_commitment_status(commitment_id):
     status = (data.get("status") or "").strip()
     if status not in COMMITMENT_STATUSES:
         return fail(f"Invalid status (expected one of {', '.join(COMMITMENT_STATUSES)})", 400)
+    # resolved_at timestamps the transition into a terminal status, so the trend chart
+    # can plot closed-over-time rather than only a closed-as-of-now snapshot.
+    resolved = status in ("done", "dropped")
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE commitments SET status = %s WHERE id = %s",
-                        (status, commitment_id))
+            cur.execute(
+                "UPDATE commitments SET status = %s, resolved_at = CASE WHEN %s THEN NOW() ELSE NULL END "
+                "WHERE id = %s",
+                (status, resolved, commitment_id))
     return jsonify({"ok": True})
 
 
@@ -5164,6 +5230,45 @@ def api_stats():
         "meetings_total": total_meetings,
         "top_urgency": top_urgency,
     })
+
+
+@app.route("/api/trends/asks-commitments")
+def api_trends_asks_commitments():
+    """Weekly opened-vs-closed counts for asks + commitments over the trailing N weeks
+    (default 8). resolved_at (set by the ask/commitment status-update routes) is what
+    makes "closed" a real time series rather than a closed-as-of-now snapshot."""
+    try:
+        weeks = min(max(int(request.args.get("weeks", 8)), 1), 26)
+    except (TypeError, ValueError):
+        weeks = 8
+    today = app_today()
+    start = today - timedelta(weeks=weeks - 1)
+    start = start - timedelta(days=start.weekday())  # align to Monday, matching date_trunc('week', ...)
+
+    def _week_counts(cur, table: str, column: str) -> Dict[str, int]:
+        cur.execute(
+            f"SELECT to_char(date_trunc('week', {column}), 'YYYY-MM-DD') AS week, COUNT(*) AS n "
+            f"FROM {table} WHERE {column} >= %s GROUP BY 1",
+            (start,),
+        )
+        return {r["week"]: r["n"] for r in cur.fetchall()}
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            asks_opened = _week_counts(cur, "asks", "created_at")
+            asks_closed = _week_counts(cur, "asks", "resolved_at")
+            commits_opened = _week_counts(cur, "commitments", "created_at")
+            commits_closed = _week_counts(cur, "commitments", "resolved_at")
+
+    series = []
+    for i in range(weeks):
+        wk = (start + timedelta(weeks=i)).isoformat()
+        series.append({
+            "week": wk,
+            "opened": asks_opened.get(wk, 0) + commits_opened.get(wk, 0),
+            "closed": asks_closed.get(wk, 0) + commits_closed.get(wk, 0),
+        })
+    return jsonify({"weeks": series})
 
 
 @app.route("/api/tasks/snooze", methods=["POST"])
@@ -5957,6 +6062,59 @@ def api_calendar_upload():
         return jsonify(result), status_code
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/calendar")
+def api_calendar():
+    """Month-bucketed calendar: meetings, forwarded ICS invites not yet linked to a
+    meeting, and upcoming committee/floor events for sponsored tracked bills. Backs the
+    calendar modal reached from the deadlines card (no dedicated nav tab)."""
+    month_arg = (request.args.get("month") or "").strip()
+    try:
+        year, mon = (int(x) for x in month_arg.split("-", 1))
+        month_start = date_cls(year, mon, 1)
+    except (ValueError, TypeError):
+        month_start = app_today().replace(day=1)
+    if month_start.month == 12:
+        next_month = month_start.replace(year=month_start.year + 1, month=1)
+    else:
+        next_month = month_start.replace(month=month_start.month + 1)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT m.id, to_char(m.dtstart, 'YYYY-MM-DD') AS day, m.topic,
+                       m.meeting_link, 'meeting' AS kind
+                FROM meetings m
+                WHERE m.dtstart >= %(start)s AND m.dtstart < %(end)s
+            """, {"start": month_start, "end": next_month})
+            items = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT e.id, to_char(e.dtstart, 'YYYY-MM-DD') AS day, e.summary AS topic,
+                       e.location AS meeting_link, 'external' AS kind
+                FROM external_calendar_events e
+                WHERE e.dtstart >= %(start)s AND e.dtstart < %(end)s
+                  AND e.meeting_id IS NULL
+            """, {"start": month_start, "end": next_month})
+            items += [dict(r) for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT e.id, to_char(e.event_date, 'YYYY-MM-DD') AS day,
+                       (e.bill_type || ' ' || e.bill_number || ' ' || COALESCE(e.event_type, 'Event')) AS topic,
+                       e.committee_name AS meeting_link, 'bill_event' AS kind
+                FROM bill_schedule_events e
+                JOIN tracked_bills tb ON tb.congress = e.congress AND tb.bill_type = e.bill_type
+                    AND tb.bill_number = e.bill_number
+                WHERE e.event_date >= %(start)s AND e.event_date < %(end)s
+                  AND tb.relationship = 'sponsored'
+            """, {"start": month_start, "end": next_month})
+            items += [dict(r) for r in cur.fetchall()]
+
+    by_day: Dict[str, list] = {}
+    for item in items:
+        by_day.setdefault(item["day"], []).append(item)
+    return jsonify({"month": month_start.strftime("%Y-%m"), "days": by_day})
 
 
 @app.route("/api/meetings/upcoming")
