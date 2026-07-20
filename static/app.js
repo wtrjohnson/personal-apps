@@ -993,61 +993,153 @@ function getRecurrenceRule(prefix) {
 }
 
 // ---------- NL Morphing Add-task modal ----------
+// Returns { iso, start, end } for the matched date phrase, or null. Date-only:
+// times of day ("by noon", "at 3pm") are ignored here and stripped from the title
+// separately. start/end index into `text` so the caller can excise the phrase when
+// condensing the title.
 function _clientExtractDeadline(text) {
-  const t = text.toLowerCase();
   const today = new Date();
-  const iso = (d) => d.toISOString().slice(0, 10);
+  const isoLocal = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const addDays = (n) => { const d = new Date(today); d.setDate(d.getDate() + n); return d; };
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  const monthNames = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+  const P = "(?:\\b(?:by|on|due(?: by)?|before|no later than)\\s+)?"; // optional leading preposition, kept in the span
 
-  if (/\btomorrow\b/.test(t)) return iso(addDays(1));
-  const inN = t.match(/\bin (\d+) days?\b/);
-  if (inN) return iso(addDays(parseInt(inN[1])));
-  if (/\bend of (this )?week\b/.test(t)) return iso(_thisFriday());
-  if (/\bnext week\b/.test(t)) return iso(_thisFriday());
-  const dayNames = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
-  const nextDay = t.match(/\bnext (sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
-  if (nextDay) return iso(_nextWeekday(dayNames.indexOf(nextDay[1])));
-  return null;
+  const hits = [];
+  const push = (m, d) => { if (m && d) hits.push({ iso: isoLocal(d), start: m.index, end: m.index + m[0].length }); };
+
+  push(new RegExp(P + "tomorrow\\b", "i").exec(text), addDays(1));
+  push(new RegExp(P + "(?:today|tonight)\\b", "i").exec(text), new Date(today));
+  const inN = /\bin\s+(\d+)\s+days?\b/i.exec(text);
+  if (inN) push(inN, addDays(parseInt(inN[1], 10)));
+  push(/\bend of (?:this |the )?week\b/i.exec(text), _thisFriday());
+  push(/\bnext week\b/i.exec(text), _thisFriday());
+  const eom = /\bend of (?:this |the )?month\b/i.exec(text);
+  if (eom) push(eom, new Date(today.getFullYear(), today.getMonth() + 1, 0));
+  const nextMo = /\bnext month\b/i.exec(text);
+  if (nextMo) { const d = new Date(today); d.setMonth(d.getMonth() + 1); push(nextMo, d); }
+  const nextDay = new RegExp("\\bnext\\s+(" + dayNames.join("|") + ")\\b", "i").exec(text);
+  if (nextDay) push(nextDay, _nextWeekday(dayNames.indexOf(nextDay[1].toLowerCase())));
+  const wd = new RegExp(P + "(?:this\\s+)?(" + dayNames.join("|") + ")\\b", "i").exec(text);
+  if (wd) push(wd, _nextWeekday(dayNames.indexOf(wd[1].toLowerCase())));
+  const monthAlt = monthNames.map((n) => n + "|" + n.slice(0, 3)).join("|");
+  const monM = new RegExp(P + "\\b(" + monthAlt + ")\\b\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?\\b", "i").exec(text);
+  if (monM) {
+    const mi = monthNames.findIndex((n) => n.startsWith(monM[1].toLowerCase()));
+    const day = parseInt(monM[2], 10);
+    const year = monM[3] ? parseInt(monM[3], 10) : today.getFullYear();
+    let d = new Date(year, mi, day);
+    if (!monM[3] && d < startOfToday) d = new Date(year + 1, mi, day);
+    if (mi >= 0 && day >= 1 && day <= 31) push(monM, d);
+  }
+  const numM = new RegExp(P + "(\\d{1,2})/(\\d{1,2})(?:/(\\d{2,4}))?\\b").exec(text);
+  if (numM) {
+    const mo = parseInt(numM[1], 10) - 1;
+    const day = parseInt(numM[2], 10);
+    const year = numM[3] ? (numM[3].length === 2 ? 2000 + parseInt(numM[3], 10) : parseInt(numM[3], 10)) : today.getFullYear();
+    let d = new Date(year, mo, day);
+    if (!numM[3] && d < startOfToday) d = new Date(year + 1, mo, day);
+    if (mo >= 0 && mo <= 11 && day >= 1 && day <= 31) push(numM, d);
+  }
+
+  if (!hits.length) return null;
+  // Prefer the earliest phrase in the text; break ties by the longest (most specific) match.
+  hits.sort((a, b) => (a.start - b.start) || ((b.end - b.start) - (a.end - a.start)));
+  return hits[0];
 }
 
 function parseNLTask(text) {
-  const result = { text, priority: "normal", contact: null, phone: null, email: null, deadline: null, group: null, estimate_minutes: null };
+  const result = { text, title: text, priority: "normal", contact: null, phone: null, email: null, deadline: null, group: null, estimate_minutes: null };
+  const spans = []; // [start, end) ranges to excise when condensing the title
 
-  if (/\b(urgent|urgently|asap|a\.s\.a\.p\.?|critical|immediately|must do|p[01])\b/i.test(text)) {
+  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Span of a group name, swallowing a leading "on/for/… the" so no connector lingers.
+  const spanFor = (phrase) => {
+    const re = new RegExp("(?:\\b(?:on|for|with|at|in|to|about|re)\\s+)?(?:the\\s+)?" + escapeRe(phrase), "i");
+    const m = re.exec(text);
+    return m ? [m.index, m.index + m[0].length] : null;
+  };
+
+  const PRIO_RE = /\b(urgent|urgently|asap|a\.s\.a\.p\.?|critical|immediately|must do|p[01])\b/gi;
+  for (let pm; (pm = PRIO_RE.exec(text)) !== null; ) {
     result.priority = "high";
+    spans.push([pm.index, pm.index + pm[0].length]);
   }
 
-  const contactM = text.match(/\b(?:call|email|meet|text|ping)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/);
-  if (contactM) result.contact = contactM[1];
+  // Who — verb + Title-case name. Kept in the title (not excised), so "email Karl" stays.
+  const VERB = "(?:call|e-?mail|email|meet(?: with)?|text|ping|message|write|contact|ask|remind|follow up with|reach out to|talk to|see|check with)";
+  const verbM = new RegExp("\\b" + VERB + "\\s+", "i").exec(text);
+  if (verbM) {
+    const nameM = /^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/.exec(text.slice(verbM.index + verbM[0].length));
+    if (nameM) result.contact = nameM[1];
+  }
 
   const phoneM = text.match(/\b(\d{3}[-.\s]?\d{3}[-.\s]?\d{4})\b/);
-  if (phoneM) result.phone = phoneM[1];
+  if (phoneM) { result.phone = phoneM[1]; spans.push([phoneM.index, phoneM.index + phoneM[0].length]); }
 
   const emailM = text.match(/\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/);
-  if (emailM) result.email = emailM[0];
+  if (emailM) { result.email = emailM[0]; spans.push([emailM.index, emailM.index + emailM[0].length]); }
 
-  const estM = text.match(/\b(\d+(?:\.\d+)?)\s*(min(?:utes?)?|h(?:ours?)?)\b/i);
+  const estM = text.match(/\b(\d+(?:\.\d+)?)\s*(min(?:ute)?s?|h(?:ou)?rs?|hrs?)\b/i);
   if (estM) {
     const val = parseFloat(estM[1]);
     result.estimate_minutes = /h/i.test(estM[2]) ? Math.round(val * 60) : Math.round(val);
+    spans.push([estM.index, estM.index + estM[0].length]);
   }
 
-  result.deadline = _clientExtractDeadline(text);
+  const dl = _clientExtractDeadline(text);
+  if (dl) { result.deadline = dl.iso; spans.push([dl.start, dl.end]); }
 
-  const allGroups = state.tasksGroupsInScope.concat(state.facets.groups).filter((v, i, a) => a.indexOf(v) === i);
-  for (const g of allGroups) {
+  // Group — 1) a known group by substring (longest/most-specific first); else
+  // 2) a "…the X Committee/Caucus/…" phrase, snapped to a known group if it matches.
+  const known = orgPickerList().map((o) => o.name).filter(Boolean)
+    .filter((v, i, a) => a.indexOf(v) === i)
+    .sort((a, b) => b.length - a.length);
+  let groupSpan = null;
+  for (const g of known) {
     if (text.toLowerCase().includes(g.toLowerCase())) {
-      result.group = g;
-      result.groupUncertain = true;
-      break;
+      result.group = g; result.groupUncertain = false; groupSpan = spanFor(g); break;
     }
   }
+  if (!result.group) {
+    const ORG_SUFFIX = "Committee|Subcommittee|Caucus|Council|Board|Commission|Coalition|Association|Office|Department|Agency|Team|Group|Task Force|Working Group";
+    const orgM = new RegExp(
+      "\\b(?:on|for|with|at|in|to)\\s+(?:the\\s+)?" +
+      "([A-Z][\\w'&.\\-]*(?:\\s+(?:and|of|the|for|&|[A-Z][\\w'&.\\-]*))*\\s+(?:" + ORG_SUFFIX + "))\\b"
+    ).exec(text);
+    if (orgM) {
+      const phrase = orgM[1].replace(/\s+/g, " ").trim();
+      const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const snapped = known.find((g) => norm(g) === norm(phrase));
+      result.group = snapped || phrase;
+      result.groupUncertain = true;
+      groupSpan = [orgM.index, orgM.index + orgM[0].length];
+    }
+  }
+  if (groupSpan) spans.push(groupSpan);
+
+  // Condense the title: blank the excised spans, drop times of day, tidy connectors.
+  const chars = text.split("");
+  for (const [s, e] of spans) for (let i = s; i < e && i < chars.length; i++) chars[i] = " ";
+  let title = chars.join("");
+  title = title.replace(/\b(?:by|at|around|before|due(?: by)?)?\s*(?:noon|midday|midnight|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|\d{1,2}\s*o'?clock)\b/gi, " ");
+  title = title.replace(/\s+/g, " ").trim();
+  const stripPunct = (s) => s.replace(/^[\s:;,.–—-]+/, "").replace(/[\s:;,.–—-]+$/, "").trim();
+  title = stripPunct(title);
+  title = title.replace(/^(?:and|of|the|to|on|for|with|about|re|by|at|in)\s+/i, "").trim();
+  title = title.replace(/\s+(?:and|of|the|to|on|for|with|about|re|by|at|in)$/i, "").trim();
+  title = stripPunct(title);
+  if (title) title = title.charAt(0).toUpperCase() + title.slice(1);
+  result.title = title || text.trim();
 
   return result;
 }
 
 function _populateNLStep2(parsed) {
   const blocks = [
+    { uncertain: false, html: `<label>Task</label>
+      <input id="nl-f-title" type="text" value="${escapeHtml(parsed.title || parsed.text || "")}" placeholder="Task summary" autocomplete="off">` },
     { uncertain: false, html: `<label>Priority</label>
       <select id="nl-f-priority">${[["normal","Normal"],["high","High"],["low","Low"]].map(([v, l]) => `<option value="${v}"${v === parsed.priority ? " selected" : ""}>${l}</option>`).join("")}</select>` },
     { uncertain: !!parsed.groupUncertain, html: `<label>Organization${parsed.groupUncertain ? ' <span class="nl-check-this">check this</span>' : ""}</label>
@@ -1065,7 +1157,7 @@ function _populateNLStep2(parsed) {
     </div>`).join("");
 
   _nlOrgPicker = entityPicker($("#nl-f-group-picker"), { type: "org", value: parsed.group || "", orgList: orgPickerList() });
-  _nlPersonPicker = entityPicker($("#nl-f-person-picker"), { type: "person", value: "", valueId: "" });
+  _nlPersonPicker = entityPicker($("#nl-f-person-picker"), { type: "person", value: parsed.contact || "", valueId: "" });
 
   // Expand container, then unblur fields staggered
   requestAnimationFrame(() => {
@@ -1137,19 +1229,20 @@ function _nlTransitionToStep2() {
 
 async function submitNLModal() {
   if (!_nlParsed) return;
-  const text = $("#nl-text").value.trim();
+  const text = ($("#nl-f-title")?.value || "").trim() || $("#nl-text").value.trim();
   if (!text) return;
   const priority = $("#nl-f-priority")?.value || "normal";
   const deadline = getDeadlineValue("nl-f") || "";
   const group = (_nlOrgPicker ? _nlOrgPicker.getName() : "") || "";
   const contact_id = _nlPersonPicker ? _nlPersonPicker.getId() : "";
+  const contact = _nlPersonPicker ? _nlPersonPicker.getName() : "";
   const estimateRaw = parseInt($("#nl-f-estimate")?.value);
   const estimate_minutes = isNaN(estimateRaw) ? null : estimateRaw;
 
   await api("/api/tasks/add", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, group, deadline, priority, contact_id, estimate_minutes }),
+    body: JSON.stringify({ text, group, deadline, priority, contact_id, contact, estimate_minutes }),
   });
   closeNLModal();
   if (state.tab === "tasks") await refreshTasks();
@@ -4815,16 +4908,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (p.group) hints.push(`group: ${p.group}`);
     $("#nl-hint").textContent = hints.length ? "Detected: " + hints.join(", ") : "";
   }, 400);
-  const _nlAutoParseDebounced = debounce(() => {
-    const ta = $("#nl-text");
-    if (!ta.readOnly && ta.value.trim()) _nlTransitionToStep2();
-  }, 700);
   $("#nl-text").addEventListener("input", (e) => {
     _nlHintDebounced(e.target.value);
-    _nlAutoParseDebounced();
   });
+  // Parse only on an explicit signal — never auto-advance while typing. Plain Enter
+  // and Shift+Enter insert newlines; Cmd/Ctrl+Enter (or the button) parses.
   $("#nl-text").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); _nlTransitionToStep2(); }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); _nlTransitionToStep2(); }
   });
 
   // Edit modal recurrence picker
