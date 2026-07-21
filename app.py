@@ -650,6 +650,19 @@ def init_db() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS bill_sched_typenum ON bill_schedule_events (congress, bill_type, bill_number);
                 CREATE INDEX IF NOT EXISTS bill_sched_date ON bill_schedule_events (event_date);
+                -- Committee-meeting fetch cache: remembers the resolved date + last-processed
+                -- updateDate for every meeting we've fetched a detail for, so the schedule
+                -- sync can skip re-fetching (a) meetings unchanged since we last saw them and
+                -- (b) concluded meetings whose post-hoc document postings keep bumping their
+                -- updateDate. Without it the per-run fetch budget is consumed by backfills of
+                -- past meetings and a freshly noticed upcoming markup can be starved out.
+                CREATE TABLE IF NOT EXISTS committee_meeting_seen (
+                    event_id     TEXT PRIMARY KEY,
+                    update_date  TEXT,               -- last updateDate we processed a detail for
+                    meeting_date DATE,               -- resolved meeting date (NULL if undated)
+                    last_seen    TIMESTAMP DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS cm_seen_meeting_date ON committee_meeting_seen (meeting_date);
             """)
             # Fold legacy tasks.contact free-text into the linked contact's phone field
             # when empty (audit M2), so the redundant per-task field can retire from the UI
@@ -2725,8 +2738,15 @@ def _tracked_bill_keys(cur) -> set:
 def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
     """Page House committee meetings (newest updateDate first), fetch details, and store
     upcoming Hearing/Markup events whose related bills are tracked. Time-boxed so a single
-    invocation stays well under Vercel Hobby's ~10s function limit; incremental updateDate
-    paging + twice-daily runs fill in coverage over successive runs."""
+    invocation stays well under Vercel Hobby's ~10s function limit.
+
+    Returns {"events", "scanned", "more"}; `more` is True when the run stopped early at the
+    fetch cap/time budget with the window not fully scanned. The caller must then leave the
+    incremental watermark (`since`) unadvanced so the next run resumes the same window —
+    without that, meetings below the cap fall behind the cursor and are skipped forever. The
+    committee_meeting_seen cache lets those re-scans skip meetings that are unchanged, or
+    already resolved to a past date, so the per-run budget goes to genuinely new meetings
+    (e.g. a freshly noticed upcoming markup) instead of post-hoc backfills of concluded ones."""
     stored = 0
     fetched = 0
     offset, limit = 0, 250
@@ -2755,6 +2775,24 @@ def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
             event_id = m.get("eventId")
             if not event_id:
                 continue
+            # Skip meetings we've already resolved, so the fetch budget is spent on genuinely
+            # new/changed meetings (checked before the budget gate so cache hits are free):
+            #   - a meeting we previously dated in the past can never become upcoming again,
+            #     even as later document postings keep bumping its updateDate; and
+            #   - a meeting whose updateDate is unchanged since we last processed it has
+            #     nothing new to record.
+            # (A tracked-bill set change between runs is rare relative to meeting churn, so
+            # not re-evaluating an unchanged meeting against new keys is an accepted trade-off.)
+            cur.execute(
+                "SELECT update_date, meeting_date FROM committee_meeting_seen WHERE event_id = %s",
+                (str(event_id),),
+            )
+            seen = cur.fetchone()
+            if seen:
+                if seen["meeting_date"] is not None and seen["meeting_date"] < today:
+                    continue
+                if seen["update_date"] == _cmp_ts(upd):
+                    continue
             if fetched >= _COMMITTEE_DETAIL_CAP or time.monotonic() > deadline:
                 stop = True
                 more = True
@@ -2766,14 +2804,25 @@ def _sync_committee_meetings(cur, congress: int, keys: set, since) -> int:
                 continue
             cm = detail.get("committeeMeeting") or {}
             mdate = cm.get("date")
-            if not mdate:
-                continue
+            mday = None
+            if mdate:
+                try:
+                    mday = datetime.fromisoformat(mdate.replace("Z", "+00:00")).date()
+                except (ValueError, AttributeError):
+                    mday = None
+            # Cache the resolved date + updateDate so subsequent runs can skip this meeting.
+            cur.execute(
+                """
+                INSERT INTO committee_meeting_seen (event_id, update_date, meeting_date, last_seen)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (event_id) DO UPDATE SET
+                    update_date = EXCLUDED.update_date, meeting_date = EXCLUDED.meeting_date,
+                    last_seen = NOW()
+                """,
+                (str(event_id), _cmp_ts(upd), mday),
+            )
             # Only forward-looking events.
-            try:
-                mday = datetime.fromisoformat(mdate.replace("Z", "+00:00")).date()
-            except (ValueError, AttributeError):
-                continue
-            if mday < today:
+            if mday is None or mday < today:
                 continue
             related = ((cm.get("relatedItems") or {}).get("bills") or {})
             bills = related.get("bill") if isinstance(related, dict) else related
@@ -2979,6 +3028,13 @@ def _sync_bill_schedule() -> dict:
                 """
             )
             cur.execute("DELETE FROM bill_schedule_events WHERE event_date < CURRENT_DATE - INTERVAL '3 days'")
+            # Bound the fetch cache: concluded meetings are irrelevant once well past, and
+            # undated rows that stop reappearing can age out.
+            cur.execute(
+                "DELETE FROM committee_meeting_seen WHERE "
+                "(meeting_date IS NOT NULL AND meeting_date < CURRENT_DATE - INTERVAL '30 days') "
+                "OR (meeting_date IS NULL AND last_seen < NOW() - INTERVAL '14 days')"
+            )
             result = {
                 "committee_events": committee["events"],
                 "committee_scanned": committee["scanned"],
@@ -2986,13 +3042,27 @@ def _sync_bill_schedule() -> dict:
                 "floor_events": floor_events,
                 "floor_ok": floor_ok,
             }
-            cur.execute(
-                "INSERT INTO bill_sync_meta (id, schedule_last_synced, schedule_last_result, schedule_last_error) "
-                "VALUES (1, NOW(), %s::jsonb, NULL) "
-                "ON CONFLICT (id) DO UPDATE SET schedule_last_synced = NOW(), "
-                "schedule_last_result = EXCLUDED.schedule_last_result, schedule_last_error = NULL",
-                (json.dumps(result),),
-            )
+            # Only advance the incremental watermark when the committee sweep actually
+            # finished. If it stopped early (fetch cap / time budget), leaving
+            # schedule_last_synced untouched keeps the un-scanned window in range so the next
+            # run resumes it — otherwise meetings below the cap fall behind the cursor and are
+            # skipped permanently. The fetch cache keeps that re-scan cheap.
+            if committee["more"]:
+                cur.execute(
+                    "INSERT INTO bill_sync_meta (id, schedule_last_result, schedule_last_error) "
+                    "VALUES (1, %s::jsonb, NULL) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "schedule_last_result = EXCLUDED.schedule_last_result, schedule_last_error = NULL",
+                    (json.dumps(result),),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO bill_sync_meta (id, schedule_last_synced, schedule_last_result, schedule_last_error) "
+                    "VALUES (1, NOW(), %s::jsonb, NULL) "
+                    "ON CONFLICT (id) DO UPDATE SET schedule_last_synced = NOW(), "
+                    "schedule_last_result = EXCLUDED.schedule_last_result, schedule_last_error = NULL",
+                    (json.dumps(result),),
+                )
     return result
 
 
