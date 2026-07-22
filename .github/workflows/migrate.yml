@@ -2,8 +2,14 @@ name: Run DB migrations
 
 # Applies schema migrations after every push to main, so a deploy that adds tables/
 # columns to schema.sql / init_db() never silently drifts from production like
-# import_tombstones did. Idempotent (CREATE ... IF NOT EXISTS), safe to run anytime —
-# does not need to wait for the Vercel build to finish since changes are additive-only.
+# import_tombstones did. Idempotent (CREATE ... IF NOT EXISTS), safe to run anytime.
+#
+# Crucially, migrations must run against the *new* code: /api/admin/migrate executes the
+# init_db() of whatever build Vercel currently serves. Firing it the instant we push races
+# the Vercel build and can hit the OLD code, whose init_db() lacks the new table/column —
+# so the migration silently skips it and the new code later errors on a missing relation
+# (e.g. "committee_meeting_seen does not exist"). We therefore poll /api/version until the
+# deployed commit matches this push's SHA before migrating.
 #
 # Requires the same two repo secrets already used by bill-sync.yml:
 #   CRON_SECRET  – must match the CRON_SECRET env var set in Vercel
@@ -18,6 +24,23 @@ jobs:
   migrate:
     runs-on: ubuntu-latest
     steps:
+      - name: Wait for the new deploy to go live
+        run: |
+          want="${{ github.sha }}"
+          echo "Waiting for deployed commit to match ${want}"
+          # Poll for up to ~8 min (48 * 10s). Vercel builds this app in well under that.
+          for i in $(seq 1 48); do
+            got="$(curl -fsS --max-time 20 "${{ secrets.APP_URL }}/api/version" \
+              | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+            echo "attempt ${i}: deployed=${got:-<none>}"
+            if [ "${got}" = "${want}" ]; then
+              echo "New deploy is live."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Timed out waiting for the new deploy; migrating anyway against whatever is live." >&2
+
       - name: Run migrations
         run: |
           curl -fsS --max-time 120 -X POST \

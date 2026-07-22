@@ -39,6 +39,11 @@ CONGRESS_API_KEY = os.environ.get("CONGRESS_API_KEY", "")
 CONGRESS_MEMBER_BIOGUIDE = os.environ.get("CONGRESS_MEMBER_BIOGUIDE", "M001213")
 # Shared secret for the scheduled-sync endpoint (GitHub Actions sends it as a bearer token).
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
+# Git commit the running instance was built from (Vercel sets this at build time). Exposed
+# via /api/version so the post-push migrate workflow can wait for the *new* deploy to go
+# live before running init_db — otherwise migrate races the build, hits the old code, and
+# a deploy that adds a table (e.g. committee_meeting_seen) silently skips creating it.
+DEPLOY_COMMIT = os.environ.get("VERCEL_GIT_COMMIT_SHA", "")
 # Timezone for all user-facing "today" logic. Vercel runs in UTC, so without this the
 # app rolls over to the next day mid-evening Mountain time. Override via env if needed.
 APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "America/Denver")
@@ -769,7 +774,7 @@ def _handle_uncaught(e):
 def require_login() -> Optional[Any]:
     if request.path.startswith("/static/"):
         return None
-    if request.endpoint in ("login", "logout", "shortcut_add_task", "cron_sync", "admin_migrate"):
+    if request.endpoint in ("login", "logout", "shortcut_add_task", "cron_sync", "admin_migrate", "api_version"):
         return None
     if not session.get("logged_in"):
         return redirect(url_for("login"))
@@ -3493,6 +3498,14 @@ def cron_sync():
     except Exception as e:
         _record_sync_error("schedule_last_error" if job == "schedule" else "last_error", str(e))
         return jsonify({"ok": False, "job": job, "error": str(e)}), 500
+
+
+@app.route("/api/version", methods=["GET"])
+def api_version():
+    """Report the commit the running instance was built from. Unauthenticated and cheap
+    (no DB) so the migrate workflow can poll it to confirm the new deploy is live before
+    running init_db, avoiding the migrate-races-the-build drift described on DEPLOY_COMMIT."""
+    return jsonify({"ok": True, "commit": DEPLOY_COMMIT})
 
 
 @app.route("/api/admin/migrate", methods=["POST"])
