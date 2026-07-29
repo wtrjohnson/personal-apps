@@ -114,7 +114,7 @@ def test_server_error_does_not_echo_exception_text(db, client, monkeypatch):
     def boom():
         raise RuntimeError("relation \"secret_internal_table\" does not exist")
 
-    monkeypatch.setattr(app_mod, "db_get_all_tasks", lambda **kw: boom())
+    monkeypatch.setattr(app_mod, "db_query_tasks", lambda **kw: boom())
     resp = client.get("/api/tasks")
     assert resp.status_code == 500
     body = resp.get_data(as_text=True)

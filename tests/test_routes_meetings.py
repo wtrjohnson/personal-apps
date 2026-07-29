@@ -56,11 +56,15 @@ def test_meeting_list_does_not_read_canvas_images(db, client, monkeypatch):
     )
     assert client.get("/api/meetings").status_code == 200
 
+    # The row-fetching selects, not the COUNT(*) used for pagination totals.
     meeting_selects = [
-        s for s in statements if "FROM meetings" in s and s.lstrip().upper().startswith("SELECT")
+        s for s in statements
+        if "FROM meetings" in s
+        and s.lstrip().upper().startswith("SELECT")
+        and "COUNT(" not in s.upper()
     ]
     assert meeting_selects, "expected a select against meetings"
     for sql in meeting_selects:
         assert "canvas_image" not in sql, "the meetings list is reading canvas_image again"
         assert "body_html" not in sql, "the meetings list is reading body_html again"
-        assert "*" not in sql, "the meetings list is back to SELECT *"
+        assert "SELECT *" not in " ".join(sql.split()), "back to SELECT *"

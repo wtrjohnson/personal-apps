@@ -1345,6 +1345,14 @@ def extract_deadline(
     return None, None
 
 
+def _int_arg(name: str, default: int) -> int:
+    """A non-negative integer query argument, falling back on anything unparseable."""
+    try:
+        return max(0, int(request.args.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def as_iso_date(value: Optional[str]) -> Optional[str]:
     """Return `value` if it is a real ISO calendar date, else None.
 
@@ -1842,6 +1850,83 @@ def db_get_all_tasks(include_done: bool = False) -> List[Task]:
     return [_task_row_to_task(dict(r), today) for r in rows]
 
 
+def db_query_tasks(
+    *,
+    status: str = "open",
+    type_filter: str = "",
+    priority: str = "",
+    deadline: str = "",
+    parent_id: str = "",
+    show_subtasks: bool = False,
+    only_snoozed: bool = False,
+    overdue_only: bool = False,
+    q: str = "",
+) -> List[Task]:
+    """Tasks matching the deterministic filters, resolved in SQL.
+
+    /api/tasks used to load every task in the database and filter the whole set in Python,
+    so narrowing to one group or one priority cost exactly as much as asking for
+    everything — and the tasks view issues three of these per refresh. Everything that can
+    be expressed as a predicate now runs in the query.
+
+    Urgency scoring stays in Python: it mixes weighted keyword regexes with date
+    arithmetic, and reimplementing it in SQL would duplicate the ranking rules in two
+    languages. It now runs over the matched rows instead of the entire table. The group
+    filter is deliberately excluded here — the response advertises the groups present in
+    the rest of the result set, so it has to be applied after this query."""
+    today = app_today()
+    where: List[str] = []
+    params: List[Any] = []
+
+    if status == "open":
+        where.append("NOT t.done AND NOT t.backburner")
+    elif status == "done":
+        where.append("t.done AND NOT t.backburner")
+    elif status == "backburner":
+        where.append("t.backburner")
+
+    if only_snoozed:
+        where.append("t.snoozed_until IS NOT NULL AND t.snoozed_until > %s")
+        params.append(today)
+    else:
+        where.append("(t.snoozed_until IS NULL OR t.snoozed_until <= %s)")
+        params.append(today)
+
+    if parent_id:
+        where.append("t.parent_id = %s")
+        params.append(parent_id)
+    elif not show_subtasks:
+        where.append("t.parent_id IS NULL")
+
+    if type_filter:
+        where.append("t.type = %s")
+        params.append(type_filter)
+    if priority:
+        where.append("t.priority = %s")
+        params.append(priority)
+    if deadline:
+        where.append("t.deadline = %s")
+        params.append(as_iso_date(deadline))
+    if overdue_only:
+        where.append("t.deadline IS NOT NULL AND NOT t.done AND t.deadline < %s")
+        params.append(today)
+    if q:
+        where.append("(t.text ILIKE %s OR t.group_name ILIKE %s)")
+        params.extend([f"%{q}%", f"%{q}%"])
+
+    sql = _TASKS_SELECT
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY t.created_at"
+
+    today_iso = today.isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    return [_task_row_to_task(dict(r), today_iso) for r in rows]
+
+
 def db_get_org_profile(org_id: str) -> Optional[dict]:
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -2320,6 +2405,94 @@ def _matches_query(m: Meeting, q: str) -> bool:
     ))
 
 
+def db_query_meetings(
+    *,
+    q: str = "",
+    group: str = "",
+    purpose: str = "",
+    attendee: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    has_open_tasks: bool = False,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> Tuple[List[Meeting], int]:
+    """Meetings matching the list filters, resolved in SQL. Returns (page, total).
+
+    The list and search paths used to load every meeting — full note bodies included — and
+    filter them in Python, so searching cost the same as fetching the archive. /api/search
+    did it on every keystroke. The predicates now run in the query; the free-text match
+    mirrors _matches_query field for field, including the EXISTS over task text."""
+    where: List[str] = []
+    params: Dict[str, Any] = {}
+
+    if group:
+        where.append("m.canonical_group = %(group)s")
+        params["group"] = group
+    if purpose:
+        # purpose is a JSONB array of strings; containment matches the Python `in` test.
+        where.append("m.purpose @> %(purpose)s::jsonb")
+        params["purpose"] = json.dumps([purpose])
+    if attendee:
+        where.append("m.attendees ILIKE %(attendee)s")
+        params["attendee"] = f"%{attendee}%"
+    if date_from:
+        where.append("m.file_date IS NOT NULL AND m.file_date >= %(date_from)s")
+        params["date_from"] = date_from
+    if date_to:
+        where.append("m.file_date IS NOT NULL AND m.file_date <= %(date_to)s")
+        params["date_to"] = date_to
+    if has_open_tasks:
+        where.append(
+            "EXISTS (SELECT 1 FROM tasks ht WHERE ht.meeting_id = m.id AND NOT ht.done "
+            "AND ht.type IN ('action', 'reminder'))"
+        )
+    if q:
+        where.append("""(
+            m.raw_group ILIKE %(q)s OR m.canonical_group ILIKE %(q)s
+            OR m.topic ILIKE %(q)s OR m.outcome ILIKE %(q)s
+            OR m.deadline ILIKE %(q)s OR m.attendees ILIKE %(q)s
+            OR m.filename ILIKE %(q)s OR m.body ILIKE %(q)s
+            OR m.purpose::text ILIKE %(q)s
+            OR EXISTS (SELECT 1 FROM tasks qt WHERE qt.meeting_id = m.id AND qt.text ILIKE %(q)s)
+        )""")
+        params["q"] = f"%{q}%"
+
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) AS c FROM meetings m{clause}", params)
+            total = cur.fetchone()["c"]
+
+            sql = (
+                f"SELECT {_MEETING_LIST_COLUMNS} FROM meetings m{clause} "
+                "ORDER BY m.file_date DESC NULLS LAST, m.id"
+            )
+            page_params = dict(params)
+            if limit is not None:
+                sql += " LIMIT %(limit)s OFFSET %(offset)s"
+                page_params.update({"limit": limit, "offset": offset})
+            cur.execute(sql, page_params)
+            meeting_rows = cur.fetchall()
+            if not meeting_rows:
+                return [], total
+
+            meeting_ids = [r["id"] for r in meeting_rows]
+            cur.execute(
+                f"SELECT {_MEETING_TASK_COLUMNS} FROM tasks WHERE meeting_id = ANY(%s)",
+                (meeting_ids,),
+            )
+            task_rows = cur.fetchall()
+
+    tasks_by_meeting: Dict[str, List[dict]] = {}
+    for t in task_rows:
+        tasks_by_meeting.setdefault(t["meeting_id"], []).append(dict(t))
+    return (
+        [_row_to_meeting(dict(r), tasks_by_meeting.get(r["id"], [])) for r in meeting_rows],
+        total,
+    )
+
+
 def filter_meetings(
     meetings: List[Meeting],
     *,
@@ -2331,6 +2504,8 @@ def filter_meetings(
     date_to: str = "",
     has_open_tasks: bool = False,
 ) -> List[Meeting]:
+    """In-memory equivalent of db_query_meetings, kept for callers that already hold a
+    fully-loaded list (and as the reference the SQL predicates are tested against)."""
     out = []
     for m in meetings:
         if group and m.canonical_group != group:
@@ -2401,14 +2576,23 @@ def home():
 @app.route("/api/meetings")
 def api_meetings():
     a = request.args
-    results = filter_meetings(
-        db_get_all_meetings(),
+    offset = _int_arg("offset", 0)
+    limit = _int_arg("limit", 500)
+    limit = None if limit <= 0 else min(limit, 2000)
+    results, total = db_query_meetings(
         q=a.get("q", ""), group=a.get("group", ""), purpose=a.get("purpose", ""),
         attendee=a.get("attendee", ""), date_from=a.get("date_from", ""),
         date_to=a.get("date_to", ""),
         has_open_tasks=a.get("has_open_tasks", "").lower() in ("1", "true", "yes"),
+        limit=limit, offset=offset,
     )
-    return jsonify({"count": len(results), "meetings": [m.summary() for m in results]})
+    return jsonify({
+        "count": len(results),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "meetings": [m.summary() for m in results],
+    })
 
 
 @app.route("/api/meetings/<mid>")
@@ -4069,8 +4253,8 @@ def api_search():
             if people:
                 groups.append({"type": "person", "label": "People", "items": people})
 
-            # Meetings (reuse existing comprehensive match) + entity notes
-            meetings = filter_meetings(db_get_all_meetings(), q=q)[:limit]
+            # Meetings (same comprehensive match, now resolved in SQL) + entity notes
+            meetings, _ = db_query_meetings(q=q, limit=limit)
             mn_items = [{
                 "type": "meeting", "id": m.id,
                 "title": m.topic or m.canonical_group or m.filename or "(meeting)",
@@ -4870,44 +5054,20 @@ def api_tasks():
     week_out_iso = (app_today() + timedelta(days=7)).isoformat()
     neglect_cutoff = (app_today() - timedelta(days=14)).isoformat()
 
-    tasks = db_get_all_tasks(include_done=(status == "done" or smart_view != ""))
+    pre_group = db_query_tasks(
+        status=status,
+        type_filter=type_filter,
+        priority=priority_filter,
+        deadline=deadline_filter,
+        parent_id=parent_id_filter,
+        show_subtasks=show_subtasks,
+        only_snoozed=(snoozed_filter == "1"),
+        overdue_only=overdue_only,
+        q=q,
+    )
 
-    def _is_snoozed(t: Task) -> bool:
-        if not t.snoozed_until:
-            return False
-        try:
-            return date_cls.fromisoformat(t.snoozed_until) > app_today()
-        except (ValueError, TypeError):
-            return False
-
-    def passes_status(t: Task) -> bool:
-        if status == "open":       return not t.done and not t.backburner
-        if status == "done":       return t.done and not t.backburner
-        if status == "backburner": return t.backburner
-        return True
-
-    pre_group = []
-    for t in tasks:
-        # Snooze filtering
-        if snoozed_filter == "1":
-            if not _is_snoozed(t): continue
-        else:
-            if _is_snoozed(t): continue
-
-        # parent_id filter (return only subtasks of a specific task)
-        if parent_id_filter:
-            if t.parent_id != parent_id_filter: continue
-        elif not show_subtasks:
-            if t.parent_id: continue  # hide subtasks from main list
-
-        if not passes_status(t): continue
-        if type_filter and t.type != type_filter: continue
-        if overdue_only and not t.overdue: continue
-        if q and q not in t.text.lower() and q not in (t.group or "").lower(): continue
-        if priority_filter and t.priority != priority_filter: continue
-        if deadline_filter and (t.deadline or "") != deadline_filter: continue
-        pre_group.append(t)
-
+    # Advertised before the group filter is applied, so the group picker still lists every
+    # group present in the rest of the current result set.
     groups_in_scope = sorted({t.group for t in pre_group if t.group}, key=str.casefold)
 
     out = []
@@ -4954,7 +5114,24 @@ def api_tasks():
         out = [d for d in out if _smart_filter(d)]
 
     out.sort(key=lambda t: -t["urgency_score"])
-    return jsonify({"count": len(out), "tasks": out, "groups_in_scope": groups_in_scope})
+
+    # Paginate after ranking, since the ranking is what decides which rows matter. `total`
+    # is the full match count so a caller can tell it has been given a page; the default
+    # window is wide enough that the current UI, which renders whole lists, is unaffected.
+    total = len(out)
+    offset = max(0, _int_arg("offset", 0))
+    limit = _int_arg("limit", 500)
+    limit = total if limit <= 0 else min(limit, 2000)
+    page = out[offset:offset + limit]
+
+    return jsonify({
+        "count": len(page),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "tasks": page,
+        "groups_in_scope": groups_in_scope,
+    })
 
 
 @app.route("/api/tasks/backburner", methods=["POST"])
