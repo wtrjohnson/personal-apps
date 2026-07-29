@@ -127,3 +127,34 @@ def test_app_date_of_preserves_aware_timestamps(monkeypatch):
 
 def test_app_date_of_none_is_none():
     assert app.app_date_of(None) is None
+
+
+# ---- recurrence arithmetic (#3) --------------------------------------------
+
+def test_monthly_recurrence_honours_interval():
+    """interval was ignored: every monthly rule advanced exactly one month."""
+    nxt = app._compute_next_recurrence(
+        {"type": "monthly", "day_of_month": 15, "interval": 3}, date(2026, 1, 20)
+    )
+    assert nxt == date(2026, 4, 15)
+
+
+def test_monthly_recurrence_clamps_to_real_last_day_not_28():
+    """min(dom, 28) moved every 'end of month' task permanently to the 28th."""
+    assert app._compute_next_recurrence(
+        {"type": "monthly", "day_of_month": 31}, date(2026, 3, 10)
+    ) == date(2026, 4, 30)
+    # A month that really does end on the 28th still works.
+    assert app._compute_next_recurrence(
+        {"type": "monthly", "day_of_month": 31}, date(2026, 1, 10)
+    ) == date(2026, 2, 28)
+    # ...and a leap February gets its 29th.
+    assert app._compute_next_recurrence(
+        {"type": "monthly", "day_of_month": 31}, date(2028, 1, 10)
+    ) == date(2028, 2, 29)
+
+
+def test_monthly_recurrence_rolls_the_year():
+    assert app._compute_next_recurrence(
+        {"type": "monthly", "day_of_month": 5, "interval": 2}, date(2026, 11, 20)
+    ) == date(2027, 1, 5)

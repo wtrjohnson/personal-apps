@@ -67,6 +67,14 @@ UPDATE tasks SET import_key = id
 CREATE UNIQUE INDEX IF NOT EXISTS tasks_import_key_uniq
   ON tasks (import_key) WHERE import_key IS NOT NULL;
 
+-- Recurrence instance identity: which completion spawned a recurring instance. The partial
+-- unique index makes the spawn idempotent, so re-completing a recurring task cannot fork
+-- the series into duplicate future instances.
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS recurrence_parent_id TEXT REFERENCES tasks(id) ON DELETE SET NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_recurrence_parent_uniq
+  ON tasks (recurrence_parent_id) WHERE recurrence_parent_id IS NOT NULL;
+
 -- Tombstones for user-deleted meeting-sourced tasks (so re-import can't resurrect them).
 CREATE TABLE IF NOT EXISTS import_tombstones (
     import_key       TEXT PRIMARY KEY,

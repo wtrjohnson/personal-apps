@@ -75,3 +75,56 @@ def test_intake_deadline_callout_sets_meeting_deadline(db, client):
         with conn.cursor() as cur:
             cur.execute("SELECT deadline FROM meetings WHERE canonical_group='Acme Corp'")
             assert cur.fetchone()["deadline"] == "2026-08-01"
+
+
+def test_intake_accepts_colon_in_topic_group_and_attendees(db, client):
+    """Regression for #1: frontmatter was concatenated as strings, so a colon anywhere in
+    a user field produced invalid YAML and frontmatter.loads() raised ScannerError — the
+    note was lost. 'Budget: FY26 markup' is an ordinary topic in this app."""
+    app = db
+    resp = client.post("/api/notes/intake", json={
+        "group": "Ways & Means: Majority",
+        "topic": "Budget: FY26 markup",
+        "date": "2026-07-15",
+        "attendees": "Smith, Jane: Chief of Staff",
+        "body": "Discussed the markup timeline.",
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    with app.get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT topic, raw_group, attendees FROM meetings")
+            row = cur.fetchone()
+    assert row["topic"] == "Budget: FY26 markup"
+    assert row["raw_group"] == "Ways & Means: Majority"
+    assert row["attendees"] == "Smith, Jane: Chief of Staff"
+
+
+def test_intake_preserves_yaml_lookalike_values_as_text(db, client):
+    """'yes', 'no' and bare numbers are YAML scalars; unquoted they were retyped to
+    booleans/floats and came back as 'True' instead of the text the user typed."""
+    app = db
+    resp = client.post("/api/notes/intake", json={
+        "group": "yes",
+        "topic": "1.0",
+        "date": "2026-07-15",
+        "body": "note",
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    with app.get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT topic, raw_group FROM meetings")
+            row = cur.fetchone()
+    assert row["raw_group"] == "yes"
+    assert row["topic"] == "1.0"
+
+
+def test_import_of_malformed_frontmatter_keeps_the_body(db):
+    """A hand-written .md with an unquoted colon must still import, body intact,
+    rather than raising out of import_meeting_from_content."""
+    app = db
+    content = "---\ngroup: Acme\ntopic: Budget: FY26\n---\n\nThe body survived.\n"
+    summary = app.import_meeting_from_content("2026-07-15 - acme.md", content)
+    with app.get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT body FROM meetings WHERE id = %s", (summary["id"],))
+            assert "The body survived." in cur.fetchone()["body"]

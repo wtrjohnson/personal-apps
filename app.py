@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ import frontmatter
 import markdown as md_lib
 import psycopg2
 import psycopg2.extras
+import yaml
 from flask import (
     Flask, abort, jsonify, redirect, render_template,
     request, session, url_for,
@@ -251,6 +253,20 @@ def init_db() -> None:
             cur.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS tasks_import_key_uniq
                     ON tasks (import_key) WHERE import_key IS NOT NULL
+            """)
+            # ---- Recurrence instance identity ----
+            # Records which completion spawned a recurring instance. Without it, completing
+            # a recurring task spawned a new instance with no link back, so un-completing
+            # left the spawn orphaned and re-completing spawned another — one misclick
+            # permanently forked the series. The partial unique index makes the spawn
+            # idempotent at the database level, not just in the handler.
+            cur.execute(
+                "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS recurrence_parent_id TEXT "
+                "REFERENCES tasks(id) ON DELETE SET NULL"
+            )
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS tasks_recurrence_parent_uniq
+                    ON tasks (recurrence_parent_id) WHERE recurrence_parent_id IS NOT NULL
             """)
             cur.execute("""
                 DO $$ BEGIN
@@ -1843,8 +1859,17 @@ def import_meeting_from_content(
     callout_source_map: Optional[Dict[str, str]] = None,
 ) -> dict:
     """Parse and upsert a meeting from raw markdown content."""
-    post = frontmatter.loads(content)
-    meta = post.metadata or {}
+    # Malformed frontmatter must not cost the user the note. Hand-written and
+    # externally-authored .md files routinely contain an unquoted colon; rather than
+    # rejecting the file, fall back to treating the whole document as body text so the
+    # content still lands and can be corrected in the UI.
+    try:
+        post = frontmatter.loads(content)
+        meta = post.metadata or {}
+    except yaml.YAMLError:
+        app.logger.warning("Unparseable frontmatter in %s; importing as body-only", filename)
+        post = frontmatter.Post(content)
+        meta = {}
 
     def s(key: str, default: str = "") -> str:
         val = meta.get(key, default)
@@ -4705,13 +4730,15 @@ def _compute_next_recurrence(rule: dict, today: date_cls) -> Optional[date_cls]:
         return today + timedelta(days=days_ahead + (interval - 1) * 7)
     if rtype == "monthly":
         dom = int(rule.get("day_of_month", today.day))
-        # Next month, same day
-        month = today.month + 1 if today.month < 12 else 1
-        year = today.year if today.month < 12 else today.year + 1
-        try:
-            return date_cls(year, month, min(dom, 28))
-        except Exception:
-            return date_cls(year, month, 28)
+        # Advance by `interval` months (previously always one, silently ignoring the
+        # interval the user set), then clamp to that month's real last day — clamping to
+        # 28 moved every "30th of the month" task permanently to the 28th.
+        interval = max(1, int(rule.get("interval", 1)))
+        month_index = (today.year * 12 + today.month - 1) + interval
+        year, month = divmod(month_index, 12)
+        month += 1
+        last_dom = calendar.monthrange(year, month)[1]
+        return date_cls(year, month, min(max(dom, 1), last_dom))
     if rtype == "after_completion":
         return today + timedelta(days=int(rule.get("days", 7)))
     return None
@@ -4745,7 +4772,9 @@ def api_toggle_task():
                 if row is None:
                     return jsonify({"ok": False, "error": "task not found"}), 404
 
-                # Spawn next recurrence instance when marking done
+                # Spawn the next recurrence instance when marking done. Tagged with
+                # recurrence_parent_id and guarded by the partial unique index, so
+                # completing the same task twice cannot fork the series.
                 if done and row["recurrence_rule"]:
                     rule = row["recurrence_rule"]
                     next_date = _compute_next_recurrence(rule, app_today())
@@ -4756,14 +4785,26 @@ def api_toggle_task():
                             INSERT INTO tasks
                                 (id, text, type, done, backburner, source_filename, section,
                                  group_name, source_date, deadline, priority, contact,
-                                 estimate_minutes, recurrence_rule)
-                            VALUES (%s,%s,%s,FALSE,FALSE,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                 estimate_minutes, recurrence_rule, recurrence_parent_id)
+                            VALUES (%s,%s,%s,FALSE,FALSE,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT (recurrence_parent_id)
+                                WHERE recurrence_parent_id IS NOT NULL
+                            DO NOTHING
                         """, (
                             new_id, row["text"], row["type"],
                             row["source_filename"], row["section"], row["group_name"],
                             next_iso, next_iso, row["priority"], row["contact"],
-                            row["estimate_minutes"], json.dumps(rule),
+                            row["estimate_minutes"], json.dumps(rule), task_id,
                         ))
+                # Un-completing withdraws the spawn, so the series returns to where it was.
+                # An instance the user has already acted on (completed it, or completed work
+                # under it) is left alone — undoing a checkbox should not delete real work.
+                elif not done:
+                    cur.execute(
+                        "DELETE FROM tasks WHERE recurrence_parent_id = %s AND NOT done "
+                        "AND NOT EXISTS (SELECT 1 FROM tasks sub WHERE sub.parent_id = tasks.id)",
+                        (task_id,),
+                    )
 
         log_completion(task_id, text or (row["text"] if row else ""), section, filename, done)
         return jsonify({"ok": True})
@@ -5325,17 +5366,24 @@ def api_notes_intake():
 
     body = "\n".join(body_parts)
 
-    # YAML frontmatter
+    # YAML frontmatter. Built through the YAML serializer rather than by string
+    # concatenation: a colon in any user field ("Budget: FY26 markup" — an entirely
+    # ordinary topic here) produced invalid YAML, and import_meeting_from_content's
+    # frontmatter.loads() then raised ScannerError and lost the whole note. Values that
+    # look like YAML scalars ("yes", "1.0") were also silently retyped.
     safe_group = re.sub(r"[^a-zA-Z0-9_-]", "-", note_group)[:30]
-    fm_parts = [f"group: {note_group}", f"date: {note_date}"]
+    fm: Dict[str, Any] = {"group": note_group, "date": note_date}
     if note_topic:
-        fm_parts.append(f"topic: {note_topic}")
+        fm["topic"] = note_topic
     if note_attendees:
-        fm_parts.append(f"attendees: {note_attendees}")
+        fm["attendees"] = note_attendees
     if note_purpose:
-        fm_parts.append("purpose: [" + ", ".join(f'"{p}"' for p in note_purpose) + "]")
+        fm["purpose"] = note_purpose
 
-    content = "---\n" + "\n".join(fm_parts) + "\n---\n\n" + body
+    fm_yaml = yaml.safe_dump(
+        fm, default_flow_style=False, allow_unicode=True, sort_keys=False
+    )
+    content = "---\n" + fm_yaml + "---\n\n" + body
     now = app_now()
     time_suffix = now.strftime("%H%M%S")
 

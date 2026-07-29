@@ -94,3 +94,58 @@ def test_untouched_task_still_follows_file(db, client):
     )
     _import(app, body=body2)
     assert _task_by_text(app, "Circle back with leadership") is not None
+
+
+def _seed_recurring(app, tid="rec1", rule=None):
+    import json as _json
+    rule = rule or {"type": "daily", "interval": 7}
+    with app.get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO tasks (id, text, type, source_filename, section, deadline, "
+                " recurrence_rule) "
+                "VALUES (%s, 'Weekly check-in', 'free', 'tasks.md', 'free', '2026-07-15', %s)",
+                (tid, _json.dumps(rule)),
+            )
+    return tid
+
+
+def _instances(app):
+    with app.get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, done, deadline, recurrence_parent_id FROM tasks "
+                        "WHERE recurrence_parent_id IS NOT NULL")
+            return cur.fetchall()
+
+
+def test_recompleting_a_recurring_task_does_not_fork_the_series(db, client):
+    """Regression for #2: completing spawned an instance, un-completing left it orphaned,
+    and completing again spawned another — a misclick permanently forked the series."""
+    app = db
+    tid = _seed_recurring(app)
+
+    client.post("/api/tasks/toggle", json={"id": tid, "done": True})
+    assert len(_instances(app)) == 1
+
+    client.post("/api/tasks/toggle", json={"id": tid, "done": False})
+    assert _instances(app) == [], "un-completing must withdraw the spawned instance"
+
+    client.post("/api/tasks/toggle", json={"id": tid, "done": True})
+    assert len(_instances(app)) == 1, "re-completing must not create a second instance"
+
+    # And completing repeatedly without an intervening undo is also idempotent.
+    client.post("/api/tasks/toggle", json={"id": tid, "done": True})
+    assert len(_instances(app)) == 1
+
+
+def test_undo_preserves_an_instance_the_user_already_completed(db, client):
+    """Undoing a checkbox must not delete work the user has actually done."""
+    app = db
+    tid = _seed_recurring(app)
+    client.post("/api/tasks/toggle", json={"id": tid, "done": True})
+    spawned = _instances(app)[0]["id"]
+    client.post("/api/tasks/toggle", json={"id": spawned, "done": True})
+
+    client.post("/api/tasks/toggle", json={"id": tid, "done": False})
+    remaining = [r["id"] for r in _instances(app)]
+    assert spawned in remaining, "a completed instance must survive undoing its parent"
