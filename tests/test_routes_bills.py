@@ -40,3 +40,38 @@ def test_bill_context_shows_meetings_and_asks(db, client):
     assert "Acme Corp" in ctx["organizations"]
     assert any("support H.R. 5" in a["text"] for a in ctx["asks"])
     assert len(ctx["meetings"]) == 1
+
+
+def test_schedule_includes_events_dated_today_in_app_timezone(db, client, monkeypatch):
+    """Regression for #17: the Upcoming panel filtered on SQL CURRENT_DATE (the database's
+    UTC day), so every evening in Mountain time the DB had already rolled to tomorrow and
+    today's remaining hearings vanished. Pinning app_today() to a day behind the database's
+    CURRENT_DATE reproduces that: the event must still be returned."""
+    app = db
+    import datetime as _dt
+    pinned = _dt.date.today() - _dt.timedelta(days=2)
+    monkeypatch.setattr(app, "app_today", lambda: pinned)
+
+    congress = 119
+    with app.get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO tracked_bills (id, congress, bill_type, bill_number, relationship) "
+                "VALUES ('t-sched', %s, 'HR', '1234', 'sponsored')",
+                (congress,),
+            )
+            cur.execute(
+                "INSERT INTO bill_schedule_events "
+                "(id, source, congress, bill_type, bill_number, chamber, event_type, status, "
+                " event_date, title) "
+                "VALUES ('cm-x-HR1234','committee',%s,'HR','1234','House','Markup','Scheduled',"
+                "        %s,'Markup of H.R. 1234')",
+                (congress, _dt.datetime.combine(pinned, _dt.time(14, 0))),
+            )
+
+    data = client.get(f"/api/bill-schedule?congress={congress}").get_json()
+    ids = [e["id"] for e in data["events"]]
+    assert "cm-x-HR1234" in ids, (
+        "an event dated today in APP_TIMEZONE was dropped — the query is comparing "
+        "against the database's UTC CURRENT_DATE again"
+    )

@@ -69,6 +69,20 @@ def app_today() -> date_cls:
     return app_now().date()
 
 
+def app_date_of(ts: Optional[datetime]) -> Optional[date_cls]:
+    """Calendar day (in APP_TIMEZONE) of a timestamp read back from Postgres.
+
+    Rows written with NOW() land in naive TIMESTAMP columns holding the *database's*
+    clock, which is UTC on Vercel Postgres. Calling .date() on that directly reintroduces
+    the same evening rollover APP_TIMEZONE exists to prevent, so assume UTC for naive
+    values and convert before taking the day."""
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=ZoneInfo("UTC"))
+    return ts.astimezone(_app_tz()).date()
+
+
 # Canonical status vocabularies (audit H3, C2b). One working set per obligation type.
 ASK_STATUSES = ("open", "in_review", "accepted", "declined", "done", "no_action")
 COMMITMENT_STATUSES = ("open", "in_progress", "done", "dropped")
@@ -3032,13 +3046,21 @@ def _sync_bill_schedule() -> dict:
                 )
                 """
             )
-            cur.execute("DELETE FROM bill_schedule_events WHERE event_date < CURRENT_DATE - INTERVAL '3 days'")
+            # Retention cutoffs are computed from app_today(), not SQL CURRENT_DATE: the
+            # latter is the database's UTC day, which runs ahead of Mountain time every
+            # evening and would expire events a day early.
+            today = app_today()
+            cur.execute(
+                "DELETE FROM bill_schedule_events WHERE event_date < %s",
+                (today - timedelta(days=3),),
+            )
             # Bound the fetch cache: concluded meetings are irrelevant once well past, and
             # undated rows that stop reappearing can age out.
             cur.execute(
                 "DELETE FROM committee_meeting_seen WHERE "
-                "(meeting_date IS NOT NULL AND meeting_date < CURRENT_DATE - INTERVAL '30 days') "
-                "OR (meeting_date IS NULL AND last_seen < NOW() - INTERVAL '14 days')"
+                "(meeting_date IS NOT NULL AND meeting_date < %s) "
+                "OR (meeting_date IS NULL AND last_seen < NOW() - INTERVAL '14 days')",
+                (today - timedelta(days=30),),
             )
             result = {
                 "committee_events": committee["events"],
@@ -3128,11 +3150,8 @@ def api_tracked_bills():
             meta = cur.fetchone()
             last_synced = meta["last_synced"] if meta else None
             last_error = meta["last_error"] if meta else None
-            cur.execute(
-                "SELECT (%s::timestamp IS NULL OR %s::timestamp::date < CURRENT_DATE) AS needs",
-                (last_synced, last_synced),
-            )
-            needs_sync = cur.fetchone()["needs"]
+            _synced_day = app_date_of(last_synced)
+            needs_sync = _synced_day is None or _synced_day < app_today()
 
     return jsonify({
         "bills": [dict(b) for b in bills],
@@ -3433,12 +3452,12 @@ def api_bill_schedule():
                 JOIN tracked_bills tb
                   ON tb.congress = e.congress AND tb.bill_type = e.bill_type
                  AND tb.bill_number = e.bill_number
-                WHERE e.event_date >= CURRENT_DATE
+                WHERE e.event_date >= %(today)s
                   AND tb.relationship = 'sponsored'
                   AND (%(cong)s IS NULL OR e.congress = %(cong)s)
                 ORDER BY e.event_date ASC, e.bill_type, e.bill_number
                 """,
-                {"cong": congress},
+                {"cong": congress, "today": app_today()},
             )
             rows = cur.fetchall()
             cur.execute(
@@ -3447,11 +3466,8 @@ def api_bill_schedule():
             )
             meta = cur.fetchone() or {}
             last_synced = meta.get("schedule_last_synced")
-            cur.execute(
-                "SELECT (%s::timestamp IS NULL OR %s::timestamp::date < CURRENT_DATE) AS needs",
-                (last_synced, last_synced),
-            )
-            needs_sync = cur.fetchone()["needs"]
+            _synced_day = app_date_of(last_synced)
+            needs_sync = _synced_day is None or _synced_day < app_today()
     return jsonify({
         "events": [dict(r) for r in rows],
         "last_synced": last_synced.isoformat() if last_synced else None,

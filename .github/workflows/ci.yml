@@ -8,6 +8,26 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # Route tests need a real Postgres: tests/conftest.py skips every one of them when
+    # JOS_TEST_DATABASE_URL is unset, which silently reduced CI to the pure-function suite
+    # (32 of 58 tests) and let a genuine failure sit green. Keep this service in place —
+    # without it the route coverage stops running again.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: jos_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,4 +42,5 @@ jobs:
       - name: Pytest
         env:
           JOS_SKIP_DB_INIT: "1"
+          JOS_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/jos_test
         run: pytest -q

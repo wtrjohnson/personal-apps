@@ -106,3 +106,24 @@ def test_recurrence_monthly_clamps():
 
 def test_recurrence_unknown_returns_none():
     assert app._compute_next_recurrence({"type": "nope"}, date(2026, 7, 13)) is None
+
+
+# ---- app_date_of: naive UTC timestamps from Postgres (#17) ------------------
+
+def test_app_date_of_treats_naive_as_utc_and_converts(monkeypatch):
+    """Rows written with NOW() come back naive and UTC. Taking .date() directly is the
+    evening-rollover bug; app_date_of must convert to APP_TIMEZONE first."""
+    monkeypatch.setattr(app, "APP_TIMEZONE", "America/Denver")
+    # 02:00 UTC on the 14th is still 8 PM MDT on the 13th.
+    naive_utc = datetime(2026, 7, 14, 2, 0)
+    assert app.app_date_of(naive_utc) == date(2026, 7, 13)
+
+
+def test_app_date_of_preserves_aware_timestamps(monkeypatch):
+    monkeypatch.setattr(app, "APP_TIMEZONE", "America/Denver")
+    aware = datetime(2026, 7, 14, 2, 0, tzinfo=timezone.utc)
+    assert app.app_date_of(aware) == date(2026, 7, 13)
+
+
+def test_app_date_of_none_is_none():
+    assert app.app_date_of(None) is None

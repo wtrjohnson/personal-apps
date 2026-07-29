@@ -1,8 +1,12 @@
 """Shared DB fixtures for route tests.
 
 Route tests require a throwaway Postgres. Point JOS_TEST_DATABASE_URL at one to enable
-them; without it they skip (e.g. in CI with no database). The local dev DB is spun up in
-/tmp during development.
+them; locally, without it, they skip. The local dev DB is spun up in /tmp during
+development.
+
+In CI the variable is mandatory: ci.yml runs a postgres:16 service and sets it. Skipping
+there is treated as a hard error instead, because a silent skip is what previously reduced
+CI to the pure-function suite and hid a real failing test for weeks.
 """
 import os
 
@@ -14,6 +18,11 @@ TEST_DB_URL = os.environ.get("JOS_TEST_DATABASE_URL", "")
 @pytest.fixture(scope="session")
 def app_db():
     if not TEST_DB_URL:
+        if os.environ.get("CI"):
+            pytest.fail(
+                "JOS_TEST_DATABASE_URL is unset in CI. Route tests must not silently skip "
+                "— check the postgres service block in .github/workflows/ci.yml."
+            )
         pytest.skip("JOS_TEST_DATABASE_URL not set; route tests need a Postgres")
     import app
     app.DATABASE_URL = TEST_DB_URL
