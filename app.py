@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import calendar
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from datetime import date as date_cls, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import frontmatter
@@ -32,7 +34,8 @@ from flask import (
 # --------------------------------------------------
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
-SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
+_DEV_SECRET_KEY = "dev-secret-change-in-production"
+SECRET_KEY = os.environ.get("SECRET_KEY", _DEV_SECRET_KEY)
 AUTH_USERNAME = os.environ.get("DASHBOARD_USERNAME", "admin")
 AUTH_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 SHORTCUT_API_KEY = os.environ.get("SHORTCUT_API_KEY", "")
@@ -52,6 +55,40 @@ APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "America/Denver")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.secret_key = SECRET_KEY
+
+def check_secret_key(database_url: str, secret_key: str, skip: bool = False) -> None:
+    """Raise if a real deployment is running on the placeholder session key.
+
+    The key is the only thing standing between a stranger and a forged logged_in cookie,
+    and its development default is published in this repository. A deployment that reaches
+    a database on that key is serving sessions anyone can mint, so fail closed rather than
+    run wide open. Local runs and tests (no DATABASE_URL, or JOS_SKIP_DB_INIT) are exempt."""
+    if skip or not database_url:
+        return
+    if secret_key == _DEV_SECRET_KEY:
+        raise RuntimeError(
+            "SECRET_KEY is still the built-in development value while DATABASE_URL is set. "
+            "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\" "
+            "and set it in the deployment environment."
+        )
+
+
+check_secret_key(DATABASE_URL, SECRET_KEY, skip=os.environ.get("JOS_SKIP_DB_INIT") == "1")
+
+# Session cookie hardening. Flask leaves SameSite unset, which leaves cross-site POSTs to
+# the JSON API dependent on each browser's default; Lax blocks them everywhere. Secure
+# keeps the cookie off plaintext connections, and a bounded lifetime limits how long a
+# stolen cookie stays useful.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=bool(DATABASE_URL),
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+    # Reject oversized request bodies outright. Intake and card-scan both accept base64
+    # data URLs, which were previously unbounded — one large paste became a 500 or an
+    # oversized row.
+    MAX_CONTENT_LENGTH=int(os.environ.get("JOS_MAX_UPLOAD_MB", "12")) * 1024 * 1024,
+)
 
 
 def _app_tz() -> ZoneInfo:
@@ -782,17 +819,34 @@ def fail(msg: str, code: int = 400):
     return jsonify({"ok": False, "error": msg}), code
 
 
+def server_error(e: Exception, context: str = "", **extra: Any):
+    """500 envelope for an unexpected exception.
+
+    Exception text used to be handed straight to the browser. psycopg2 errors carry table
+    and column names, constraint definitions, and sometimes connection detail, so the
+    response doubled as a schema disclosure. Log the real error with a short reference and
+    return only that reference, which is enough to find it in the logs."""
+    ref = uuid.uuid4().hex[:8]
+    app.logger.exception("[%s] %s: %s", ref, context or request.path, type(e).__name__)
+    return jsonify({
+        "ok": False,
+        "error": f"Something went wrong on the server (ref {ref}).",
+        "ref": ref,
+        **extra,
+    }), 500
+
+
 @app.errorhandler(Exception)
 def _handle_uncaught(e):
     """Never let an API route return an opaque HTML 500. Routing errors (404/405) and
     redirects are HTTPExceptions and pass through unchanged; everything else on an /api/
-    path becomes {"ok": false, "error": ...} so the client toast can show the real cause."""
+    path becomes a generic JSON envelope carrying a log reference."""
     from werkzeug.exceptions import HTTPException
     if isinstance(e, HTTPException):
         return e
-    app.logger.exception("Unhandled error on %s", request.path)
     if request.path.startswith("/api/"):
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
+    app.logger.exception("Unhandled error on %s", request.path)
     return ("Internal Server Error", 500)
 
 
@@ -800,27 +854,126 @@ def _handle_uncaught(e):
 # AUTH
 # --------------------------------------------------
 
+# Endpoints authenticated by an API key rather than the session cookie. They are exempt
+# from the login redirect, and from the CSRF origin check below: a cross-site request
+# cannot supply the key, and these have no ambient cookie authority to abuse.
+_KEY_AUTH_ENDPOINTS = ("shortcut_add_task", "cron_sync", "admin_migrate", "api_version")
+
+_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
 @app.before_request
 def require_login() -> Optional[Any]:
     if request.path.startswith("/static/"):
         return None
-    if request.endpoint in ("login", "logout", "shortcut_add_task", "cron_sync", "admin_migrate", "api_version"):
+    if request.endpoint in ("login", "logout") or request.endpoint in _KEY_AUTH_ENDPOINTS:
         return None
     if not session.get("logged_in"):
         return redirect(url_for("login"))
     return None
 
 
+@app.before_request
+def block_cross_site_writes() -> Optional[Any]:
+    """Reject state-changing requests that a browser tells us came from another site.
+
+    Every mutation here is authorized by the session cookie alone, and the API reads its
+    body with get_json(force=True), which ignores Content-Type. That makes a cross-site
+    form POST — a "simple request" that skips the CORS preflight — enough to drive any
+    write endpoint using the victim's cookie. SESSION_COOKIE_SAMESITE="Lax" covers most
+    browsers; this closes the gap for the rest, and for the two multipart upload endpoints
+    that a JSON-only content-type check would not protect.
+
+    Browsers send Origin on cross-origin requests (and on same-origin POSTs); non-browser
+    clients such as curl and the Shortcuts app send neither Origin nor Referer, and carry
+    no cookie either, so a missing header is allowed through."""
+    if request.method in _SAFE_METHODS:
+        return None
+    if request.endpoint in _KEY_AUTH_ENDPOINTS:
+        return None
+    origin = request.headers.get("Origin") or request.headers.get("Referer") or ""
+    if not origin:
+        return None
+    try:
+        sent_host = urlsplit(origin).netloc
+    except ValueError:
+        sent_host = ""
+    if sent_host != request.host:
+        app.logger.warning(
+            "Blocked cross-site %s to %s from %r", request.method, request.path, origin
+        )
+        return fail("Cross-site request blocked", 403)
+    return None
+
+
+def secrets_match(provided: str, expected: str) -> bool:
+    """Constant-time secret comparison. `==` on a str short-circuits at the first differing
+    byte, so its timing leaks a prefix oracle. Returns False for an unset expected value so
+    a missing credential can never authenticate."""
+    if not expected:
+        return False
+    return hmac.compare_digest(str(provided or ""), str(expected))
+
+
+# Failed-login throttle. Keyed by client IP: (failure count, window start). This is
+# per-process memory, so on serverless it is per warm instance rather than global — it
+# raises the cost of a guessing run substantially without being a hard global limit. A
+# durable limit would need shared state; that is a larger change than this one credential
+# warrants today.
+_LOGIN_ATTEMPTS: Dict[str, Tuple[int, float]] = {}
+_LOGIN_MAX_ATTEMPTS = 8
+_LOGIN_WINDOW_SECONDS = 300
+
+
+def _login_client_key() -> str:
+    fwd = request.headers.get("X-Forwarded-For", "")
+    return (fwd.split(",")[0].strip() if fwd else request.remote_addr) or "unknown"
+
+
+def _login_throttled(key: str) -> bool:
+    count, started = _LOGIN_ATTEMPTS.get(key, (0, 0.0))
+    if time.monotonic() - started > _LOGIN_WINDOW_SECONDS:
+        return False
+    return count >= _LOGIN_MAX_ATTEMPTS
+
+
+def _record_login_failure(key: str) -> None:
+    count, started = _LOGIN_ATTEMPTS.get(key, (0, 0.0))
+    now = time.monotonic()
+    if now - started > _LOGIN_WINDOW_SECONDS:
+        count, started = 0, now
+    _LOGIN_ATTEMPTS[key] = (count + 1, started)
+    # Bound the map so a spray across spoofed X-Forwarded-For values cannot grow it without
+    # limit; entries are throwaway and the oldest window is the least useful to keep.
+    if len(_LOGIN_ATTEMPTS) > 2048:
+        oldest = sorted(_LOGIN_ATTEMPTS.items(), key=lambda kv: kv[1][1])[:1024]
+        for k, _ in oldest:
+            _LOGIN_ATTEMPTS.pop(k, None)
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = None
     if request.method == "POST":
+        key = _login_client_key()
+        if _login_throttled(key):
+            return render_template(
+                "login.html",
+                error="Too many attempts. Wait a few minutes and try again.",
+            ), 429
         username = request.form.get("username", "")
         password = request.form.get("password", "")
-        if username == AUTH_USERNAME and password == AUTH_PASSWORD and AUTH_PASSWORD:
+        # Both comparisons run unconditionally: `and` short-circuiting on the username
+        # would reveal whether it was correct from the response time alone.
+        user_ok = secrets_match(username, AUTH_USERNAME)
+        pass_ok = secrets_match(password, AUTH_PASSWORD)
+        if user_ok and pass_ok:
+            session.clear()  # new session id on login; don't carry a pre-auth session over
             session["logged_in"] = True
             session.permanent = True
+            _LOGIN_ATTEMPTS.pop(key, None)
             return redirect(url_for("home"))
+        _record_login_failure(key)
         error = "Invalid credentials."
     return render_template("login.html", error=error)
 
@@ -3216,8 +3369,10 @@ def api_tracked_bills_sync():
         result = _sync_congress_bills()
         return jsonify({"ok": True, **result})
     except Exception as e:
+        # The stored diagnostic keeps the detail — it exists so the operator can see why a
+        # Congress.gov sync failed — but the HTTP body stays generic.
         _record_sync_error("last_error", f"{step or 'sync'}: {e}" if step else str(e))
-        return jsonify({"ok": False, "step": step or None, "error": str(e)}), 500
+        return server_error(e, context=f"bill sync ({step or 'sync'})", step=step or None)
 
 
 @app.route("/api/tracked-bills/<bill_id>/working", methods=["POST"])
@@ -3342,7 +3497,7 @@ def api_tracked_bill_detail(bill_id: str):
     try:
         data = _build_bill_detail_response(bill_id, force=force)
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
     if data is None:
         return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify({"ok": True, **data})
@@ -3446,7 +3601,7 @@ def api_tracked_bill_refresh(bill_id: str):
             return jsonify({"ok": False, "error": "Not found"}), 404
         data = _build_bill_detail_response(bill_id, force=True)
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
     if data is None:
         return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify({"ok": True, **data})
@@ -3512,7 +3667,7 @@ def api_bill_schedule_sync():
         return jsonify({"ok": True, **result})
     except Exception as e:
         _record_sync_error("schedule_last_error", str(e))
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/cron/sync", methods=["POST", "GET"])
@@ -3524,7 +3679,7 @@ def cron_sync():
         return jsonify({"ok": False, "error": "CRON_SECRET not configured"}), 503
     provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() \
         or request.headers.get("X-API-Key", "").strip()
-    if provided != CRON_SECRET:
+    if not secrets_match(provided, CRON_SECRET):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     if not CONGRESS_API_KEY:
         return jsonify({"ok": False, "error": "Bill tracker not configured"}), 503
@@ -3538,7 +3693,7 @@ def cron_sync():
         return jsonify({"ok": True, "job": job, **result})
     except Exception as e:
         _record_sync_error("schedule_last_error" if job == "schedule" else "last_error", str(e))
-        return jsonify({"ok": False, "job": job, "error": str(e)}), 500
+        return server_error(e, context=f"cron sync ({job})", job=job)
 
 
 @app.route("/api/version", methods=["GET"])
@@ -3558,13 +3713,13 @@ def admin_migrate():
         return jsonify({"ok": False, "error": "CRON_SECRET not configured"}), 503
     provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() \
         or request.headers.get("X-API-Key", "").strip()
-    if provided != CRON_SECRET:
+    if not secrets_match(provided, CRON_SECRET):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
     try:
         init_db()
         return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/bill-matches")
@@ -4692,7 +4847,7 @@ def api_backburner_task():
                 cur.execute("UPDATE tasks SET backburner = %s WHERE id = %s", (on, task_id))
         return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/tasks/priority", methods=["POST"])
@@ -4715,7 +4870,7 @@ def api_set_priority():
                     return jsonify({"ok": False, "error": "task not found"}), 404
         return jsonify({"ok": True, "priority": priority})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 def _compute_next_recurrence(rule: dict, today: date_cls) -> Optional[date_cls]:
@@ -4809,7 +4964,7 @@ def api_toggle_task():
         log_completion(task_id, text or (row["text"] if row else ""), section, filename, done)
         return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/tasks/delete", methods=["POST"])
@@ -4843,7 +4998,7 @@ def api_delete_task():
                     )
         return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/tasks/edit", methods=["POST"])
@@ -4919,7 +5074,7 @@ def api_edit_task():
                     _link_contact_org(cur, person_id, row["organization_id"])
         return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/tasks/add", methods=["POST"])
@@ -4972,7 +5127,7 @@ def api_add_task():
                 _link_contact_org(cur, add_person, org_id)
         return jsonify({"ok": True, "text": full_text, "id": tid})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/stats")
@@ -5124,7 +5279,7 @@ def api_snooze_task():
                     return jsonify({"ok": False, "error": "task not found"}), 404
         return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/tasks/search")
@@ -5147,7 +5302,7 @@ def api_tasks_search():
         results = [{"id": r["id"], "text": r["text"], "group": r["group_name"], "deadline": r["deadline"]} for r in rows]
         return jsonify({"tasks": results})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/tasks/dependency/add", methods=["POST"])
@@ -5175,7 +5330,7 @@ def api_dependency_add():
                 )
         return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/tasks/dependency/remove", methods=["POST"])
@@ -5194,7 +5349,7 @@ def api_dependency_remove():
                 )
         return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/tasks/add-subtask", methods=["POST"])
@@ -5225,7 +5380,7 @@ def api_add_subtask():
                 )
         return jsonify({"ok": True, "id": new_id})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/import", methods=["POST"])
@@ -5262,8 +5417,15 @@ def api_import_notes():
                                 WHERE id = %s AND organization_id IS NULL
                             """, (org_id_imp, mid))
             results.append({"filename": fname, "ok": True, "task_count": summary["tasks"]})
-        except Exception as e:
-            results.append({"filename": fname, "ok": False, "error": str(e)})
+        except Exception:
+            # Per-file feedback, so keep it specific enough to act on without echoing
+            # database internals back to the browser.
+            ref = uuid.uuid4().hex[:8]
+            app.logger.exception("[%s] import failed for %s", ref, fname)
+            results.append({
+                "filename": fname, "ok": False,
+                "error": f"Could not import this file (ref {ref}).",
+            })
     ok_count = sum(1 for r in results if r.get("ok"))
     return jsonify({"ok": True, "processed": ok_count, "total": len(results), "results": results})
 
@@ -5907,7 +6069,7 @@ def api_calendar_upload():
         status_code = 200 if result.get("ok") else 400
         return jsonify(result), status_code
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/meetings/upcoming")
@@ -5929,7 +6091,7 @@ def api_meetings_upcoming():
                 rows = [dict(r) for r in cur.fetchall()]
         return jsonify({"ok": True, "meetings": rows})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/meetings/<mid>/metadata", methods=["POST"])
@@ -5960,7 +6122,7 @@ def api_meeting_metadata(mid: str):
                 _upsert_attendee_contacts(cur, mid, attendees, meeting_org)
         return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 @app.route("/api/meetings/<mid>/status", methods=["POST"])
@@ -5981,7 +6143,7 @@ def api_meeting_status(mid: str):
                     return jsonify({"ok": False, "error": "Not found"}), 404
         return jsonify({"ok": True, "status": new_status})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 # --------------------------------------------------
@@ -5992,7 +6154,7 @@ def api_meeting_status(mid: str):
 def shortcut_add_task():
     if not SHORTCUT_API_KEY:
         return jsonify({"ok": False, "error": "Shortcut API not configured"}), 503
-    if request.headers.get("X-API-Key", "") != SHORTCUT_API_KEY:
+    if not secrets_match(request.headers.get("X-API-Key", ""), SHORTCUT_API_KEY):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
 
     data = request.get_json(force=True, silent=True) or {}
@@ -6024,7 +6186,7 @@ def shortcut_add_task():
                 """, (tid, full_text, group, app_today(), deadline, deadline_raw))
         return jsonify({"ok": True, "text": full_text})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return server_error(e)
 
 
 # --------------------------------------------------
