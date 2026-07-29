@@ -5025,10 +5025,16 @@ def api_stats():
         key=lambda x: x["count"], reverse=True,
     )[:8]
 
-    # Weekly completion %: tasks completed this week / (completed this week + currently open)
+    # Weekly completion %. The denominator used to be every open task ever, against a
+    # 7-day numerator, so the ring could only drift toward zero as the backlog grew no
+    # matter how much got done. Scope both sides to the same week: work completed in the
+    # window, plus work that was due in it and is still open.
     per_day = completions_per_day(days=7)
     week_done_count = sum(x["count"] for x in per_day)
-    week_total = week_done_count + len(open_tasks)
+    week_outstanding = sum(
+        1 for t in open_tasks if t.deadline and t.deadline <= today_iso
+    )
+    week_total = week_done_count + week_outstanding
     pct_complete = round((week_done_count / week_total) * 100) if week_total else 0
 
     with get_db() as conn:
@@ -5090,7 +5096,10 @@ def api_stats():
         "overdue_top": overdue_top,
         "by_group": by_group,
         "completions_per_day": per_day,
-        "completions_30d": week_done_count,
+        # Named for the 7-day window it actually holds; the old completions_30d spelling
+        # described a 30-day range this has not returned for some time.
+        "completions_this_week": week_done_count,
+        "week_outstanding": week_outstanding,
         "recent_meeting": recent,
         "meetings_total": total_meetings,
         "top_urgency": top_urgency,
@@ -5385,7 +5394,11 @@ def api_notes_intake():
     )
     content = "---\n" + fm_yaml + "---\n\n" + body
     now = app_now()
-    time_suffix = now.strftime("%H%M%S")
+    # The meeting id is sha1(filename), so the filename has to be unique or two notes
+    # collapse onto the same row. A seconds-resolution stamp alone was not: two saves for
+    # the same group in the same second overwrote each other silently. Add a short random
+    # suffix, which also covers concurrent requests that the clock cannot separate.
+    time_suffix = now.strftime("%H%M%S") + "-" + uuid.uuid4().hex[:6]
 
     # C1 fix: if the notes were started from a prepared calendar meeting, write into THAT
     # row (reuse its filename so meeting id, calendar_event_id, dtstart, meeting_link are

@@ -158,14 +158,16 @@ async function renderHome() {
     });
   }
   $("#ring-percent").textContent = `${pct}%`;
-  const weekDone = s.completions_30d || 0;
-  const weekOpen = s.open_count || 0;
-  $("#ring-caption").textContent = weekDone + weekOpen === 0
-    ? "No tasks this week."
-    : `${weekDone} done of ${weekDone + weekOpen} this week`;
+  // Caption must describe the same week the ring does: completed in the window plus
+  // what was due in it and is still open — not the entire open backlog.
+  const weekDone = s.completions_this_week || 0;
+  const weekOutstanding = s.week_outstanding || 0;
+  $("#ring-caption").textContent = weekDone + weekOutstanding === 0
+    ? "Nothing due this week."
+    : `${weekDone} done of ${weekDone + weekOutstanding} due this week`;
 
   drawSparkline(s.completions_per_day || []);
-  $("#spark-total").textContent = s.completions_30d || 0;
+  $("#spark-total").textContent = s.completions_this_week || 0;
 
   _renderFocusPanel(s.top_urgency || []);
 

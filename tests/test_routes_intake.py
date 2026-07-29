@@ -128,3 +128,28 @@ def test_import_of_malformed_frontmatter_keeps_the_body(db):
         with conn.cursor() as cur:
             cur.execute("SELECT body FROM meetings WHERE id = %s", (summary["id"],))
             assert "The body survived." in cur.fetchone()["body"]
+
+
+def test_two_intakes_in_the_same_second_do_not_collide(db, client):
+    """Regression for #15: the filename carried only an HHMMSS stamp and the meeting id is
+    sha1(filename), so two saves for the same group within one second overwrote each other."""
+    app = db
+    import datetime as _dt
+    fixed = _dt.datetime(2026, 7, 15, 9, 30, 0)
+    monkey = app.app_now
+    app.app_now = lambda: fixed  # freeze the clock so both saves share a second
+    try:
+        for body in ("First note.", "Second note."):
+            r = client.post("/api/notes/intake", json={
+                "group": "Acme Corp", "date": "2026-07-15", "body": body,
+            })
+            assert r.status_code == 200, r.get_data(as_text=True)
+    finally:
+        app.app_now = monkey
+
+    with app.get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT body FROM meetings ORDER BY filename")
+            bodies = " ".join(r["body"] for r in cur.fetchall())
+    assert "First note." in bodies and "Second note." in bodies, \
+        "one of the two same-second notes was overwritten"

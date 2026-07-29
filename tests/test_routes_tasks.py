@@ -149,3 +149,37 @@ def test_undo_preserves_an_instance_the_user_already_completed(db, client):
     client.post("/api/tasks/toggle", json={"id": tid, "done": False})
     remaining = [r["id"] for r in _instances(app)]
     assert spawned in remaining, "a completed instance must survive undoing its parent"
+
+
+def test_weekly_pct_ignores_backlog_outside_the_week(db, client):
+    """Regression for #14: pct_complete divided a 7-day completion count by the entire
+    open backlog, so the home ring could only drift toward zero as the backlog grew.
+    Tasks with no deadline, or one well in the future, are not 'due this week'."""
+    app = db
+    with app.get_db() as conn:
+        with conn.cursor() as cur:
+            # One task due today, completed. Plus a large undated backlog.
+            cur.execute(
+                "INSERT INTO tasks (id, text, type, source_filename, section, deadline, done) "
+                "VALUES ('t-due','Due today','free','tasks.md','free',%s,TRUE)",
+                (app.app_today().isoformat(),),
+            )
+            for i in range(40):
+                cur.execute(
+                    "INSERT INTO tasks (id, text, type, source_filename, section) "
+                    "VALUES (%s,'Someday backlog','free','tasks.md','free')",
+                    (f"t-backlog-{i}",),
+                )
+            cur.execute(
+                "INSERT INTO completions (task_id, task_text, done, completed_date) "
+                "VALUES ('t-due','Due today',TRUE,%s)",
+                (app.app_today(),),
+            )
+
+    s = client.get("/api/stats").get_json()
+    assert s["completions_this_week"] == 1
+    assert s["week_outstanding"] == 0, "undated backlog is not due this week"
+    assert s["pct_complete"] == 100, (
+        f"expected 100% (1 of 1 due this week), got {s['pct_complete']}% — "
+        "the denominator is counting the whole backlog again"
+    )
