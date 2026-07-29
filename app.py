@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 from contextlib import contextmanager
@@ -54,26 +55,36 @@ DEPLOY_COMMIT = os.environ.get("VERCEL_GIT_COMMIT_SHA", "")
 APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "America/Denver")
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
-app.secret_key = SECRET_KEY
 
-def check_secret_key(database_url: str, secret_key: str, skip: bool = False) -> None:
-    """Raise if a real deployment is running on the placeholder session key.
+
+def resolve_secret_key(database_url: str, secret_key: str, skip: bool = False) -> str:
+    """The session key to actually run with.
 
     The key is the only thing standing between a stranger and a forged logged_in cookie,
-    and its development default is published in this repository. A deployment that reaches
-    a database on that key is serving sessions anyone can mint, so fail closed rather than
-    run wide open. Local runs and tests (no DATABASE_URL, or JOS_SKIP_DB_INIT) are exempt."""
-    if skip or not database_url:
-        return
-    if secret_key == _DEV_SECRET_KEY:
-        raise RuntimeError(
-            "SECRET_KEY is still the built-in development value while DATABASE_URL is set. "
-            "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\" "
-            "and set it in the deployment environment."
-        )
+    and its development default is published in this repository — a deployment reaching a
+    real database on that key is serving sessions anyone can mint.
+
+    Refusing to boot would close that hole but take the whole app down on a deploy that
+    merely forgot an environment variable, which is a worse failure for a single-operator
+    tool. Substituting a random key instead is better on both counts: the app stays up and
+    the cookies are unforgeable. The cost is that the key is not stable across cold starts,
+    so sessions do not survive a restart — visible, self-correcting, and gone the moment a
+    real SECRET_KEY is configured. Local runs and tests are left alone."""
+    if skip or not database_url or secret_key != _DEV_SECRET_KEY:
+        return secret_key
+    print(
+        "[config] WARNING: SECRET_KEY is unset, so the built-in development value is in "
+        "use. Running on a generated random key instead — logins will not survive a "
+        "restart until you set SECRET_KEY. Generate one with: "
+        'python -c "import secrets; print(secrets.token_hex(32))"'
+    )
+    return secrets.token_hex(32)
 
 
-check_secret_key(DATABASE_URL, SECRET_KEY, skip=os.environ.get("JOS_SKIP_DB_INIT") == "1")
+SECRET_KEY = resolve_secret_key(
+    DATABASE_URL, SECRET_KEY, skip=os.environ.get("JOS_SKIP_DB_INIT") == "1"
+)
+app.secret_key = SECRET_KEY
 
 # Session cookie hardening. Flask leaves SameSite unset, which leaves cross-site POSTs to
 # the JSON API dependent on each browser's default; Lax blocks them everywhere. Secure

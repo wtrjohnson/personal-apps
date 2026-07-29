@@ -1,7 +1,5 @@
 """Security-behaviour tests: CSRF origin check, login throttle, secret comparison,
 and the error envelope's non-disclosure. Require Postgres."""
-import pytest
-
 import app as app_mod
 
 
@@ -138,26 +136,36 @@ def test_oversized_body_is_rejected(db, client):
     assert resp.status_code == 413
 
 
-# ---- boot guard (#5) -------------------------------------------------------
+# ---- session key resolution (#5) -------------------------------------------
 
-def test_dev_secret_key_with_a_database_is_refused():
-    """A deploy serving forgeable sessions must fail closed, not run wide open."""
-    with pytest.raises(RuntimeError, match="SECRET_KEY"):
-        app_mod.check_secret_key(
-            "postgresql://user:pw@localhost/db", app_mod._DEV_SECRET_KEY
-        )
-
-
-def test_dev_secret_key_without_a_database_is_fine():
-    """Local development has no database and no exposure; it must not be blocked."""
-    app_mod.check_secret_key("", app_mod._DEV_SECRET_KEY)
-
-
-def test_real_secret_key_with_a_database_is_fine():
-    app_mod.check_secret_key("postgresql://user:pw@localhost/db", "a" * 64)
-
-
-def test_boot_guard_is_skippable_for_tests():
-    app_mod.check_secret_key(
-        "postgresql://user:pw@localhost/db", app_mod._DEV_SECRET_KEY, skip=True
+def test_dev_secret_key_with_a_database_is_replaced():
+    """A deployment must never serve sessions signed with the key published in this repo.
+    Refusing to boot would close the hole but take the app down over a missing environment
+    variable; substituting a random key keeps it up and the cookies unforgeable."""
+    resolved = app_mod.resolve_secret_key(
+        "postgresql://user:pw@localhost/db", app_mod._DEV_SECRET_KEY
     )
+    assert resolved != app_mod._DEV_SECRET_KEY
+    assert len(resolved) >= 32
+
+
+def test_replacement_keys_are_not_predictable():
+    a = app_mod.resolve_secret_key("postgresql://x/db", app_mod._DEV_SECRET_KEY)
+    b = app_mod.resolve_secret_key("postgresql://x/db", app_mod._DEV_SECRET_KEY)
+    assert a != b
+
+
+def test_dev_secret_key_without_a_database_is_left_alone():
+    """Local development has no database and no exposure; a stable key is more useful."""
+    assert app_mod.resolve_secret_key("", app_mod._DEV_SECRET_KEY) == app_mod._DEV_SECRET_KEY
+
+
+def test_a_configured_secret_key_is_used_verbatim():
+    configured = "a" * 64
+    assert app_mod.resolve_secret_key("postgresql://x/db", configured) == configured
+
+
+def test_resolution_is_skippable_for_tests():
+    assert app_mod.resolve_secret_key(
+        "postgresql://x/db", app_mod._DEV_SECRET_KEY, skip=True
+    ) == app_mod._DEV_SECRET_KEY
