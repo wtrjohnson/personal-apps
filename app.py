@@ -25,7 +25,7 @@ import psycopg2
 import psycopg2.extras
 import yaml
 from flask import (
-    Flask, abort, jsonify, redirect, render_template,
+    Flask, abort, g, has_request_context, jsonify, redirect, render_template,
     request, session, url_for,
 )
 
@@ -142,15 +142,74 @@ _COMMITMENT_STATUS_REMAP = {
 # DATABASE
 # --------------------------------------------------
 
+def _connect():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+
+
 @contextmanager
 def get_db() -> Generator:
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    """Yield a database connection, reusing one per request.
+
+    Every `with get_db()` used to open its own connection, and handlers use several: a
+    single home-page load cost seven to nine fresh connects, each paying a TCP and TLS
+    handshake from a serverless function. Within a request the connection is now opened
+    once, cached on `g`, and committed in teardown.
+
+    Nested blocks run inside a SAVEPOINT so each one stays independently atomic, matching
+    the old per-block behaviour. That isolation matters: helpers like log_completion
+    swallow their own errors, and without a savepoint a swallowed failure would leave the
+    shared transaction aborted and poison the rest of the request.
+
+    Outside a request context — init_db, the cron jobs, tests calling get_db directly —
+    the original open/commit/close behaviour is unchanged."""
+    if not has_request_context():
+        conn = _connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return
+
+    conn = getattr(g, "_db_conn", None)
+    if conn is None:
+        g._db_conn = conn = _connect()
+        try:
+            yield conn
+        except Exception:
+            conn.rollback()
+            raise
+        return  # commit deferred to _close_db
+
+    savepoint = "jos_sp_" + uuid.uuid4().hex[:12]
+    with conn.cursor() as cur:
+        cur.execute(f"SAVEPOINT {savepoint}")
     try:
         yield conn
-        conn.commit()
     except Exception:
-        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
         raise
+    else:
+        with conn.cursor() as cur:
+            cur.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
+@app.teardown_appcontext
+def _close_db(exc) -> None:
+    conn = g.pop("_db_conn", None)
+    if conn is None:
+        return
+    try:
+        if exc is None:
+            conn.commit()
+        else:
+            conn.rollback()
+    except Exception:
+        app.logger.exception("Failed to finalize the request transaction")
     finally:
         conn.close()
 
@@ -1601,9 +1660,11 @@ def _row_to_meeting(row: dict, task_rows: List[dict]) -> Meeting:
         reminders_open=[t["text"] for t in task_rows if t["type"] == "reminder" and not t["done"]],
         reminders_done=[t["text"] for t in task_rows if t["type"] == "reminder" and t["done"]],
         _tasks_full=[{"id": t["id"], "text": t["text"], "type": t["type"], "done": t["done"]} for t in task_rows],
-        body=row["body"] or "",
-        body_html=row["body_html"] or "",
-        mtime=row["mtime"],
+        body=row.get("body") or "",
+        # Absent on the list projection, which selects only what summary() and free-text
+        # matching read. Only the single-meeting fetch loads these.
+        body_html=row.get("body_html") or "",
+        mtime=row.get("mtime"),
         canvas_image=row.get("canvas_image"),
     )
 
@@ -1645,16 +1706,32 @@ def _task_row_to_task(row: dict, today: str) -> Task:
     )
 
 
+# Columns the list/search path actually reads. `SELECT *` here dragged body_html and
+# canvas_image — a base64 data URL per meeting — out of the database for every row, only
+# for summary() to discard both. Free-text matching still needs `body`, so that stays.
+_MEETING_LIST_COLUMNS = """
+    id, filename, file_date, raw_group, canonical_group, topic, purpose, outcome,
+    deadline, attendees, body, mtime
+"""
+
+# Likewise: building a meeting's action-item and reminder lists needs four task columns,
+# not every column on the row.
+_MEETING_TASK_COLUMNS = "id, meeting_id, text, type, done"
+
+
 def db_get_all_meetings() -> List[Meeting]:
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM meetings ORDER BY file_date DESC NULLS LAST")
+            cur.execute(
+                f"SELECT {_MEETING_LIST_COLUMNS} FROM meetings "
+                "ORDER BY file_date DESC NULLS LAST"
+            )
             meeting_rows = cur.fetchall()
             if not meeting_rows:
                 return []
             meeting_ids = [r["id"] for r in meeting_rows]
             cur.execute(
-                "SELECT * FROM tasks WHERE meeting_id = ANY(%s)",
+                f"SELECT {_MEETING_TASK_COLUMNS} FROM tasks WHERE meeting_id = ANY(%s)",
                 (meeting_ids,),
             )
             task_rows = cur.fetchall()
