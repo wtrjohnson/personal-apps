@@ -364,6 +364,34 @@ def init_db() -> None:
                 CREATE UNIQUE INDEX IF NOT EXISTS tasks_recurrence_parent_uniq
                     ON tasks (recurrence_parent_id) WHERE recurrence_parent_id IS NOT NULL
             """)
+            # ---- tasks.deadline: TEXT -> DATE ----
+            # Every deadline comparison in the app — overdue, urgency, the deadlines strip,
+            # the smart views — was a string comparison that happened to work because the
+            # values happened to be ISO-8601. Nothing enforced that, and a single non-ISO
+            # value would have sorted and compared wrong forever. Reading the column also
+            # crashed /api/scan-items, which called .isoformat() on what was still a str.
+            cur.execute("""
+                SELECT data_type FROM information_schema.columns
+                WHERE table_name = 'tasks' AND column_name = 'deadline'
+            """)
+            _deadline_col = cur.fetchone()
+            if _deadline_col and _deadline_col["data_type"] != "date":
+                # Preserve anything that isn't a clean ISO date before the cast drops it.
+                # deadline_raw is the field that already holds the user's original wording.
+                cur.execute(r"""
+                    UPDATE tasks SET deadline_raw = deadline
+                    WHERE COALESCE(deadline, '') <> ''
+                      AND deadline !~ '^\d{4}-\d{2}-\d{2}$'
+                      AND COALESCE(deadline_raw, '') = ''
+                """)
+                cur.execute(r"""
+                    ALTER TABLE tasks ALTER COLUMN deadline TYPE DATE
+                    USING (
+                        CASE WHEN deadline ~ '^\d{4}-\d{2}-\d{2}$'
+                             THEN deadline::date ELSE NULL END
+                    )
+                """)
+            cur.execute("CREATE INDEX IF NOT EXISTS tasks_deadline ON tasks (deadline)")
             cur.execute("""
                 DO $$ BEGIN
                     IF NOT EXISTS (
@@ -1317,6 +1345,21 @@ def extract_deadline(
     return None, None
 
 
+def as_iso_date(value: Optional[str]) -> Optional[str]:
+    """Return `value` if it is a real ISO calendar date, else None.
+
+    tasks.deadline is a DATE column, so an unvalidated string from a picker or an API
+    client is a DataError rather than a bad row. Callers keep the user's original wording
+    in deadline_raw, so discarding an unparseable normalized value loses nothing."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return date_cls.fromisoformat(text).isoformat()
+    except (ValueError, TypeError):
+        return None
+
+
 def _parse_trigger_text(full_text: str) -> Tuple[str, str]:
     """Split a 'FU IF <condition> → <action>' trigger line into (condition, action).
 
@@ -1675,7 +1718,10 @@ def _task_row_to_task(row: dict, today: str) -> Task:
     snoozed_raw = row.get("snoozed_until")
     snoozed_str = snoozed_raw.isoformat() if snoozed_raw else None
     done = row["done"]
-    deadline = row["deadline"]
+    # tasks.deadline is a DATE; the API and every client-side comparison speak ISO strings,
+    # so normalize at this boundary and keep the rest of the app working on ISO text.
+    deadline_val = row["deadline"]
+    deadline = deadline_val.isoformat() if deadline_val else None
     return Task(
         id=row["id"],
         text=row["text"],
@@ -1933,7 +1979,7 @@ def db_get_org_timeline(org_id: str, limit: int = 200) -> list:
         UNION ALL
         SELECT 'task_created', t.id::text, t.created_at::timestamp, t.text,
                CASE WHEN t.done THEN 'done' ELSE 'open' END,
-               t.meeting_id::text, t.priority, NULLIF(t.deadline,''), 0, 0, NULL
+               t.meeting_id::text, t.priority, t.deadline::text, 0, 0, NULL
         FROM tasks t WHERE (t.organization_id = %(org)s OR {_group_slug} = %(org)s)
 
         UNION ALL
@@ -2016,7 +2062,7 @@ def db_get_person_timeline(contact_id: str, limit: int = 200) -> list:
         UNION ALL
         SELECT 'task_created', t.id::text, t.created_at::timestamp, t.text,
                CASE WHEN t.done THEN 'done' ELSE 'open' END,
-               t.meeting_id::text, t.priority, NULLIF(t.deadline,''), 0, 0, NULL
+               t.meeting_id::text, t.priority, t.deadline::text, 0, 0, NULL
         FROM tasks t WHERE t.contact_id = %(cid)s
 
         UNION ALL
@@ -4221,7 +4267,7 @@ def api_scan_item_update(item_id):
                 if new_text is not None:
                     t_sets.append("text = %s"); t_params.append(new_text)
                 if new_due is not None:
-                    t_sets.append("deadline = %s"); t_params.append(new_due)
+                    t_sets.append("deadline = %s"); t_params.append(as_iso_date(new_due))
                 if t_sets:
                     t_params.append(task_id)
                     cur.execute(f"UPDATE tasks SET {', '.join(t_sets)} WHERE id = %s", t_params)
@@ -5106,7 +5152,8 @@ def api_edit_task():
     new_recurrence = data.get("recurrence_rule")  # dict or None (False = don't change)
 
     if deadline_direct:
-        new_deadline, new_deadline_raw = deadline_direct, deadline_direct
+        # Keep whatever the user typed in deadline_raw even when it will not parse.
+        new_deadline, new_deadline_raw = as_iso_date(deadline_direct), deadline_direct
     else:
         new_deadline, new_deadline_raw = extract_deadline(new_text)
 
@@ -5175,9 +5222,11 @@ def api_add_task():
     # (no more "@group:" / "due" tags appended into the text).
     full_text = text
     deadline, deadline_raw = extract_deadline(text, context_year=app_today().year)
-    # If deadline was passed directly (already parsed client-side), prefer it
+    # If deadline was passed directly (already parsed client-side), prefer it. It still
+    # goes through validation — the column is a DATE, so an unparseable value would be a
+    # DataError rather than a bad row — while deadline_raw keeps what was sent.
     if deadline_in and not deadline:
-        deadline = deadline_in
+        deadline = as_iso_date(deadline_in)
         deadline_raw = deadline_in
     tid = str(uuid.uuid4())
 

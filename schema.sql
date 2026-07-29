@@ -75,6 +75,20 @@ ALTER TABLE tasks
 CREATE UNIQUE INDEX IF NOT EXISTS tasks_recurrence_parent_uniq
   ON tasks (recurrence_parent_id) WHERE recurrence_parent_id IS NOT NULL;
 
+-- tasks.deadline: TEXT -> DATE. Every deadline comparison in the app was a string compare
+-- that worked only because the values happened to be ISO-8601; nothing enforced it, and
+-- reading the column crashed /api/scan-items, which called .isoformat() on a str. Values
+-- that are not clean ISO dates are copied into deadline_raw (the field that holds the
+-- user's original wording) before the cast nulls them, so nothing is lost.
+-- meetings.deadline deliberately stays TEXT: it is a free-text note, never date-compared.
+UPDATE tasks SET deadline_raw = deadline
+  WHERE COALESCE(deadline, '') <> ''
+    AND deadline !~ '^\d{4}-\d{2}-\d{2}$'
+    AND COALESCE(deadline_raw, '') = '';
+ALTER TABLE tasks ALTER COLUMN deadline TYPE DATE
+  USING (CASE WHEN deadline ~ '^\d{4}-\d{2}-\d{2}$' THEN deadline::date ELSE NULL END);
+CREATE INDEX IF NOT EXISTS tasks_deadline ON tasks (deadline);
+
 -- Tombstones for user-deleted meeting-sourced tasks (so re-import can't resurrect them).
 CREATE TABLE IF NOT EXISTS import_tombstones (
     import_key       TEXT PRIMARY KEY,
